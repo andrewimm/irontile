@@ -179,7 +179,10 @@ impl Layout {
         let areas = self.area_snapshot();
 
         let mut seen = BTreeSet::new();
-        self.outputs = outputs.into_iter().filter(|o| seen.insert(o.id)).collect();
+        let before = std::mem::replace(
+            &mut self.outputs,
+            outputs.into_iter().filter(|o| seen.insert(o.id)).collect(),
+        );
         let connected: BTreeSet<OutputId> = self.outputs.iter().map(|o| o.id).collect();
 
         let departed: Vec<OutputId> = self
@@ -210,7 +213,13 @@ impl Layout {
                 output: self.focused_output,
             });
         }
-        events.push(Event::OutputsChanged);
+        // Only when the arrangement is actually different. The compositor
+        // republishes on anything that could have moved a work area -- every
+        // commit from a bar among them -- and saying "the displays changed" to
+        // a client that redraws when it hears it is a loop that never settles.
+        if self.outputs != before {
+            events.push(Event::OutputsChanged);
+        }
         events
     }
 

@@ -7,8 +7,24 @@ license.workspace = true
 repository.workspace = true
 description = "Bar and launcher surfaces for irontile"
 
+[[bin]]
+name = "irontile-bar"
+path = "src/bin/irontile-bar.rs"
+
 [dependencies]
 irontile-ipc.workspace = true
+serde.workspace = true
+toml.workspace = true
+tiny-skia.workspace = true
+resvg.workspace = true
+usvg.workspace = true
+cosmic-text.workspace = true
+chrono.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+rustix.workspace = true
+libpulse-binding.workspace = true
 
 [lints]
 workspace = true

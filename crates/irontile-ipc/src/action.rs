@@ -45,6 +45,16 @@ pub enum Action {
     /// Re-read the configuration file.
     Reload,
     Quit,
+    /// Put the pointer at a point in the space the displays share.
+    ///
+    /// The compositor draws the pointer itself, so nothing else can move it --
+    /// which also means nothing could drive it in a test. A panel receiving a
+    /// click, or the pointer resting on one long enough for a tooltip, are both
+    /// only reachable this way.
+    WarpPointer(i32, i32),
+    /// Press and release a button where the pointer is. 1 is left, 2 middle,
+    /// 3 right, as in every other numbering of mouse buttons.
+    ClickPointer(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +162,22 @@ fn parse(input: &str) -> Result<Action, ParseError> {
                     .map_err(|_| fail(Reason::BadNumber(word.to_owned())))?,
             )
         }
+        "warp" => {
+            let x = need_number_arg(&mut argument, input, "an x coordinate")?;
+            let y = need_number_arg(&mut argument, input, "a y coordinate")?;
+            Action::WarpPointer(x, y)
+        }
+        "click" => {
+            // Left unless told otherwise, which is what a bare `click` means
+            // everywhere else.
+            match argument() {
+                None => Action::ClickPointer(1),
+                Some(word) => Action::ClickPointer(
+                    word.parse()
+                        .map_err(|_| fail(Reason::BadNumber(word.to_owned())))?,
+                ),
+            }
+        }
         "reload" => Action::Reload,
         "quit" => Action::Quit,
         other => return Err(fail(Reason::UnknownVerb(other.to_owned()))),
@@ -164,6 +190,21 @@ fn parse(input: &str) -> Result<Action, ParseError> {
         return Err(fail(Reason::TrailingInput(rest.join(" "))));
     }
     Ok(action)
+}
+
+fn need_number_arg<'a>(
+    next: &mut impl FnMut() -> Option<&'a str>,
+    input: &str,
+    what: &'static str,
+) -> Result<i32, ParseError> {
+    let word = next().ok_or_else(|| ParseError {
+        input: input.to_owned(),
+        reason: Reason::MissingArgument(what),
+    })?;
+    word.parse().map_err(|_| ParseError {
+        input: input.to_owned(),
+        reason: Reason::BadNumber(word.to_owned()),
+    })
 }
 
 fn need_direction<'a>(
@@ -243,6 +284,8 @@ impl fmt::Display for Action {
             Action::SwitchVt(n) => write!(f, "vt {n}"),
             Action::Reload => write!(f, "reload"),
             Action::Quit => write!(f, "quit"),
+            Action::WarpPointer(x, y) => write!(f, "warp {x} {y}"),
+            Action::ClickPointer(button) => write!(f, "click {button}"),
         }
     }
 }
@@ -264,6 +307,8 @@ pub const VERBS: &[&str] = &[
     "spawn <program> [args...]",
     "terminal",
     "vt <n>",
+    "warp <x> <y>",
+    "click [1|2|3]",
     "reload",
     "quit",
 ];
@@ -350,6 +395,8 @@ mod tests {
                 .replace("<direction>", "left")
                 .replace("horizontal|vertical|toggle", "vertical")
                 .replace("<n>", "1")
+                .replace("<x> <y>", "100 200")
+                .replace("[1|2|3]", "1")
                 .replace("<program> [args...]", "true");
             assert!(parse_action(&sample).is_ok(), "{sample:?} does not parse");
         }
@@ -368,6 +415,8 @@ mod tests {
             Action::Terminal,
             Action::SwitchVt(2),
             Action::SendToOutput(Direction::Left),
+            Action::WarpPointer(100, 200),
+            Action::ClickPointer(3),
             Action::Close,
             Action::Reload,
             Action::Quit,

@@ -83,6 +83,14 @@ pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
             state.running = false;
             Vec::new()
         }
+        Action::WarpPointer(x, y) => {
+            crate::input::warp(state, f64::from(*x), f64::from(*y));
+            Vec::new()
+        }
+        Action::ClickPointer(button) => {
+            crate::input::click(state, *button);
+            Vec::new()
+        }
         // The vocabulary is `#[non_exhaustive]`; an action added to the
         // protocol that this compositor does not know is a no-op rather than a
         // crash.

@@ -10,12 +10,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use irontile_ipc::{Action, parse_action};
+use irontile_ipc::parse_action;
 use irontile_layout::{Axis, Params, Size};
 use serde::Deserialize;
 
-use crate::keymap::{Keymap, parse_combo};
-use crate::theme::Theme;
+use crate::keymap::{Bind, Keymap, parse_combo};
+use crate::theme::{Paint, Theme};
 
 /// Everything the compositor reads from disk.
 #[derive(Clone, Debug)]
@@ -120,11 +120,13 @@ impl Config {
         let file: ConfigFile = toml::from_str(text).map_err(ParseFailure::Toml)?;
         let theme = file.theme.into_theme()?;
 
-        let mut keymap = if file.binds.is_empty() {
+        // Bindings are written on top of the built-in set rather than in place
+        // of it, because adding one media key should not mean restating sixty
+        // others. Removal stays expressible: a binding set to `false` is
+        // removed, and `default_binds = false` starts from nothing at all.
+        let mut keymap = if file.default_binds {
             Keymap::defaults()
         } else {
-            // Any `[binds]` table replaces the defaults outright rather than
-            // merging. Merging would make a binding impossible to remove.
             Keymap::empty()
         };
         for (key, value) in &file.binds {
@@ -132,11 +134,10 @@ impl Config {
                 key: key.clone(),
                 message,
             })?;
-            let action: Action = parse_action(value).map_err(|e| ParseFailure::Binding {
-                key: key.clone(),
-                message: e.to_string(),
-            })?;
-            keymap.bind(combo, action);
+            match parse_bind(key, value)? {
+                Some(bind) => keymap.bind(combo, bind),
+                None => keymap.unbind(&combo),
+            }
         }
 
         let startup = file
@@ -312,17 +313,38 @@ pub enum ParseFailure {
     Binding { key: String, message: String },
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 struct ConfigFile {
     theme: ThemeConfig,
     layout: LayoutConfig,
-    /// Key combination to action text. An empty table means the defaults.
-    binds: BTreeMap<String, String>,
+    /// Whether to start from the built-in bindings. Turning this off is for a
+    /// keymap written from scratch; removing one binding is `false` against
+    /// that key instead.
+    default_binds: bool,
+    /// Left as written so the forms can be told apart: a string is the action,
+    /// a table of `action` and `repeat` says what holding the key does too, and
+    /// `false` removes a binding.
+    binds: BTreeMap<String, toml::Value>,
     startup: StartupConfig,
     cursor: CursorConfig,
     #[serde(rename = "output")]
     outputs: Vec<OutputFile>,
+}
+
+impl Default for ConfigFile {
+    fn default() -> Self {
+        Self {
+            theme: ThemeConfig::default(),
+            layout: LayoutConfig::default(),
+            // A file that says nothing about bindings gets the built-in ones.
+            default_binds: true,
+            binds: BTreeMap::new(),
+            startup: StartupConfig::default(),
+            cursor: CursorConfig::default(),
+            outputs: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,8 +424,10 @@ struct StartupConfig {
 #[serde(deny_unknown_fields, default)]
 struct ThemeConfig {
     border_width: i32,
-    border_focused: String,
-    border_unfocused: String,
+    /// Left as written so both forms can be told apart: a string is one colour,
+    /// a table of `colors` and `angle` is a gradient.
+    border_focused: toml::Value,
+    border_unfocused: toml::Value,
     background: String,
     inner_gap: i32,
     outer_gap: i32,
@@ -418,8 +442,8 @@ impl Default for ThemeConfig {
         let theme = Theme::default();
         Self {
             border_width: theme.border_width,
-            border_focused: to_hex(theme.border_focused),
-            border_unfocused: to_hex(theme.border_unfocused),
+            border_focused: toml::Value::String(to_hex(theme.border_focused.stops()[0])),
+            border_unfocused: toml::Value::String(to_hex(theme.border_unfocused.stops()[0])),
             background: to_hex(theme.background),
             inner_gap: theme.inner_gap,
             outer_gap: theme.outer_gap,
@@ -442,8 +466,8 @@ impl ThemeConfig {
         let default = Theme::default();
         Ok(Theme {
             border_width: self.border_width.max(0),
-            border_focused: color("border_focused", &self.border_focused)?,
-            border_unfocused: color("border_unfocused", &self.border_unfocused)?,
+            border_focused: parse_paint("border_focused", &self.border_focused)?,
+            border_unfocused: parse_paint("border_unfocused", &self.border_unfocused)?,
             background: color("background", &self.background)?,
             inner_gap: self.inner_gap.max(0),
             outer_gap: self.outer_gap.max(0),
@@ -502,6 +526,105 @@ enum AxisName {
     Vertical,
 }
 
+/// Parses what a key does: `"focus left"`, or `{ action = "...", repeat = true }`
+/// when holding it down should keep firing.
+fn parse_bind(key: &str, value: &toml::Value) -> Result<Option<Bind>, ParseFailure> {
+    let fail = |message: String| ParseFailure::Binding {
+        key: key.to_owned(),
+        message,
+    };
+    let action =
+        |text: &str| parse_action(text).map_err(|e: irontile_ipc::ParseError| fail(e.to_string()));
+
+    match value {
+        // `false` unbinds, which is how a built-in binding is taken away
+        // without having to restate every other one.
+        toml::Value::Boolean(false) => Ok(None),
+        toml::Value::String(text) => Ok(Some(Bind::new(action(text)?))),
+        toml::Value::Table(table) => {
+            for name in table.keys() {
+                if name != "action" && name != "repeat" {
+                    return Err(fail(format!(
+                        "unknown setting {name:?}; a binding takes `action` and `repeat`"
+                    )));
+                }
+            }
+            let text = table
+                .get("action")
+                .ok_or_else(|| fail("a binding needs an `action`".into()))?
+                .as_str()
+                .ok_or_else(|| fail("`action` must be text, like \"focus left\"".into()))?;
+            let mut bind = Bind::new(action(text)?);
+            if let Some(repeat) = table.get("repeat") {
+                bind.repeat = repeat
+                    .as_bool()
+                    .ok_or_else(|| fail("`repeat` must be true or false".into()))?;
+            }
+            Ok(Some(bind))
+        }
+        other => Err(fail(format!(
+            "expected an action like \"focus left\", `false` to unbind, or a table of \
+             `action` and `repeat`, not {}",
+            other.type_str()
+        ))),
+    }
+}
+
+/// Parses what a border is painted with: `"#5c99d6"` for one colour, or
+/// `{ colors = [...], angle = 45 }` for a gradient across the window.
+///
+/// Written out by hand rather than left to a serde untagged enum, because an
+/// untagged enum reports a mistyped key as "matched no variant" and the rest of
+/// this file names the setting that is wrong.
+fn parse_paint(name: &str, value: &toml::Value) -> Result<Paint, ParseFailure> {
+    let fail = |message: String| ParseFailure::Binding {
+        key: format!("theme.{name}"),
+        message,
+    };
+    let color = |text: &str| {
+        parse_color(text).ok_or_else(|| fail(format!("{text:?} is not a colour like \"#5c99d6\"")))
+    };
+
+    match value {
+        toml::Value::String(text) => Ok(Paint::solid(color(text)?)),
+        toml::Value::Table(table) => {
+            for key in table.keys() {
+                if key != "colors" && key != "angle" {
+                    return Err(fail(format!(
+                        "unknown setting {key:?}; a gradient takes `colors` and `angle`"
+                    )));
+                }
+            }
+            let listed = table
+                .get("colors")
+                .ok_or_else(|| fail("a gradient needs `colors`".into()))?
+                .as_array()
+                .ok_or_else(|| fail("`colors` must be a list of colours".into()))?;
+            let mut stops = Vec::with_capacity(listed.len());
+            for entry in listed {
+                let text = entry
+                    .as_str()
+                    .ok_or_else(|| fail(format!("{entry} is not a colour like \"#5c99d6\"")))?;
+                stops.push(color(text)?);
+            }
+            if stops.is_empty() {
+                return Err(fail("`colors` is empty".into()));
+            }
+            let angle = match table.get("angle") {
+                None => 0.0,
+                Some(toml::Value::Float(degrees)) => *degrees as f32,
+                Some(toml::Value::Integer(degrees)) => *degrees as f32,
+                Some(_) => return Err(fail("`angle` must be a number of degrees".into())),
+            };
+            Ok(Paint::gradient(stops, angle))
+        }
+        other => Err(fail(format!(
+            "expected a colour like \"#5c99d6\" or a table of `colors` and `angle`, not {}",
+            other.type_str()
+        ))),
+    }
+}
+
 /// Parses `#rgb`, `#rrggbb` or `#rrggbbaa`.
 fn parse_color(text: &str) -> Option<[f32; 4]> {
     let hex = text.strip_prefix('#')?;
@@ -526,25 +649,38 @@ fn parse_color(text: &str) -> Option<[f32; 4]> {
     }
 }
 
+/// The form `parse_color` reads back, so alpha is written out when there is
+/// any to write.
 fn to_hex(color: [f32; 4]) -> String {
     let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!(
-        "#{:02x}{:02x}{:02x}",
+    let (r, g, b, a) = (
         byte(color[0]),
         byte(color[1]),
-        byte(color[2])
-    )
+        byte(color[2]),
+        byte(color[3]),
+    );
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
+    } else {
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+    }
 }
 
 /// Every default binding, as the text a user would write.
 pub fn default_config_text() -> String {
     let mut out = String::from("# irontile configuration\n\n[binds]\n");
-    for (combo, action) in Keymap::defaults().binds() {
-        out.push_str(&format!(
-            "{:?} = {:?}\n",
-            combo.to_string(),
-            action.to_string()
-        ));
+    for (combo, bind) in Keymap::defaults().binds() {
+        let action = bind.action.to_string();
+        // Written back in whichever form says the whole truth about it, so the
+        // output is a file that reproduces these bindings exactly.
+        if bind.repeat {
+            out.push_str(&format!(
+                "{:?} = {{ action = {action:?}, repeat = true }}\n",
+                combo.to_string()
+            ));
+        } else {
+            out.push_str(&format!("{:?} = {action:?}\n", combo.to_string()));
+        }
     }
     out
 }
@@ -572,7 +708,102 @@ mod tests {
     }
 
     #[test]
-    fn a_binds_table_replaces_the_defaults() {
+    fn a_border_is_either_one_colour_or_a_gradient() {
+        let config = Config::parse(
+            r##"
+            [theme]
+            border_focused = { colors = ["#ddbba8ee", "#c67f5fee"], angle = 45 }
+            border_unfocused = "#695959aa"
+            "##,
+        )
+        .unwrap();
+        let focused = &config.theme.border_focused;
+        assert_eq!(focused.stops().len(), 2);
+        assert_eq!(focused.angle(), 45.0);
+        assert!(!focused.is_solid());
+        assert!(config.theme.border_unfocused.is_solid());
+        assert_eq!(
+            config.theme.border_unfocused.stops()[0][3],
+            170.0 / 255.0,
+            "the alpha survives"
+        );
+    }
+
+    #[test]
+    fn a_gradient_that_is_written_wrong_names_the_setting() {
+        // The whole file works this way: an unusable line says which one it is
+        // rather than leaving a border quietly unpainted.
+        for (text, expected) in [
+            ("border_focused = { colours = [\"#fff\"] }", "colours"),
+            ("border_focused = { colors = [\"nope\"] }", "nope"),
+            ("border_focused = { angle = 45 }", "colors"),
+            (
+                "border_focused = { colors = [\"#fff\"], angle = \"up\" }",
+                "angle",
+            ),
+            ("border_focused = 45", "colour"),
+        ] {
+            let err = Config::parse(&format!("[theme]\n{text}\n")).unwrap_err();
+            let ParseFailure::Binding { key, message } = err else {
+                panic!("{text} should name the setting, not fail to parse at all");
+            };
+            assert_eq!(key, "theme.border_focused");
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_binding_may_say_what_holding_it_does() {
+        let config = Config::parse(
+            r#"
+            [binds]
+            "XF86AudioRaiseVolume" = { action = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+", repeat = true }
+            "XF86AudioMute" = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+            "Super+Ctrl+h" = { action = "resize left", repeat = false }
+            "#,
+        )
+        .unwrap();
+        let bind = |text: &str| {
+            let combo = parse_combo(text).unwrap();
+            config
+                .keymap
+                .binds()
+                .find(|(c, _)| **c == combo)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_else(|| panic!("no binding for {text}"))
+        };
+        assert!(bind("XF86AudioRaiseVolume").repeat);
+        assert!(!bind("XF86AudioMute").repeat, "a toggle fires once");
+        assert!(
+            !bind("Super+Ctrl+h").repeat,
+            "a ramp that says it does not repeat does not repeat"
+        );
+    }
+
+    #[test]
+    fn a_binding_that_is_written_wrong_names_the_key() {
+        for (text, expected) in [
+            (r#""Super+q" = { act = "close" }"#, "act"),
+            (r#""Super+q" = { repeat = true }"#, "action"),
+            (
+                r#""Super+q" = { action = "close", repeat = "yes" }"#,
+                "repeat",
+            ),
+            (r#""Super+q" = 7"#, "action"),
+            (r#""Super+q" = "nonsense""#, "nonsense"),
+        ] {
+            let err = Config::parse(&format!("[binds]\n{text}\n")).unwrap_err();
+            let ParseFailure::Binding { key, message } = err else {
+                panic!("{text} should name the key, not fail to parse at all");
+            };
+            assert_eq!(key, "Super+q");
+            assert!(message.contains(expected), "{message}");
+        }
+    }
+
+    #[test]
+    fn bindings_are_written_on_top_of_the_defaults() {
+        let defaults = Keymap::defaults().binds().count();
         let config = Config::parse(
             r#"
             [binds]
@@ -580,7 +811,36 @@ mod tests {
             "#,
         )
         .unwrap();
-        // Replacing rather than merging is what makes a default removable.
+        assert_eq!(config.keymap.binds().count(), defaults + 1);
+    }
+
+    #[test]
+    fn a_binding_can_be_taken_away_without_restating_the_rest() {
+        // Otherwise removing one default would mean copying out every other,
+        // and they would drift apart the first time a default changed.
+        let defaults = Keymap::defaults().binds().count();
+        let config = Config::parse(
+            r#"
+            [binds]
+            "Super+f" = false
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.keymap.binds().count(), defaults - 1);
+        let combo = parse_combo("Super+f").unwrap();
+        assert!(config.keymap.binds().all(|(c, _)| *c != combo));
+    }
+
+    #[test]
+    fn a_keymap_can_be_started_from_nothing() {
+        let config = Config::parse(
+            r#"
+            default_binds = false
+            [binds]
+            "Super+z" = "close"
+            "#,
+        )
+        .unwrap();
         assert_eq!(config.keymap.binds().count(), 1);
     }
 
@@ -628,7 +888,10 @@ mod tests {
         .unwrap();
         assert_eq!(config.theme.border_width, 5);
         assert_eq!(config.theme.inner_gap, 12);
-        assert_eq!(config.theme.border_focused, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            config.theme.border_focused,
+            Paint::solid([1.0, 0.0, 0.0, 1.0])
+        );
         assert!(!config.layout.smart_split);
         assert_eq!(config.layout.default_axis, Axis::Vertical);
         // Gaps configured on the theme must reach the layout engine.

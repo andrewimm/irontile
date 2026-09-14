@@ -26,7 +26,7 @@ pub struct Entry {
     /// Four strips -- top, bottom, left, right -- rather than one quad behind
     /// the window, so a gap during a resize shows background rather than
     /// border colour.
-    pub border: [SolidColorBuffer; 4],
+    pub border: Vec<SolidColorBuffer>,
 }
 
 #[derive(Debug, Default)]
@@ -49,7 +49,7 @@ impl Registry {
             id,
             Entry {
                 window,
-                border: Default::default(),
+                border: Vec::new(),
             },
         );
         self.unmapped.insert(id);

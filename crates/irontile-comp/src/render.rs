@@ -24,7 +24,7 @@ use smithay::wayland::shell::wlr_layer::Layer;
 
 use crate::registry::Registry;
 use crate::state::OutputEntry;
-use crate::theme::Theme;
+use crate::theme::{Paint, Theme};
 
 render_elements! {
     pub IrontileElement<R> where R: ImportAll + ImportMem;
@@ -198,7 +198,12 @@ where
         // Size and colour live on the buffers, kept in step by `sync_borders`,
         // so that changing either advances the commit counter damage tracking
         // reads. Passing them here instead would repaint nothing.
-        let rects = border_rects(cell, scene.theme.border_width);
+        let paint = if placement.focused {
+            &scene.theme.border_focused
+        } else {
+            &scene.theme.border_unfocused
+        };
+        let rects = border_segments(cell, scene.theme.border_width, !paint.is_solid());
         for (buffer, rect) in entry.border.iter().zip(rects) {
             out.push(IrontileElement::Border(
                 SolidColorRenderElement::from_buffer(
@@ -289,6 +294,61 @@ pub fn border_rects(cell: Rect, width: i32) -> [Rect; 4] {
     ]
 }
 
+/// How finely a gradient border is cut up.
+///
+/// Each strip becomes at most this many quads and each is filled with the
+/// gradient sampled at its own centre. A real per-pixel gradient would want a
+/// shader, and on a strip a couple of pixels thick the difference does not
+/// survive being looked at: across a full-width window these are steps of
+/// around one part in 255 per band.
+const GRADIENT_SLICES: i32 = 32;
+
+/// The quads making up a window's border.
+///
+/// The same list whether it is being sized in the global coordinate space or
+/// drawn in one display's, because every piece is measured as an offset from
+/// the cell rather than from the origin. That is what lets `sync_borders` own
+/// the buffers and the renderer place them without the two having to agree on
+/// anything but the cell's size.
+pub fn border_segments(cell: Rect, width: i32, sliced: bool) -> Vec<Rect> {
+    let strips = border_rects(cell, width);
+    if !sliced {
+        return strips.to_vec();
+    }
+    let mut out = Vec::new();
+    for strip in strips {
+        let along_x = strip.w >= strip.h;
+        let length = if along_x { strip.w } else { strip.h };
+        let pieces = length.clamp(1, GRADIENT_SLICES);
+        for i in 0..pieces {
+            // Cumulative fractions rather than a fixed step, so the pieces
+            // exactly tile the strip however the division falls out.
+            let from = (i * length) / pieces;
+            let to = ((i + 1) * length) / pieces;
+            out.push(if along_x {
+                Rect::new(strip.x + from, strip.y, to - from, strip.h)
+            } else {
+                Rect::new(strip.x, strip.y + from, strip.w, to - from)
+            });
+        }
+    }
+    out
+}
+
+/// The colour one piece of a border is filled with.
+///
+/// Sampled at the piece's own centre, measured across the whole window rather
+/// than along the strip it belongs to, so the four sides meet at the corners
+/// instead of each running through the colours on its own.
+pub fn segment_color(paint: &Paint, cell: Rect, piece: Rect) -> [f32; 4] {
+    paint.at(paint.position(
+        (piece.x - cell.x) as f32 + piece.w as f32 / 2.0,
+        (piece.y - cell.y) as f32 + piece.h as f32 / 2.0,
+        cell.w as f32,
+        cell.h as f32,
+    ))
+}
+
 /// Moves a rectangle from the global coordinate space into one display's.
 fn local(rect: Rect, origin: Point) -> Rect {
     Rect::new(rect.x - origin.x, rect.y - origin.y, rect.w, rect.h)
@@ -302,3 +362,113 @@ fn to_physical(rect: Rect, scale: Scale<f64>) -> smithay::utils::Point<i32, Phys
 /// The transform the nested backend renders with. Winit's surface is upside
 /// down relative to the GL convention smithay renders in.
 pub const NESTED_TRANSFORM: Transform = Transform::Flipped180;
+
+#[cfg(test)]
+mod tests {
+    use super::{GRADIENT_SLICES, border_rects, border_segments, segment_color};
+    use crate::theme::Paint;
+    use irontile_layout::Rect;
+
+    /// The area a ring of the given width covers, counted the long way round.
+    fn ring_area(cell: Rect, width: i32) -> i32 {
+        border_rects(cell, width).iter().map(|r| r.w * r.h).sum()
+    }
+
+    #[test]
+    fn a_solid_border_is_the_four_strips_and_nothing_more() {
+        let cell = Rect::new(10, 20, 300, 200);
+        assert_eq!(
+            border_segments(cell, 2, false),
+            border_rects(cell, 2).to_vec()
+        );
+    }
+
+    #[test]
+    fn slicing_covers_the_same_pixels_the_strips_did() {
+        // The pieces are what gets painted, so anything they fail to cover is a
+        // gap in the border and anything they cover twice is a seam.
+        let cell = Rect::new(10, 20, 301, 199);
+        let sliced = border_segments(cell, 3, true);
+        let area: i32 = sliced.iter().map(|r| r.w * r.h).sum();
+        assert_eq!(area, ring_area(cell, 3));
+
+        for strip in border_rects(cell, 3) {
+            let mut covered: Vec<&Rect> = sliced
+                .iter()
+                .filter(|r| r.w > 0 && r.h > 0 && strip.contains_rect(**r))
+                .collect();
+            covered.sort_by_key(|r| (r.x, r.y));
+            // Each piece starts exactly where the last one ended.
+            for pair in covered.windows(2) {
+                let (a, b) = (pair[0], pair[1]);
+                assert!(
+                    a.right() == b.x || a.bottom() == b.y,
+                    "{a:?} and {b:?} neither meet nor overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_piece_is_the_same_size_wherever_the_window_sits() {
+        // `sync_borders` measures in the global space and the renderer measures
+        // in one display's, and the buffers they share carry only sizes. If
+        // those two disagreed, a window on a second display would be painted
+        // with the wrong border and nothing would say so.
+        let here = border_segments(Rect::new(0, 0, 640, 480), 2, true);
+        let there = border_segments(Rect::new(1731, 407, 640, 480), 2, true);
+        let sizes = |v: &[Rect]| v.iter().map(|r| (r.w, r.h)).collect::<Vec<_>>();
+        assert_eq!(sizes(&here), sizes(&there));
+    }
+
+    #[test]
+    fn a_strip_shorter_than_the_slice_count_is_not_cut_into_empty_pieces() {
+        // Otherwise a window shrunk to nothing would still cost a full set of
+        // quads, every one of them zero pixels wide.
+        let sliced = border_segments(Rect::new(0, 0, 8, 400), 1, true);
+        let widest = sliced.iter().map(|r| r.w).max().unwrap();
+        assert!(sliced.iter().all(|r| r.w > 0 && r.h > 0), "{sliced:?}");
+        assert!(widest <= 8);
+        assert!(sliced.len() <= 4 * GRADIENT_SLICES as usize);
+    }
+
+    #[test]
+    fn a_diagonal_gradient_reaches_its_stops_at_opposite_corners() {
+        // A sign error here is the difference between a border that runs the
+        // way the configuration says and one that runs backwards, and both
+        // look deliberate.
+        let start = [1.0, 0.0, 0.0, 1.0];
+        let end = [0.0, 0.0, 1.0, 1.0];
+        let paint = Paint::gradient(vec![start, end], 45.0);
+        let cell = Rect::new(400, 300, 800, 600);
+        let pieces = border_segments(cell, 2, true);
+
+        let nearest = |x: i32, y: i32| {
+            let piece = pieces
+                .iter()
+                .min_by_key(|p| (p.center().x - x).abs() + (p.center().y - y).abs())
+                .unwrap();
+            segment_color(&paint, cell, *piece)
+        };
+        // Bottom-left is where 45 degrees starts; top-right is where it ends.
+        let low = nearest(cell.x, cell.bottom());
+        let high = nearest(cell.right(), cell.y);
+        assert!(
+            low[0] > 0.9 && low[2] < 0.1,
+            "{low:?} should be the red end"
+        );
+        assert!(
+            high[2] > 0.9 && high[0] < 0.1,
+            "{high:?} should be the blue end"
+        );
+    }
+
+    #[test]
+    fn a_solid_border_is_one_colour_on_every_side() {
+        let paint = Paint::solid([0.2, 0.4, 0.6, 1.0]);
+        let cell = Rect::new(0, 0, 640, 480);
+        for piece in border_segments(cell, 2, false) {
+            assert_eq!(segment_color(&paint, cell, piece), [0.2, 0.4, 0.6, 1.0]);
+        }
+    }
+}

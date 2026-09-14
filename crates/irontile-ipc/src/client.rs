@@ -86,6 +86,16 @@ impl Client {
         Self::connect(path)
     }
 
+    /// The socket, so a caller with its own event loop can wait on this
+    /// alongside whatever else it is waiting on.
+    ///
+    /// A bar waits on this and on its Wayland connection at the same time;
+    /// without the descriptor it would have to poll one of them.
+    pub fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd;
+        self.stream.as_fd()
+    }
+
     /// Bounds how long a call waits on a compositor that has stopped
     /// responding. Off by default, which is what a subscriber wants.
     pub fn set_timeout(&mut self, timeout: Option<Duration>) -> Result<(), ClientError> {
@@ -147,6 +157,11 @@ impl Client {
     }
 
     /// Takes the events that have already arrived, without blocking.
+    ///
+    /// This reads nothing from the socket: it returns what previous calls
+    /// happened to pick up while waiting for a reply. A caller that only ever
+    /// drains will drain an empty queue forever, whatever the compositor sends.
+    /// To wait for an event, use [`Client::next_event`], which does read.
     pub fn drain_events(&mut self) -> Vec<Event> {
         self.events.drain(..).collect()
     }

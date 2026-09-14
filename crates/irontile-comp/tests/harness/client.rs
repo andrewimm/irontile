@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
     wl_compositor::WlCompositor,
+    wl_keyboard::{self, WlKeyboard},
     wl_registry,
+    wl_seat::WlSeat,
     wl_shm::{self, WlShm},
     wl_shm_pool::WlShmPool,
     wl_surface::WlSurface,
@@ -82,12 +84,23 @@ struct Globals {
     layer_shell: Option<ZwlrLayerShellV1>,
     fractional_scale: Option<WpFractionalScaleManagerV1>,
     viewporter: Option<WpViewporter>,
+    /// In the order the compositor advertised them, which is the order it holds
+    /// its displays in.
+    outputs: Vec<wayland_client::protocol::wl_output::WlOutput>,
+    seat: Option<WlSeat>,
 }
 
 struct State {
     /// Every interface the compositor advertised, for tests that pin the
     /// protocol surface.
     advertised: Vec<String>,
+    /// The surface the compositor last gave the keyboard to, if it is one of
+    /// ours. This is how a test sees where focus actually went.
+    keyboard_focus: Option<WlSurface>,
+    /// Where the pointer is and on which of our surfaces, if any.
+    pointer: Option<(WlSurface, (f64, f64))>,
+    /// Button codes pressed, in order.
+    buttons: Vec<u32>,
     globals: Globals,
     windows: Vec<Window>,
     layers: Vec<LayerPanel>,
@@ -97,9 +110,21 @@ struct LayerPanel {
     surface: WlSurface,
     layer_surface: ZwlrLayerSurfaceV1,
     buffer: WlBuffer,
+    /// Held for as long as the panel: dropping it stops the scale reports.
+    #[allow(dead_code)]
+    fractional: Option<WpFractionalScaleV1>,
+    /// The exact scale of the display, in 120ths, once the compositor has said.
+    fractional_scale: Option<u32>,
     configures: u32,
     mapped: bool,
 }
+
+/// Which panel a fractional-scale object belongs to.
+///
+/// A type of its own rather than a bare index, so it cannot be confused with
+/// the one windows use.
+#[derive(Debug, Clone, Copy)]
+struct PanelScale(usize);
 
 /// A handle to one mapped window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,6 +162,9 @@ impl TestClient {
             queue,
             state: State {
                 advertised: Vec::new(),
+                keyboard_focus: None,
+                pointer: None,
+                buttons: Vec::new(),
                 globals: Globals::default(),
                 windows: Vec::new(),
                 layers: Vec::new(),
@@ -172,9 +200,37 @@ impl TestClient {
         &self.state.advertised
     }
 
+    /// Maps a layer surface that asks for the keyboard, as a launcher does.
+    pub fn map_launcher(&mut self, height: i32) -> LayerId {
+        self.map_top_bar_inner(height, 0, true, None)
+    }
+
     /// Maps a layer surface anchored to the top of the display, reserving
     /// `exclusive` pixels — which is what a bar does.
     pub fn map_top_bar(&mut self, height: i32, exclusive: i32) -> LayerId {
+        self.map_top_bar_inner(height, exclusive, false, None)
+    }
+
+    /// Maps a bar on a named display rather than letting the compositor choose.
+    ///
+    /// Displays are numbered in the order the compositor advertised them.
+    pub fn map_top_bar_on(&mut self, display: usize, height: i32, exclusive: i32) -> LayerId {
+        self.map_top_bar_inner(height, exclusive, false, Some(display))
+    }
+
+    /// How many displays the compositor has advertised.
+    pub fn display_count(&mut self) -> usize {
+        self.roundtrip();
+        self.state.globals.outputs.len()
+    }
+
+    fn map_top_bar_inner(
+        &mut self,
+        height: i32,
+        exclusive: i32,
+        keyboard: bool,
+        display: Option<usize>,
+    ) -> LayerId {
         let handle = self.queue.handle();
         let compositor = self
             .state
@@ -191,9 +247,17 @@ impl TestClient {
 
         let surface = compositor.create_surface(&handle, ());
         let index = self.state.layers.len();
+        let output = display.map(|n| {
+            self.state
+                .globals
+                .outputs
+                .get(n)
+                .unwrap_or_else(|| panic!("no display {n} was advertised"))
+                .clone()
+        });
         let layer_surface = layer_shell.get_layer_surface(
             &surface,
-            None,
+            output.as_ref(),
             zwlr_layer_shell_v1::Layer::Top,
             "irontile-test-bar".to_owned(),
             &handle,
@@ -206,6 +270,17 @@ impl TestClient {
                 | zwlr_layer_surface_v1::Anchor::Right,
         );
         layer_surface.set_exclusive_zone(exclusive);
+        if keyboard {
+            layer_surface.set_keyboard_interactivity(
+                zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive,
+            );
+        }
+        let fractional = self
+            .state
+            .globals
+            .fractional_scale
+            .clone()
+            .map(|manager| manager.get_fractional_scale(&surface, &handle, PanelScale(index)));
         let buffer = self.buffer();
         surface.commit();
 
@@ -213,6 +288,8 @@ impl TestClient {
             surface,
             layer_surface,
             buffer,
+            fractional,
+            fractional_scale: None,
             configures: 0,
             mapped: false,
         });
@@ -230,6 +307,48 @@ impl TestClient {
         self.roundtrip();
 
         LayerId(index)
+    }
+
+    /// Draws another frame on a layer surface, the way a bar does when the
+    /// clock ticks.
+    pub fn redraw_layer(&mut self, id: LayerId) {
+        let panel = &mut self.state.layers[id.0];
+        panel.surface.attach(Some(&panel.buffer), 0, 0);
+        panel.surface.damage(0, 0, i32::MAX, i32::MAX);
+        panel.surface.commit();
+        self.roundtrip();
+    }
+
+    /// Where the pointer is, in surface-local coordinates, and on which
+    /// surface -- or `None` if it is not on any of this client's.
+    pub fn pointer_on(&mut self) -> Option<(WlSurface, (f64, f64))> {
+        self.roundtrip();
+        self.state.pointer.clone()
+    }
+
+    /// Whether the pointer is on this panel.
+    pub fn pointer_on_layer(&mut self, id: LayerId) -> bool {
+        let surface = self.state.layers[id.0].surface.clone();
+        self.pointer_on().is_some_and(|(on, _)| on == surface)
+    }
+
+    /// Buttons pressed since the client connected, as `(code, surface)`.
+    pub fn buttons(&mut self) -> Vec<u32> {
+        self.roundtrip();
+        self.state.buttons.clone()
+    }
+
+    /// The exact scale the compositor says this panel's display is at, in
+    /// 120ths.
+    pub fn layer_fractional_scale(&mut self, id: LayerId) -> Option<u32> {
+        self.roundtrip();
+        self.state.layers[id.0].fractional_scale
+    }
+
+    /// How many times the compositor has configured a layer surface.
+    pub fn layer_configures(&mut self, id: LayerId) -> u32 {
+        self.roundtrip();
+        self.state.layers[id.0].configures
     }
 
     /// Unmaps a layer surface, which should give its reserved space back.
@@ -329,6 +448,15 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Renames a window, as a browser does when you change tab.
+    pub fn set_title(&mut self, id: WindowId, title: &str) {
+        self.state.windows[id.0]
+            .toplevel
+            .set_title(title.to_owned());
+        self.state.windows[id.0].surface.commit();
+        self.roundtrip();
+    }
+
     /// Unmaps and destroys a window.
     pub fn close_window(&mut self, id: WindowId) {
         let window = &mut self.state.windows[id.0];
@@ -349,6 +477,23 @@ impl TestClient {
     pub fn configured(&mut self, id: WindowId) -> Configured {
         self.roundtrip();
         self.state.windows[id.0].current
+    }
+
+    /// The surface the compositor has given the keyboard to, if it is one of
+    /// this client's.
+    pub fn keyboard_focus(&mut self) -> Option<WlSurface> {
+        self.roundtrip();
+        self.state.keyboard_focus.clone()
+    }
+
+    pub fn window_has_keyboard(&mut self, id: WindowId) -> bool {
+        let surface = self.state.windows[id.0].surface.clone();
+        self.keyboard_focus().as_ref() == Some(&surface)
+    }
+
+    pub fn layer_has_keyboard(&mut self, id: LayerId) -> bool {
+        let surface = self.state.layers[id.0].surface.clone();
+        self.keyboard_focus().as_ref() == Some(&surface)
     }
 
     /// Whether the compositor asked the window to close.
@@ -448,6 +593,14 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             "wl_shm" => {
                 state.globals.shm = Some(registry.bind(name, version.min(1), handle, ()));
             }
+            "wl_seat" => {
+                let seat: WlSeat = registry.bind(name, version.min(7), handle, ());
+                // Bound only to observe: nothing is ever typed and the pointer
+                // is moved by the compositor, not from here.
+                seat.get_keyboard(handle, ());
+                seat.get_pointer(handle, ());
+                state.globals.seat = Some(seat);
+            }
             "xdg_wm_base" => {
                 state.globals.wm_base = Some(registry.bind(name, version.min(5), handle, ()));
             }
@@ -464,6 +617,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             }
             "zwlr_layer_shell_v1" => {
                 state.globals.layer_shell = Some(registry.bind(name, version.min(4), handle, ()));
+            }
+            "wl_output" => {
+                state
+                    .globals
+                    .outputs
+                    .push(registry.bind(name, version.min(4), handle, ()));
             }
             _ => {}
         }
@@ -594,6 +753,29 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
     }
 }
 
+impl Dispatch<WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Enter { surface, .. } => state.keyboard_focus = Some(surface),
+            wl_keyboard::Event::Leave { surface, .. } => {
+                if state.keyboard_focus.as_ref() == Some(&surface) {
+                    state.keyboard_focus = None;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(State: ignore WlSeat);
+
 impl Dispatch<WpFractionalScaleV1, usize> for State {
     fn event(
         state: &mut Self,
@@ -608,6 +790,62 @@ impl Dispatch<WpFractionalScaleV1, usize> for State {
             // on the next ack.
             state.windows[*index].pending.fractional_scale = Some(scale);
             state.windows[*index].current.fractional_scale = Some(scale);
+        }
+    }
+}
+
+impl Dispatch<WpFractionalScaleV1, PanelScale> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        panel: &PanelScale,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            state.layers[panel.0].fractional_scale = Some(scale);
+        }
+    }
+}
+
+impl Dispatch<wayland_client::protocol::wl_pointer::WlPointer, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wayland_client::protocol::wl_pointer::WlPointer,
+        event: wayland_client::protocol::wl_pointer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_pointer::Event;
+        match event {
+            Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => state.pointer = Some((surface, (surface_x, surface_y))),
+            Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                if let Some((_, at)) = &mut state.pointer {
+                    *at = (surface_x, surface_y);
+                }
+            }
+            Event::Leave { .. } => state.pointer = None,
+            Event::Button {
+                button, state: s, ..
+            } => {
+                if s == wayland_client::WEnum::Value(
+                    wayland_client::protocol::wl_pointer::ButtonState::Pressed,
+                ) {
+                    state.buttons.push(button);
+                }
+            }
+            _ => {}
         }
     }
 }

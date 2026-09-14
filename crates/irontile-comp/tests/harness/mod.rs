@@ -23,6 +23,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct Compositor {
     child: Child,
     pub client: Client,
+    control_socket: String,
     wayland_socket: String,
     runtime: std::path::PathBuf,
 }
@@ -80,6 +81,7 @@ impl Compositor {
         let mut compositor = Compositor {
             child,
             client,
+            control_socket: socket,
             wayland_socket: wayland,
             runtime,
         };
@@ -92,6 +94,11 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// Opens another control connection, for tests that need a second one.
+    pub fn connect_control(&self) -> Client {
+        Client::connect(&self.control_socket).expect("could not reach the control socket")
+    }
+
     /// Connects a real Wayland client to this compositor.
     pub fn connect_client(&self) -> TestClient {
         TestClient::connect(&self.wayland_socket, &self.runtime)

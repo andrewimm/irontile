@@ -6,12 +6,14 @@ use smithay::backend::input::{
     AbsolutePositionEvent, Axis as InputAxis, AxisSource, ButtonState, Event, InputBackend,
     InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
-use smithay::input::keyboard::{FilterResult, xkb};
+use smithay::input::keyboard::{FilterResult, Keycode, xkb};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
+use std::time::Duration;
 
 use crate::action;
-use crate::state::{Irontile, ResizeDrag};
+use crate::state::{Irontile, KeyRepeat, REPEAT_DELAY_MS, REPEAT_RATE_HZ, ResizeDrag};
 
 /// Linux input event code for the right mouse button.
 const BTN_RIGHT: u32 = 0x111;
@@ -60,7 +62,7 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
     let code = event.key_code();
     let key_state = event.state();
 
-    let action = keyboard.input(
+    let bind = keyboard.input(
         state,
         code,
         key_state,
@@ -76,7 +78,7 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
             let sym = handle
                 .raw_latin_sym_or_raw_current_sym()
                 .unwrap_or_else(|| handle.modified_sym());
-            let matched = state.config.keymap.action_for(mods, sym).cloned();
+            let matched = state.config.keymap.bind_for(mods, sym).cloned();
 
             // Only keys that could be a binding are logged, and never plain
             // text. Logging every keysym would write everything the user types
@@ -93,27 +95,111 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
                     ctrl = mods.ctrl,
                     alt = mods.alt,
                     shift = mods.shift,
-                    action = ?matched,
+                    action = ?matched.as_ref().map(|bind| &bind.action),
                     "binding"
                 );
             }
 
-            match state.config.keymap.action_for(mods, sym) {
+            match matched {
                 // Intercepting means the client never sees the key, which is what
                 // keeps a compositor binding from also typing into the window.
-                Some(action) => FilterResult::Intercept(action.clone()),
+                Some(bind) => FilterResult::Intercept(bind),
                 None => FilterResult::Forward,
             }
         },
     );
 
-    if let Some(action) = action {
-        perform(state, &action);
+    // A release ends whatever it was holding open; a press of anything else
+    // leaves it alone, so rolling onto another key does not stop the ramp.
+    if key_state != smithay::backend::input::KeyState::Pressed {
+        stop_repeat(state, Some(code));
     }
+
+    if let Some(bind) = bind {
+        // A new binding takes over from whatever was repeating. Two ramps at
+        // once is never what was meant, and the key holding the old one open
+        // may be one whose release is never seen.
+        stop_repeat(state, None);
+        perform(state, &bind.action);
+        if bind.repeat {
+            start_repeat(state, code, bind.action);
+        }
+    }
+}
+
+/// Starts a held binding firing on its own.
+///
+/// Key repeat for a binding has to happen here: the client that would normally
+/// do its own repeating never sees an intercepted key, and the input backend
+/// reports a press and a release and nothing in between.
+fn start_repeat(state: &mut Irontile, code: Keycode, action: Action) {
+    let rate = Duration::from_secs_f64(1.0 / f64::from(REPEAT_RATE_HZ.max(1)));
+    let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY_MS.max(0) as u64));
+    let repeated = action.clone();
+    let token = state.loop_handle.insert_source(timer, move |_, _, state| {
+        action::perform(state, &repeated);
+        TimeoutAction::ToDuration(rate)
+    });
+    match token {
+        Ok(token) => state.repeat = Some(KeyRepeat { code, token }),
+        Err(err) => tracing::warn!(?err, "could not start a repeating binding"),
+    }
+}
+
+/// Stops the repeating binding, if `code` is the key holding it open -- or
+/// unconditionally when no key is named.
+fn stop_repeat(state: &mut Irontile, code: Option<Keycode>) {
+    let Some(repeat) = &state.repeat else {
+        return;
+    };
+    if code.is_some_and(|code| code != repeat.code) {
+        return;
+    }
+    let token = repeat.token;
+    state.repeat = None;
+    state.loop_handle.remove(token);
 }
 
 fn perform(state: &mut Irontile, action: &Action) {
     action::perform(state, action);
+}
+
+/// Puts the pointer somewhere, as though it had been moved there.
+///
+/// The compositor draws the pointer, so it is the only thing that can move it.
+/// Everything a pointer reaches -- a panel's buttons, the pointer resting on
+/// one -- is otherwise only reachable by hand, which is how a bar that received
+/// no pointer events at all went unnoticed.
+pub fn warp(state: &mut Irontile, x: f64, y: f64) {
+    let at = clamp_to_displays(state, Point::from((x, y)));
+    pointer_motion(state, at, state.start_time.elapsed().as_millis() as u32);
+}
+
+/// Presses and releases a button where the pointer is.
+pub fn click(state: &mut Irontile, button: u32) {
+    // The numbering people use for mouse buttons, mapped onto the kernel's.
+    let code = match button {
+        2 => 0x112,
+        3 => BTN_RIGHT,
+        _ => 0x110,
+    };
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    let time = state.start_time.elapsed().as_millis() as u32;
+    for pressed in [ButtonState::Pressed, ButtonState::Released] {
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.button(
+            state,
+            &ButtonEvent {
+                button: code,
+                state: pressed,
+                serial,
+                time,
+            },
+        );
+        pointer.frame(state);
+    }
 }
 
 /// Whether a keypress may be written to the log.

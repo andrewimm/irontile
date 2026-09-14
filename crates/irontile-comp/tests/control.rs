@@ -193,3 +193,44 @@ fn the_event_stream_reports_what_changed() {
 fn right() -> irontile_layout::Direction {
     irontile_layout::Direction::Right
 }
+
+#[test]
+fn a_subscriber_that_falls_behind_is_waited_for_rather_than_cut_off() {
+    // A bar repainting two displays takes longer than the compositor takes to
+    // report the next desktop switch, so a burst fills its socket. Writing
+    // anyway would put half a frame into the stream and desynchronize it for
+    // good; giving up on it means a bar disappears for being one repaint
+    // behind. It has to be held instead.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut idle = compositor.connect_control();
+    idle.subscribe().expect("could not subscribe");
+    idle.set_timeout(Some(std::time::Duration::from_millis(250)))
+        .expect("could not set a timeout");
+
+    // Far more than a socket buffer will hold, with nothing reading them.
+    for n in 0..400 {
+        compositor
+            .client
+            .action(Action::Workspace(n % 9 + 1))
+            .expect("the compositor stopped answering");
+    }
+
+    // It should still be there, and still have the backlog to say.
+    let mut received = 0;
+    while idle.next_event().is_ok() {
+        received += 1;
+    }
+    assert!(
+        received > 0,
+        "the subscriber was dropped for being slow instead of waited for"
+    );
+
+    // And once it has caught up the connection is an ordinary one again, which
+    // is what says the stream never lost its framing.
+    idle.set_timeout(Some(std::time::Duration::from_secs(10)))
+        .expect("could not set a timeout");
+    assert!(
+        matches!(idle.query(Query::Outputs), Ok(ResponsePayload::Outputs(_))),
+        "the connection came out of the burst still speaking the protocol"
+    );
+}

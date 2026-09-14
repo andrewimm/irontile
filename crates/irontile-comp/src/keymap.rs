@@ -88,10 +88,43 @@ pub fn parse_combo(text: &str) -> Result<KeyCombo, String> {
     Ok(combo)
 }
 
+/// What a key does, and what holding it down does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bind {
+    pub action: Action,
+    /// Whether holding the key down keeps firing it.
+    ///
+    /// Some actions are ramps rather than switches -- a volume key, a
+    /// brightness key, a resize -- and holding one is how you ask for more of
+    /// it. Everything else fires once however long it is held, because
+    /// repeating "close the window" or "switch to desktop 3" means nothing.
+    pub repeat: bool,
+}
+
+impl Bind {
+    /// A binding that repeats if the action is the kind that should.
+    pub fn new(action: Action) -> Self {
+        Bind {
+            repeat: ramps(&action),
+            action,
+        }
+    }
+}
+
+/// Whether an action is a ramp, and so repeats while its key is held unless the
+/// binding says otherwise.
+///
+/// Only actions the compositor performs itself can be judged this way. A
+/// `spawn` is opaque -- `wpctl set-volume 5%+` is a ramp and `firefox` is
+/// emphatically not -- so it repeats only when a binding asks it to.
+fn ramps(action: &Action) -> bool {
+    matches!(action, Action::Resize(_))
+}
+
 /// The bindings in force.
 #[derive(Clone, Debug, Default)]
 pub struct Keymap {
-    binds: Vec<(KeyCombo, Action)>,
+    binds: Vec<(KeyCombo, Bind)>,
 }
 
 impl Keymap {
@@ -108,28 +141,37 @@ impl Keymap {
             // test below keeps this from ever panicking in a release.
             let combo = parse_combo(combo).expect("a default binding must parse");
             let action = parse_action(action).expect("a default action must parse");
-            keymap.bind(combo, action);
+            keymap.bind(combo, Bind::new(action));
         }
         keymap
     }
 
     /// Adds a binding, replacing any existing one for the same combination.
-    pub fn bind(&mut self, combo: KeyCombo, action: Action) {
+    pub fn bind(&mut self, combo: KeyCombo, bind: Bind) {
         match self.binds.iter_mut().find(|(c, _)| *c == combo) {
-            Some(slot) => slot.1 = action,
-            None => self.binds.push((combo, action)),
+            Some(slot) => slot.1 = bind,
+            None => self.binds.push((combo, bind)),
         }
     }
 
-    pub fn action_for(&self, mods: &ModifiersState, keysym: Keysym) -> Option<&Action> {
+    /// Removes the binding for a combination, if there is one.
+    pub fn unbind(&mut self, combo: &KeyCombo) {
+        self.binds.retain(|(c, _)| c != combo);
+    }
+
+    pub fn bind_for(&self, mods: &ModifiersState, keysym: Keysym) -> Option<&Bind> {
         self.binds
             .iter()
             .find(|(combo, _)| combo.matches(mods, keysym))
-            .map(|(_, action)| action)
+            .map(|(_, bind)| bind)
     }
 
-    pub fn binds(&self) -> impl Iterator<Item = (&KeyCombo, &Action)> {
-        self.binds.iter().map(|(c, a)| (c, a))
+    pub fn action_for(&self, mods: &ModifiersState, keysym: Keysym) -> Option<&Action> {
+        self.bind_for(mods, keysym).map(|bind| &bind.action)
+    }
+
+    pub fn binds(&self) -> impl Iterator<Item = (&KeyCombo, &Bind)> {
+        self.binds.iter().map(|(c, b)| (c, b))
     }
 }
 
@@ -267,11 +309,63 @@ mod tests {
     }
 
     #[test]
+    fn a_media_key_is_a_binding_with_no_modifier_at_all() {
+        // Laptop media keys arrive bare. If a binding needed a modifier there
+        // would be no way to write one for them at all.
+        for name in [
+            "XF86AudioRaiseVolume",
+            "XF86AudioLowerVolume",
+            "XF86AudioMute",
+            "XF86AudioMicMute",
+            "XF86MonBrightnessUp",
+            "XF86MonBrightnessDown",
+            "XF86AudioPlay",
+            "XF86AudioNext",
+            "XF86AudioPrev",
+        ] {
+            let combo = parse_combo(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!combo.logo && !combo.shift && !combo.ctrl && !combo.alt);
+            assert_eq!(combo.to_string(), name, "it prints back as it was written");
+        }
+    }
+
+    #[test]
+    fn a_bare_key_binding_matches_only_when_nothing_is_held() {
+        let mut keymap = Keymap::empty();
+        let combo = parse_combo("XF86AudioMute").unwrap();
+        keymap.bind(combo, Bind::new(Action::Close));
+        let sym = combo.keysym;
+        assert!(
+            keymap
+                .bind_for(&mods(false, false, false, false), sym)
+                .is_some()
+        );
+        // Holding something is a different binding, not this one.
+        assert!(
+            keymap
+                .bind_for(&mods(true, false, false, false), sym)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_ramp_repeats_by_default_and_a_switch_does_not() {
+        // Holding a resize key should keep resizing; holding "close the window"
+        // should not keep closing windows.
+        assert!(Bind::new(Action::Resize(Direction::Left)).repeat);
+        assert!(!Bind::new(Action::Close).repeat);
+        assert!(!Bind::new(Action::Workspace(3)).repeat);
+        // A spawn is opaque -- it may be a volume step or it may be a browser
+        // -- so it only repeats when a binding says so.
+        assert!(!Bind::new(Action::Spawn(vec!["wpctl".into()])).repeat);
+    }
+
+    #[test]
     fn rebinding_replaces_rather_than_shadows() {
         let mut keymap = Keymap::defaults();
         let before = keymap.binds().count();
         let combo = parse_combo("Super+h").unwrap();
-        keymap.bind(combo, Action::Close);
+        keymap.bind(combo, Bind::new(Action::Close));
         assert_eq!(keymap.binds().count(), before);
         let h = xkb::keysym_from_name("h", xkb::KEYSYM_CASE_INSENSITIVE);
         assert_eq!(

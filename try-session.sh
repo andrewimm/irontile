@@ -15,6 +15,15 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+# The bar is a separate binary, started from [startup]. A configuration naming
+# one that was never built would leave the session bare with nothing saying
+# why, so check for it here rather than in the log afterwards.
+if grep -q 'irontile-bar' "${XDG_CONFIG_HOME:-$HOME/.config}/irontile/irontile.toml" 2>/dev/null \
+    && [ ! -x "$HERE/target/debug/irontile-bar" ]; then
+    echo "your config starts the bar: cargo build -p irontile-ui" >&2
+    exit 1
+fi
+
 # Pick a terminal to start with. A compositor showing no windows and a
 # compositor that is failing to draw look identical, so the run needs something
 # on screen that is not the background colour.

@@ -27,7 +27,24 @@ struct Peer {
     /// Set to the id of a `Subscribe` request once one arrives, so pushed
     /// events carry the id the subscriber is expecting.
     subscription: Option<u64>,
+    /// Bytes written for this peer that its socket would not take yet.
+    ///
+    /// The socket is not blocking, so a burst of events can fill it while a
+    /// subscriber is busy drawing the last one. Writing anyway gets a partial
+    /// frame into the stream and desynchronizes the protocol for good, and
+    /// giving up on the peer means a bar that fell one repaint behind
+    /// disappears. Holding the remainder until the socket drains is the only
+    /// answer that is both correct and survivable.
+    outbox: Vec<u8>,
 }
+
+/// How much undelivered event traffic a subscriber may accumulate before it is
+/// treated as gone rather than as busy.
+///
+/// A client that has stopped reading entirely would otherwise grow this without
+/// limit, and the compositor is the wrong place to store an unbounded amount of
+/// anything on a client's behalf.
+const MAX_OUTBOX: usize = 1 << 20;
 
 /// Connections, shared between the listener source and the per-peer sources.
 #[derive(Debug, Default)]
@@ -46,14 +63,40 @@ impl Peers {
             let Some(id) = peer.subscription else {
                 return true;
             };
-            events.iter().all(|event| {
+            for event in events {
                 let response = Response {
                     id,
                     payload: ResponsePayload::Event(*event),
                 };
-                write_message(&mut peer.stream, &response).is_ok()
-            })
+                // Into the outbox first, so a frame is either queued whole or
+                // not at all; the socket never sees half of one.
+                if write_message(&mut peer.outbox, &response).is_err() {
+                    return false;
+                }
+            }
+            peer.flush()
         });
+    }
+}
+
+impl Peer {
+    /// Pushes as much of the outbox as the socket will take.
+    ///
+    /// Returns whether the peer is still worth keeping.
+    fn flush(&mut self) -> bool {
+        while !self.outbox.is_empty() {
+            match self.stream.write(&self.outbox) {
+                Ok(0) => return false,
+                Ok(n) => {
+                    self.outbox.drain(..n);
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                // Busy, not broken. The rest goes out on the next attempt.
+                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                Err(_) => return false,
+            }
+        }
+        self.outbox.len() <= MAX_OUTBOX
     }
 }
 
@@ -146,6 +189,7 @@ fn accept(handle: &LoopHandle<'static, Irontile>, state: &mut Irontile, stream: 
             stream,
             decoder: Decoder::new(),
             subscription: None,
+            outbox: Vec::new(),
         },
     );
 
@@ -177,6 +221,15 @@ enum Peered {
 }
 
 fn pump(state: &mut Irontile, id: u64, source: &UnixStream) -> Peered {
+    // A peer that is readable has been running, so it is worth another try at
+    // whatever would not fit last time.
+    if let Some(peer) = state.peers.peers.get_mut(&id)
+        && !peer.outbox.is_empty()
+        && !peer.flush()
+    {
+        return Peered::Disconnected;
+    }
+
     let mut chunk = [0u8; 8192];
     let mut reader = source;
     loop {

@@ -110,8 +110,8 @@ session down. `irontile --print-config` writes out the defaults.
 ```toml
 [theme]
 border_width = 2
-border_focused = "#5c99d6"
-border_unfocused = "#292b33"
+border_focused = { colors = ["#ddbba8ee", "#c67f5fee"], angle = 45 }
+border_unfocused = "#695959aa"
 background = "#121217"
 inner_gap = 4
 outer_gap = 4
@@ -142,22 +142,37 @@ default_axis = "horizontal"
 reap_empty_workspaces = true
 focus_follows_move = true
 
-# A [binds] table replaces the defaults outright, so a binding can be removed.
+# Written on top of the built-in bindings rather than in place of them, so
+# adding one key does not mean restating sixty. `default_binds = false` at the
+# top level starts from nothing instead.
 [binds]
 "Super+h" = "focus left"
-"Super+Shift+h" = "move left"
-"Super+Ctrl+h" = "resize left"
-"Super+1" = "workspace 1"
 "Super+Return" = "terminal"
-"Super+Shift+e" = "quit"
+"Super+f" = false        # take away a built-in binding
+
+# A table says what holding the key down does. Ramps -- volume, brightness, a
+# resize -- keep going; everything else fires once however long it is held.
+"XF86AudioRaiseVolume" = { action = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+", repeat = true }
+"XF86AudioMute" = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 ```
 
-Key names are xkb keysyms, so anything `xkbcli` prints works. Unknown settings
-and unparseable bindings are errors naming the line, not silent no-ops.
+Key names are xkb keysyms, so anything `xkbcli` prints works, including the
+`XF86` media keys a laptop sends. A binding needs no modifier, which is what
+makes those expressible at all. Unknown settings and unparseable bindings are
+errors naming the line, not silent no-ops.
+
+Key repeat for a binding is the compositor's own job: an intercepted key never
+reaches the client that would normally do the repeating, and the input backend
+reports a press and a release with nothing in between. A held binding fires on
+a timer at the same delay and rate clients are told to use for typing, so a held
+binding and a held letter feel the same. `resize` repeats by default because it
+is a ramp; a `spawn` is opaque -- `wpctl set-volume 5%+` is a ramp and `firefox`
+is emphatically not -- so it repeats only when the binding says to.
 
 ### Bindings
 
-All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
+Everything built in is behind Super. Directions are `h`/`j`/`k`/`l` or the
+arrow keys.
 
 | Binding | Action |
 | --- | --- |
@@ -179,6 +194,187 @@ All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
 | `Super` `Shift` + `E` | Quit |
 | `Super` + right-drag | Resize; the edges nearest where the drag started follow the pointer |
 
+`irontilectl warp <x> <y>` puts the pointer somewhere and `irontilectl click
+[1|2|3]` presses a button where it is. The compositor draws the pointer, so it
+is the only thing that can move it -- which also means nothing else could drive
+one in a test. Everything a pointer reaches is otherwise reachable only by hand,
+which is how a bar that received no pointer events at all went unnoticed.
+
+## Bar
+
+`irontile-bar` is an ordinary layer-shell client. It opens one bar per display,
+reserves an exclusive zone so windows tile below it, and reads the compositor
+over the control socket -- so it is not privileged, and killing it leaves the
+session running. Start it from `[startup]`.
+
+It is drawn in software, with tiny-skia for the geometry and cosmic-text for
+the text. A bar redraws a few hundred pixels a second at most; a GPU context
+per display to do that would cost more than it saved.
+
+Configuration is TOML at `$XDG_CONFIG_HOME/irontile/bar.toml`, shaped to follow
+waybar because that is what people are porting from: three regions naming
+modules, and a table per module carrying its format string, icons and
+thresholds. `--dump PATH` renders one bar to a PNG without a compositor, which
+is how a configuration is checked without starting a session.
+
+```toml
+left = ["window"]
+center = ["workspaces"]
+right = ["cpu", "battery", "clock"]
+
+[modules.cpu]
+type = "command"
+format = "{}% {icon}"
+icons = ["computer-symbolic"]
+color = "#d1c6b4"
+warning = 80
+critical = 95
+interval = 2
+command = "..."        # anything that prints a number
+```
+
+Module types are `workspaces`, `window`, `clock`, `battery`, `volume`,
+`network`, `backlight` and `command`. Defining any module of your own replaces
+the built-in set, so a region naming something with no table is an error at load
+time rather than a silently missing part of the bar.
+
+**Everything a bar draws is in buffer pixels; the configuration is in logical
+ones.** Height, padding, icons, the accent line and the text size are each the
+configured number times the display's scale. Text is the one rasterized
+elsewhere, so it is the one that can be left behind -- and text alone staying
+the same number of pixels in a larger buffer reads as the font having shrunk.
+
+**A bar draws at the display's real scale.** It binds `fractional-scale` to
+learn the exact number and `viewporter` to say how large the result is meant to
+look, then renders a buffer of `logical x scale` pixels and sets the viewport
+destination to the logical size. On a 1.3333 panel that is a buffer exactly as
+wide as the panel is -- nothing resampled, which is what text needs. Where the
+compositor offers no viewporter there is no way to express a fraction, so the
+whole-number `preferred_buffer_scale` is used with `set_buffer_scale` instead.
+
+**A panel is told which display it is on.** A layer surface belongs to a display
+outright rather than through a placement, so it was the one kind of surface that
+was never told anything: it asked what scale to draw at, got the focused
+display's answer, and on a second monitor that is the wrong one.
+
+**A bar reuses two buffers and never makes a third.** A buffer handed to the
+compositor belongs to the compositor until it says otherwise, so it can neither
+be overwritten nor thrown away; making a new one per frame means the compositor
+holds every frame the bar has ever drawn. That is invisible while a bar redraws
+once a second and fatal when something makes it redraw three hundred times a
+second, which is how it was found.
+
+**Nothing tells a client that something changed unless it did.** The compositor
+republishes the display arrangement on anything that might have moved a work
+area, and a bar's every commit is one of those -- so `reconfigure_outputs`
+announces a change only when the arrangement is actually different, and a layer
+surface is reconfigured only when its configuration is. Either one on its own is
+a loop: the bar redraws because it just drew, as fast as the machine allows.
+
+**A subscriber that falls behind is waited for, not cut off.** Events are
+written into a per-peer outbox and pushed out as the socket takes them. Writing
+to a full non-blocking socket puts half a frame into the stream and
+desynchronizes it permanently; dropping the peer instead means a bar disappears
+for being one repaint behind. A peer that stops reading entirely is eventually
+let go, because the compositor is the wrong place to store an unbounded amount
+of anything on a client's behalf.
+
+**The readings come from the machine, not from other programs.** A battery and
+a backlight are files in sysfs; a network link is `/sys/class/net` plus
+`/proc/net/wireless` for signal, reported as a share of the seventy the wireless
+extensions define. Volume is the one with no file behind it, so it holds a
+PulseAudio connection -- which is what `pipewire-pulse` answers -- on a thread
+of its own, and writes to a pipe the bar polls alongside the Wayland and control
+sockets. That is what makes pressing a volume key show up at once rather than
+whenever the next tick comes round. A machine with no sound server draws no
+volume module rather than failing.
+
+States that are not levels get their own format: `format_muted` for an output
+that is muted, and `format_wifi` / `format_ethernet` / `format_disconnected` for
+a link, because the three have nothing to say in common -- a wired link has no
+signal and one that is down has no interface worth naming.
+
+**Icons are named, not encoded.** They come from the icon theme by their
+freedesktop names -- `battery-good-symbolic`, `network-wired-symbolic` -- and
+are rasterized from SVG at the display's scale. An icon font addresses glyphs
+by private-use codepoint, which the font is free to renumber in its next
+release, and then every icon on the bar is something else. A name does not move.
+`icon_path` points at a directory of `<name>.svg` files searched before the
+theme, for icons of your own.
+
+`icons` is an array chosen by where a value falls between 0 and 100, so five
+icons cover a battery in fifths. Where the icon depends on something that is
+not a percentage -- muted, or which kind of link is up -- a command can print
+`{icon:name}` itself and the bar resolves it like any other.
+
+A module may set its own `color` and `background`, the way a per-widget rule in
+a stylesheet does, and again per state with `color_warning`,
+`background_critical`, `color_charging` and so on. Only the pair naming the
+state the module is in applies, so a plain `color` chosen for looks still gives
+way to the bar's `warning` when a threshold is crossed -- that colour is the
+message. Naming `color_warning` is what makes overriding it deliberate.
+
+```toml
+[modules.battery]
+type = "battery"
+color = "#d1c6b4"
+color_charging = "#7ab972"       # on the charger, whatever the level
+color_critical = "#d1c6b4"       # the field says it, so leave the text alone
+background_critical = "#c65f5f"
+warning = 30
+critical = 15
+```
+
+Each bar picks out the desktop on **its own** display rather than the one
+holding the keyboard, since with two monitors only one desktop is focused
+globally and every other bar would have nothing marked at all.
+
+**A module can say a second thing.** `format_alt` is swapped in when the module
+is clicked and back on the next click -- an address rather than an icon, a date
+rather than a time. While it is showing, the formats for particular states give
+way to it, because asking a network module for the address means the address,
+connected by wire or not. A module that names an `on_click` keeps that instead:
+a button can only do one thing, and the one written down wins over the one
+implied.
+
+**Panels are under the pointer too.** What is under a point is looked for in
+the order things are drawn: overlay and top panels, then windows, then the
+panels below them. Leaving the panels out means a bar receives no pointer events
+at all -- not a click on a desktop button, not the pointer resting on a module,
+not even an enter -- and nothing says so.
+
+**A tooltip is a surface of its own.** It has to hang below the bar into the
+desktop, and a bar tall enough to contain one would either swallow clicks meant
+for the window underneath or need a hole cut in it. It takes no input at all,
+because a tooltip that took the pointer would take it off the module it belongs
+to -- which would hide the tooltip, which would give the pointer back.
+
+```toml
+[tooltip]
+delay_ms = 400           # how long the pointer must rest
+background = "#1b1918"
+foreground = "#d1c6b4"
+border = "#413c3a"
+border_width = 1
+padding = 8
+gap = 2                  # between the bar and the tooltip
+# font_size = 13         # the bar's, unless you say otherwise
+
+[modules.network]
+type = "network"
+format_wifi = "{icon}"
+format_alt = "{ifname} {signal}%"
+tooltip = "{ifname}\nsignal {signal}%"
+on_click_right = "nm-connection-editor"
+```
+
+A tooltip takes the same placeholders as the module's own format and may run to
+several lines; the clock's are strftime, like its format. `--dump PATH --tooltip
+TEXT` renders one without a compositor, the same way `--dump` alone renders a
+bar.
+
+Not yet implemented: a system tray (SNI over D-Bus).
+
 ## Protocols
 
 | Protocol | Notes |
@@ -190,7 +386,7 @@ All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
 | `wl_data_device`, `primary-selection` | Clipboard and middle-click paste |
 | `cursor-shape` | Clients name a cursor and the compositor supplies the image, from an XCursor theme |
 | `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
-| `fractional-scale`, `viewporter` | A client is told the exact scale of the display it is on, so it can render at 1.5x rather than at 2x and be resampled down. The two go together: without viewporter there is no way to say how large a 1.5x buffer should appear |
+| `fractional-scale`, `viewporter` | A client is told the exact scale of the display it is on, so it can render at 1.5x rather than at 2x and be resampled down. The two go together: without viewporter there is no way to say how large a 1.5x buffer should appear. Layer surfaces are told too, which is what keeps a bar's text sharp |
 
 The pointer is drawn by the compositor, because on real hardware nothing else
 will. A client that supplies its own cursor surface gets that; one that names a
@@ -272,6 +468,23 @@ returns the entire engine state, which deserializes into a real `Layout`, so a
 test can assert on the tree or call `validate()` on it without the compositor
 growing a reporting API of its own. Combined with the headless backend, that is
 how display arrangement and hotplug are covered end to end.
+
+**A border may be a gradient, and it is measured across the window.** A colour
+is either one `"#rrggbbaa"` or a table of `colors` and an `angle`, which is the
+shape the thing being replaced already used. The angle is CSS's -- zero points
+up, and it turns clockwise -- so 45 runs from the bottom-left corner to the
+top-right, and the four sides meet at the corners rather than each running
+through the colours on its own. It is drawn as a run of solid quads, each
+filled with the gradient at its own centre, because a per-pixel gradient would
+want a shader of its own and on a strip two pixels thick the difference does
+not survive being looked at.
+
+**Colours are held straight and premultiplied on the way out.** Interpolating
+two half-transparent stops has to happen before the multiply or the result is
+pulled toward whichever end is more opaque; the renderer blends assuming
+premultiplied, so handing it a straight colour paints a see-through border far
+too bright. At full alpha the two are identical, which is why this is the kind
+of mistake that only appears the first time someone writes one.
 
 **A border is a border, not a backdrop.** It is drawn as four strips around a
 window rather than a filled quad behind one. The difference shows only while a

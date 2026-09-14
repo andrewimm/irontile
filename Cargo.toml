@@ -18,6 +18,7 @@ repository = "https://github.com/andrew/irontile"
 [workspace.dependencies]
 irontile-layout = { path = "crates/irontile-layout", version = "0.1.0" }
 irontile-ipc = { path = "crates/irontile-ipc", version = "0.1.0" }
+libpulse-binding = "2.30"
 serde = { version = "1", features = ["derive"] }
 smithay = { version = "0.7", default-features = false, features = [
     "backend_winit",
@@ -35,14 +36,19 @@ anyhow = "1"
 toml = "0.9"
 libc = "0.2"
 xcursor = "0.3"
+tiny-skia = "0.12"
+resvg = { version = "0.48", default-features = false }
+usvg = { version = "0.48", default-features = false }
+cosmic-text = "0.19"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1"
 proptest = "1"
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-rustix = { version = "1", features = ["shm", "mm"] }
+rustix = { version = "1", features = ["shm", "mm", "event", "time", "pipe"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

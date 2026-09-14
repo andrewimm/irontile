@@ -1,7 +1,7 @@
 //! Multi-display behaviour: arrangement, desktop transfer, and hotplug.
 
 use irontile_layout::{
-    Command, Config, Direction, InsertTarget, Layout, Output, OutputId, Rect, WindowId,
+    Command, Config, Direction, Event, InsertTarget, Layout, Output, OutputId, Rect, WindowId,
     WorkspaceId, dispatch, frame,
 };
 
@@ -425,4 +425,35 @@ fn clamping_with_no_displays_is_a_no_op() {
     let layout = Layout::new(Config::default());
     let point = irontile_layout::Point::new(10, 20);
     assert_eq!(layout.clamp_to_outputs(point), point);
+}
+
+#[test]
+fn republishing_the_same_arrangement_announces_nothing() {
+    // The compositor republishes on anything that could have moved a work area,
+    // and a bar's every commit is one of those. A client that redraws when it
+    // hears "the displays changed" would then redraw because it just drew, and
+    // the two would chase each other for as long as the session lasted.
+    let mut layout = two_displays();
+    let events = layout.reconfigure_outputs(vec![left(), right()]);
+    assert!(
+        events.is_empty(),
+        "nothing changed, so there is nothing to say: {events:?}"
+    );
+}
+
+#[test]
+fn a_work_area_that_actually_moves_is_announced() {
+    // The other half of it: the quiet case must not be bought by going quiet
+    // when a bar really does appear.
+    let mut layout = two_displays();
+    let bar = left().with_work_area(Rect::new(0, 30, 1920, 1050));
+    let events = layout.reconfigure_outputs(vec![bar, right()]);
+    assert!(
+        events.contains(&Event::OutputsChanged),
+        "a reserved zone changes where windows may go: {events:?}"
+    );
+
+    // And a display arriving or leaving, which is the case this was written for.
+    let events = layout.reconfigure_outputs(vec![left()]);
+    assert!(events.contains(&Event::OutputsChanged), "{events:?}");
 }

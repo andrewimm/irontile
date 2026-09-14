@@ -12,9 +12,12 @@ use irontile_layout::{
     PlacementKind, Point as LayoutPoint, Rect, Size, WindowId, WorkspaceId, dispatch, frame,
 };
 use smithay::backend::allocator::dmabuf::Dmabuf;
-use smithay::desktop::PopupManager;
+use smithay::backend::renderer::element::solid::SolidColorBuffer;
+use smithay::desktop::{PopupManager, layer_map_for_output};
+use smithay::input::keyboard::Keycode;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::calloop::{LoopHandle, RegistrationToken};
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -116,6 +119,21 @@ impl OutputSpec {
     }
 }
 
+/// How long a held binding waits before it starts repeating, and how many times
+/// a second it repeats after that. The same numbers clients are told to use for
+/// typing, so a held binding and a held letter feel the same.
+pub const REPEAT_DELAY_MS: i32 = 200;
+pub const REPEAT_RATE_HZ: i32 = 25;
+
+/// A binding firing over and over while its key is held.
+#[derive(Debug)]
+pub struct KeyRepeat {
+    /// The key holding it open. Only its release ends the repeat, so rolling
+    /// onto another key does not silently leave one running.
+    pub code: Keycode,
+    pub token: RegistrationToken,
+}
+
 /// A pointer drag the compositor is handling itself.
 ///
 /// Implemented as state consulted by the input handler rather than as a
@@ -201,6 +219,12 @@ pub struct Irontile {
     pub config_path: std::path::PathBuf,
     /// Set while the pointer is resizing a window.
     pub drag: Option<ResizeDrag>,
+    /// The binding currently repeating, if a key is being held down.
+    pub repeat: Option<KeyRepeat>,
+    /// Kept so that a held binding can drive itself from a timer. Holding a key
+    /// produces no further events -- repeat is the compositor's job, and for a
+    /// binding it cannot be handed to the client the way typing is.
+    pub loop_handle: LoopHandle<'static, Irontile>,
     /// The renderer, if there is one. Kept here rather than in the backend's
     /// event loop so that a client's dmabuf can be imported the moment it
     /// arrives.
@@ -239,6 +263,7 @@ impl Irontile {
         socket_name: String,
         config: Config,
         config_path: std::path::PathBuf,
+        loop_handle: LoopHandle<'static, Irontile>,
     ) -> Self {
         let dh = &display_handle;
         let mut seat_state = SeatState::new();
@@ -275,6 +300,8 @@ impl Irontile {
             config,
             config_path,
             drag: None,
+            repeat: None,
+            loop_handle,
             backend: Backend::Headless,
             dmabuf_state: DmabufState::new(),
             dmabuf_global: None,
@@ -761,6 +788,16 @@ impl Irontile {
     /// Falls back to the focused display, which is where a surface that is not
     /// placed yet -- one still waiting for its first buffer -- will appear.
     fn scale_for_surface(&self, surface: &WlSurface) -> f64 {
+        // A layer surface belongs to a display outright rather than through a
+        // placement, and it asks this the moment it binds the object -- before
+        // it has drawn anything, and so before it appears in any placement.
+        if let Some(entry) = self.outputs.iter().find(|entry| {
+            layer_map_for_output(&entry.output)
+                .layer_for_surface(surface, smithay::desktop::WindowSurfaceType::ALL)
+                .is_some()
+        }) {
+            return display_scale(&entry.output);
+        }
         let output = self
             .windows
             .find(surface)
@@ -787,6 +824,35 @@ impl Irontile {
     fn sync_surface_outputs(&self) {
         for entry in &self.outputs {
             let scale = display_scale(&entry.output);
+
+            // Panels first. A layer surface is on exactly the display that owns
+            // it, so it is told so outright -- and without that a bar renders
+            // at scale one and is resampled, which is the one thing a bar full
+            // of text cannot afford.
+            let layers: Vec<_> = {
+                // One guard: taking the map again while it is already held is a
+                // panic, not a borrow error.
+                let map = layer_map_for_output(&entry.output);
+                map.layers()
+                    .filter_map(|layer| {
+                        let size = map.layer_geometry(layer)?.size;
+                        Some((layer.wl_surface().clone(), size))
+                    })
+                    .collect()
+            };
+            for (surface, size) in layers {
+                smithay::desktop::utils::output_update(
+                    &entry.output,
+                    Some(smithay::utils::Rectangle::from_size(size)),
+                    &surface,
+                );
+                smithay::wayland::compositor::with_states(&surface, |states| {
+                    with_fractional_scale(states, |fractional| {
+                        fractional.set_preferred_scale(scale);
+                    });
+                });
+            }
+
             for placement in &self.placements.placements {
                 let Some(window) = self.windows.window(placement.window) else {
                     continue;
@@ -823,26 +889,30 @@ impl Irontile {
     /// elements, so without this the highlight stays where it was.
     fn sync_borders(&mut self) {
         let width = self.config.theme.border_width;
-        let focused = self.config.theme.border_focused;
-        let unfocused = self.config.theme.border_unfocused;
+        let focused = self.config.theme.border_focused.clone();
+        let unfocused = self.config.theme.border_unfocused.clone();
         for placement in &self.placements.placements {
             let Some(entry) = self.windows.get_mut(placement.window) else {
                 continue;
             };
-            let color = if placement.focused {
-                focused
+            let paint = if placement.focused {
+                &focused
             } else {
-                unfocused
+                &unfocused
             };
+            // A fullscreen window has no border at all, so it owns no strips.
             let visible = placement.kind != PlacementKind::Fullscreen && width > 0;
-            // A fullscreen window has no border; empty strips draw nothing but
-            // keep the element set stable.
-            let rects = if visible {
-                crate::render::border_rects(placement.rect, width)
+            let cell = placement.rect;
+            let segments = if visible {
+                crate::render::border_segments(cell, width, !paint.is_solid())
             } else {
-                [Rect::ZERO; 4]
+                Vec::new()
             };
-            for (buffer, rect) in entry.border.iter_mut().zip(rects) {
+            entry
+                .border
+                .resize_with(segments.len(), SolidColorBuffer::default);
+            for (buffer, rect) in entry.border.iter_mut().zip(&segments) {
+                let color = crate::render::segment_color(paint, cell, *rect);
                 buffer.update((rect.w.max(0), rect.h.max(0)), color);
             }
         }
@@ -943,10 +1013,25 @@ impl Irontile {
         &self,
         point: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        use smithay::wayland::shell::wlr_layer::Layer;
+
+        // Panels above the windows, then the windows, then panels below them --
+        // the order things are drawn in, which is the order they are under the
+        // pointer in. Without the panels a bar receives no pointer events at
+        // all: not a click on a desktop button, not the pointer resting on a
+        // module, not even an enter.
+        if let Some(found) = self.layer_under(point, &[Layer::Overlay, Layer::Top]) {
+            return Some(found);
+        }
+
         let mut ordered: Vec<_> = self.placements.placements.iter().collect();
         ordered.sort_by_key(|p| std::cmp::Reverse(p.z));
         for placement in ordered {
-            let window = self.windows.window(placement.window)?;
+            // A placement whose window has gone is one to skip rather than a
+            // reason to stop looking: everything behind it is still there.
+            let Some(window) = self.windows.window(placement.window) else {
+                continue;
+            };
             let content = self.content_rect(placement.rect, placement.kind);
             let origin = Point::<i32, Logical>::from((content.x, content.y));
             let local = point - origin.to_f64();
@@ -954,6 +1039,44 @@ impl Irontile {
                 window.surface_under(local, smithay::desktop::WindowSurfaceType::ALL)
             {
                 return Some((surface, (origin + offset).to_f64()));
+            }
+        }
+
+        self.layer_under(point, &[Layer::Bottom, Layer::Background])
+    }
+
+    /// The layer surface under a point, in the given layers, topmost first.
+    fn layer_under(
+        &self,
+        point: Point<f64, Logical>,
+        layers: &[smithay::wayland::shell::wlr_layer::Layer],
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        for spec in &self.arrangement {
+            let area = spec.logical();
+            if !area.contains(irontile_layout::Point::new(point.x as i32, point.y as i32)) {
+                continue;
+            }
+            let Some(entry) = self.outputs.iter().find(|e| e.id == spec.id) else {
+                continue;
+            };
+            // A layer map works in its own display's coordinates; everything
+            // else here is in the one space the displays share.
+            let origin = Point::<i32, Logical>::from((area.x, area.y));
+            let local = point - origin.to_f64();
+            let map = layer_map_for_output(&entry.output);
+            for layer in layers {
+                let Some(surface) = map.layer_under(*layer, local) else {
+                    continue;
+                };
+                let Some(geometry) = map.layer_geometry(surface) else {
+                    continue;
+                };
+                if let Some((found, offset)) = surface.surface_under(
+                    local - geometry.loc.to_f64(),
+                    smithay::desktop::WindowSurfaceType::ALL,
+                ) {
+                    return Some((found, (origin + geometry.loc + offset).to_f64()));
+                }
             }
         }
         None
@@ -1054,18 +1177,20 @@ impl Irontile {
             .workspaces()
             .flat_map(|ws| {
                 let output = self.layout.output_showing(ws.id);
-                ws.windows().into_iter().map(move |window| (window, ws.id, output))
+                ws.windows()
+                    .into_iter()
+                    .map(move |window| (window, ws.id, output))
             })
-            .filter_map(|(window, workspace, output)| {
+            .map(|(window, workspace, output)| {
                 let (title, app_id) = self.window_names(window);
-                Some(irontile_ipc::WindowInfo {
+                irontile_ipc::WindowInfo {
                     id: window,
                     title,
                     app_id,
                     workspace,
                     output,
                     focused: focused == Some(window),
-                })
+                }
             })
             .collect()
     }
@@ -1127,10 +1252,12 @@ impl CompositorHandler for Irontile {
         self.popups.commit(surface);
 
         if let Some(layer) = self.layer_for_surface(surface) {
-            // A layer surface must be configured before it may attach a buffer,
-            // and re-arranged after, since its size or exclusive zone may have
-            // changed what is left for everything else.
-            layer.layer_surface().send_configure();
+            // A layer surface must be configured before it may attach a
+            // buffer, and re-arranged after, since its size or exclusive zone
+            // may have changed what is left for everything else. Only when
+            // something is actually different, though: a configure on every
+            // commit tells a client to redraw because it just drew.
+            layer.layer_surface().send_pending_configure();
             self.refresh_layers();
             return;
         }

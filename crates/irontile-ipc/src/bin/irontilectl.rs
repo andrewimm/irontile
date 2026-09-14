@@ -15,6 +15,7 @@ SUBCOMMANDS:
     frame               Where every window is right now
     outputs             Connected displays and their arrangement
     workspaces          Every desktop, and what is on it
+    windows             Every window, with its title and application id
     layout              The whole layout engine state, as JSON
     watch               Stream events until interrupted
     help                Show this message
@@ -60,6 +61,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "frame" => show(client.query(Query::Frame)?),
         "outputs" => show(client.query(Query::Outputs)?),
         "workspaces" => show(client.query(Query::Workspaces)?),
+        "windows" => show(client.query(Query::Windows)?),
         "layout" => show(client.query(Query::Layout)?),
         "watch" => watch(&mut client)?,
         _ => {
