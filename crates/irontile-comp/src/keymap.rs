@@ -189,6 +189,21 @@ pub const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("Super+o", "equalize"),
     ("Super+Shift+c", "reload"),
     ("Super+Shift+e", "quit"),
+    // Not behind Super, because Ctrl+Alt+F<n> is what everyone already presses,
+    // and because being unable to leave the session is the worst thing a
+    // compositor can do to someone.
+    ("Ctrl+Alt+F1", "vt 1"),
+    ("Ctrl+Alt+F2", "vt 2"),
+    ("Ctrl+Alt+F3", "vt 3"),
+    ("Ctrl+Alt+F4", "vt 4"),
+    ("Ctrl+Alt+F5", "vt 5"),
+    ("Ctrl+Alt+F6", "vt 6"),
+    ("Ctrl+Alt+F7", "vt 7"),
+    ("Ctrl+Alt+F8", "vt 8"),
+    ("Ctrl+Alt+F9", "vt 9"),
+    ("Ctrl+Alt+F10", "vt 10"),
+    ("Ctrl+Alt+F11", "vt 11"),
+    ("Ctrl+Alt+F12", "vt 12"),
 ];
 
 #[cfg(test)]
@@ -276,6 +291,61 @@ mod tests {
             seen.len(),
             total,
             "a default binding is shadowed by another"
+        );
+    }
+}
+
+#[cfg(test)]
+mod vt_tests {
+    use super::*;
+    use irontile_ipc::Action;
+
+    fn mods(logo: bool, shift: bool, ctrl: bool, alt: bool) -> ModifiersState {
+        ModifiersState {
+            logo,
+            shift,
+            ctrl,
+            alt,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn function_keys_resolve_to_themselves() {
+        let combo = parse_combo("Ctrl+Alt+F1").unwrap();
+        assert_eq!(combo.keysym.raw(), xkb::keysyms::KEY_F1);
+        assert!(combo.ctrl && combo.alt && !combo.logo && !combo.shift);
+    }
+
+    #[test]
+    fn the_vt_bindings_match_what_a_keyboard_sends() {
+        let keymap = Keymap::defaults();
+        // What the compositor actually looks up: the unmodified symbol for the
+        // key, with the modifier state alongside it.
+        for n in 1..=12u32 {
+            let sym = Keysym::from(xkb::keysyms::KEY_F1 + (n - 1));
+            assert_eq!(
+                keymap.action_for(&mods(false, false, true, true), sym),
+                Some(&Action::SwitchVt(n as i32)),
+                "Ctrl+Alt+F{n} is not bound to a virtual terminal switch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_vt_switch_needs_no_super() {
+        // Being unable to leave the session is the worst thing a compositor can
+        // do, so this binding must not sit behind the same prefix as the rest.
+        let keymap = Keymap::defaults();
+        let f2 = Keysym::from(xkb::keysyms::KEY_F2);
+        assert_eq!(
+            keymap.action_for(&mods(true, false, true, true), f2),
+            None,
+            "holding Super as well should not be required"
+        );
+        assert_eq!(
+            keymap.action_for(&mods(false, false, true, true), f2),
+            Some(&Action::SwitchVt(2))
         );
     }
 }

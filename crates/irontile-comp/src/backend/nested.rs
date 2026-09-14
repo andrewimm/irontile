@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::{Frame as _, Renderer as _};
 use smithay::backend::winit::{self, WinitEvent};
@@ -11,31 +11,43 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::Display;
 use smithay::reexports::winit::platform::pump_events::PumpStatus;
 use smithay::utils::Rectangle;
-use smithay::wayland::socket::ListeningSocketSource;
 
-use crate::config::Config;
+use crate::backend::{Backend, Options};
 use crate::ipc;
-use crate::render::{self, NESTED_TRANSFORM};
+use crate::render::{self, NESTED_TRANSFORM, Scene};
 use crate::state::{Irontile, NESTED_OUTPUT, OutputSpec};
 
-/// Roughly 60Hz. Winit is pumped from a timer rather than being a calloop
-/// source of its own, so this is also the input latency ceiling for the nested
-/// backend; a session backend will be driven by real vblank instead.
+/// How often winit's event queue is drained. Winit is not a calloop source of
+/// its own, so this is the input latency ceiling for the nested backend.
+///
+/// Drawing is *not* on this clock. Submitting a frame blocks until the host
+/// compositor releases a buffer, and a host that is not showing the window --
+/// because it is on another workspace, or occluded -- releases none. Drawing on
+/// a timer would then block inside the event loop and starve everything else,
+/// including the control socket and every client. So frames are drawn when the
+/// host asks for one, and never otherwise.
 const TICK: Duration = Duration::from_millis(16);
 
-pub fn run(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()> {
+pub fn run(options: Options) -> anyhow::Result<()> {
     let mut event_loop: EventLoop<Irontile> = EventLoop::try_new()?;
     let display: Display<Irontile> = Display::new()?;
     let display_handle = display.handle();
 
-    let (mut backend, mut winit_loop) =
+    let (graphics, mut winit_loop) =
         winit::init::<GlesRenderer>().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let window_size = backend.window_size();
+    let window_size = graphics.window_size();
 
-    let socket = ListeningSocketSource::new_auto().context("failed to bind a wayland socket")?;
+    let socket = super::bind_socket(options.wayland_display.as_deref())?;
     let socket_name = socket.socket_name().to_string_lossy().into_owned();
 
-    let mut state = Irontile::new(display_handle, socket_name.clone(), config, config_path);
+    let mut state = Irontile::new(
+        display_handle,
+        socket_name.clone(),
+        options.config,
+        options.config_path,
+    );
+    state.backend = Backend::Nested(Box::new(graphics));
+    state.advertise_dmabuf();
     state
         .seat
         .add_keyboard(Default::default(), 200, 25)
@@ -50,6 +62,7 @@ pub fn run(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()
 
     handle
         .insert_source(Timer::immediate(), move |_, _, state: &mut Irontile| {
+            let mut wants_redraw = false;
             let status = winit_loop.dispatch_new_events(|event| match event {
                 WinitEvent::Resized { size, .. } => {
                     state.configure_outputs(&[nested_spec(size.to_logical(1))]);
@@ -58,6 +71,7 @@ pub fn run(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()
                     let size = state.output_size(NESTED_OUTPUT);
                     crate::input::handle(state, event, size);
                 }
+                WinitEvent::Redraw => wants_redraw = true,
                 WinitEvent::CloseRequested => state.running = false,
                 _ => {}
             });
@@ -71,8 +85,10 @@ pub fn run(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()
 
             if state.dirty {
                 state.reflow();
+                // Something moved, so ask the host for a frame to show it in.
+                state.backend.request_redraw();
             }
-            if let Err(err) = draw(state, &mut backend) {
+            if wants_redraw && let Err(err) = draw(state) {
                 tracing::error!(%err, "failed to render");
             }
 
@@ -85,6 +101,10 @@ pub fn run(config: Config, config_path: std::path::PathBuf) -> anyhow::Result<()
         control = %control.path().display(),
         "irontile is running"
     );
+    // The first frame has to be asked for; after that each one is requested
+    // when something changes.
+    state.backend.request_redraw();
+    state.run_startup_commands();
 
     let signal = event_loop.get_signal();
     event_loop.run(Some(TICK), &mut state, move |state| {
@@ -112,22 +132,43 @@ fn nested_spec(size: smithay::utils::Size<i32, smithay::utils::Logical>) -> Outp
     spec
 }
 
-fn draw(
-    state: &mut Irontile,
-    backend: &mut winit::WinitGraphicsBackend<GlesRenderer>,
-) -> anyhow::Result<()> {
-    let size = backend.window_size();
-    let scale = backend.scale_factor();
+fn draw(state: &mut Irontile) -> anyhow::Result<()> {
+    // Split the compositor into disjoint borrows: the renderer and the state it
+    // is drawing now live in the same struct.
+    let Irontile {
+        backend,
+        placements,
+        windows,
+        outputs,
+        layout,
+        config,
+        ..
+    } = state;
+    let Backend::Nested(graphics) = backend else {
+        return Ok(());
+    };
+
+    let size = graphics.window_size();
+    let scale = graphics.scale_factor();
     let damage = Rectangle::from_size(size);
 
-    let (renderer, mut framebuffer) = backend.bind().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let elements = render::elements(state, renderer, scale);
+    let (renderer, mut framebuffer) = graphics.bind().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let scene = Scene {
+        frame: placements,
+        windows,
+        outputs,
+        layout,
+        theme: &config.theme,
+        // The compositor irontile is nested inside draws the pointer already.
+        cursor: None,
+    };
+    let elements = render::elements(&scene, renderer, NESTED_OUTPUT, scale);
 
     let mut frame = renderer
         .render(&mut framebuffer, size, NESTED_TRANSFORM)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     frame
-        .clear(state.config.theme.background.into(), &[damage])
+        .clear(config.theme.background.into(), &[damage])
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     smithay::backend::renderer::utils::draw_render_elements(
         &mut frame,
@@ -139,10 +180,11 @@ fn draw(
     let _sync = frame.finish().map_err(|e| anyhow::anyhow!("{e}"))?;
     drop(framebuffer);
 
-    state.send_frame_callbacks();
-
-    backend
+    // Submitting must happen before the frame callbacks, or a client could
+    // draw into the buffer still being scanned out.
+    graphics
         .submit(Some(&[damage]))
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    state.send_frame_callbacks();
     Ok(())
 }

@@ -23,6 +23,13 @@ pub struct Config {
     pub theme: Theme,
     pub layout: irontile_layout::Config,
     pub keymap: Keymap,
+    /// Commands run once the compositor is up.
+    ///
+    /// Mostly this is how a bar gets started, but on a first run on real
+    /// hardware it is also the difference between a working compositor and one
+    /// that merely shows a background colour: with nothing launched, there is
+    /// no way to tell those apart.
+    pub startup: Vec<Vec<String>>,
 }
 
 impl Default for Config {
@@ -35,6 +42,7 @@ impl Default for Config {
             },
             theme,
             keymap: Keymap::defaults(),
+            startup: Vec::new(),
         }
     }
 }
@@ -126,10 +134,19 @@ impl Config {
             keymap.bind(combo, action);
         }
 
+        let startup = file
+            .startup
+            .exec
+            .iter()
+            .map(|line| line.split_whitespace().map(str::to_owned).collect())
+            .filter(|argv: &Vec<String>| !argv.is_empty())
+            .collect();
+
         Ok(Config {
             layout: file.layout.into_layout(theme.layout_params()),
             theme,
             keymap,
+            startup,
         })
     }
 }
@@ -147,6 +164,14 @@ struct ConfigFile {
     layout: LayoutConfig,
     /// Key combination to action text. An empty table means the defaults.
     binds: BTreeMap<String, String>,
+    startup: StartupConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct StartupConfig {
+    /// Each entry is a command line, split on whitespace.
+    exec: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +409,24 @@ mod tests {
         assert_eq!(config.layout.default_axis, Axis::Vertical);
         // Gaps configured on the theme must reach the layout engine.
         assert_eq!(config.layout.params.inner_gap, 12);
+    }
+
+    #[test]
+    fn startup_commands_are_split_into_arguments() {
+        let config = Config::parse(
+            r#"
+            [startup]
+            exec = ["alacritty -e htop", "waybar"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.startup,
+            vec![
+                vec!["alacritty".to_owned(), "-e".to_owned(), "htop".to_owned()],
+                vec!["waybar".to_owned()],
+            ]
+        );
     }
 
     #[test]

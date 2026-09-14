@@ -26,8 +26,12 @@ cargo xtask test     # rustfmt check, clippy with warnings denied, full test sui
 cargo xtask run
 ```
 
-This starts the nested backend: irontile opens as a window inside your current
-compositor and prints the Wayland socket it bound. Clients pointed at that
+irontile nests if `WAYLAND_DISPLAY` or `DISPLAY` is set and takes the session
+otherwise, which is what each of those situations means. `--nested`,
+`--session` and `--headless` override the choice.
+
+Nested, irontile opens as a window inside your current compositor and prints
+the Wayland socket it bound. Clients pointed at that
 socket are tiled inside it.
 
 ```
@@ -66,6 +70,35 @@ irontilectl watch        # stream events
 
 `IRONTILE_SOCKET` targets a specific instance; otherwise the socket belonging to
 `WAYLAND_DISPLAY` is used. Processes irontile spawns inherit both.
+
+### On real hardware
+
+The session backend runs: it modesets, tiles, takes input and exits cleanly.
+Still test it from a **second VT** rather than by quitting the session you have,
+so that one stays there to switch back to.
+
+```
+# Ctrl+Alt+F2, log in, then:
+cd path/to/irontile
+./try-session.sh
+```
+
+That wrapper runs irontile under a timeout, so the machine comes back on its own
+whatever happens, and logs to `~/irontile-session.log` where it is readable from
+your other session afterwards. `Ctrl+Alt+F<n>` switches away at any point, and
+`pkill -x irontile` from there stops it.
+
+A compositor holding the VT in graphics mode is the only thing that can perform
+a VT switch — the kernel stops handling it — so `Ctrl+Alt+F1` through `F12` are
+bound for exactly that, outside the Super prefix everything else uses.
+
+Put something in `[startup]` before the first run. With no windows, a working
+compositor and a broken one both show a background colour:
+
+```toml
+[startup]
+exec = ["alacritty"]
+```
 
 ## Configuration
 
@@ -138,10 +171,49 @@ All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
 | `wlr-layer-shell` | Bars and panels; exclusive zones shrink the work area windows tile into |
 | `wl_data_device`, `primary-selection` | Clipboard and middle-click paste |
 | `cursor-shape` | Clients name a cursor rather than supplying a buffer |
+| `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
 
-Not yet implemented: `linux-dmabuf`, so clients render into shared memory
-rather than handing over GPU buffers; XWayland; `viewporter` and
-`fractional-scale`; `pointer-constraints` and `relative-pointer`.
+The pointer image is a built-in arrow, drawn by the compositor because on real
+hardware nothing else will. It does not yet change shape: a client asking for an
+I-beam over text, or supplying its own cursor surface, is currently ignored and
+gets the arrow.
+
+Not yet implemented: cursor shapes and client cursor surfaces, XWayland,
+`viewporter` and `fractional-scale`, `pointer-constraints` and
+`relative-pointer`.
+
+## Backends
+
+| Backend | What it is |
+| --- | --- |
+| nested | A window inside another compositor. The development loop. |
+| headless | No renderer, displays described on the command line. What the integration tests drive over the control socket. |
+| session | Real hardware: libseat for the seat, udev for GPUs, one `DrmCompositor` per connected connector, libinput for input. |
+
+### Logging
+
+`RUST_LOG=irontile=debug` logs what is worth knowing when there is no other way
+to see anything: `display lit`, an `alive` heartbeat every five seconds, each
+reflow's placements, and keypresses aimed at the compositor with the keysym and
+whether a binding matched.
+
+Only presses holding Super, Control or Alt are logged, plus any that fired a
+binding. Plain typing is never recorded at any level — turning on debug logging
+must not turn the compositor into a keylogger. Window titles, app ids, spawn
+arguments and clipboard contents are not logged either.
+
+`RUST_LOG=irontile=trace` adds the page-flip cycle, `queued a frame` and
+`vblank` in pairs. That is two lines per frame per display, so it is for
+diagnosing a stalled display rather than for leaving on.
+
+The renderer lives in the compositor state rather than in a backend's event
+loop, which is what lets a client's dmabuf be imported at the moment it is
+submitted: the import needs the renderer and the protocol handler only has the
+compositor.
+
+The session backend is paced by the display rather than by a timer. A frame is
+queued, a page flip completes, and that vblank asks for the next one; a display
+with nothing to draw goes quiet.
 
 ## Design notes
 
@@ -194,3 +266,8 @@ than either choice made deliberately.
 pixels at the top of a display shrinks that display's work area, and the layout
 engine tiles into what is left. The engine never learns that layer-shell exists;
 it is handed a rectangle.
+
+**A display keeps its identity across unplugging.** Connector names map to
+output ids for the life of the session, so a monitor that comes back is the same
+display as far as the layout engine is concerned — which is what makes the
+desktop that preferred it return to it.

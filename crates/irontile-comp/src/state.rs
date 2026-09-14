@@ -11,6 +11,7 @@ use irontile_layout::{
     Command, Direction, Event, Frame, InsertTarget, Layout, LayoutError, Output as LayoutOutput,
     OutputId, PlacementKind, Rect, WindowId, WorkspaceId, dispatch, frame,
 };
+use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::desktop::PopupManager;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
@@ -22,6 +23,9 @@ use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size as SmithaySize};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
 use smithay::wayland::cursor_shape::CursorShapeManagerState;
+use smithay::wayland::dmabuf::{
+    DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
+};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
@@ -38,6 +42,7 @@ use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
 };
 
+use crate::backend::Backend;
 use crate::config::Config;
 use crate::registry::Registry;
 
@@ -143,6 +148,17 @@ pub struct Irontile {
     pub config_path: std::path::PathBuf,
     /// Set while the pointer is resizing a window.
     pub drag: Option<ResizeDrag>,
+    /// The renderer, if there is one. Kept here rather than in the backend's
+    /// event loop so that a client's dmabuf can be imported the moment it
+    /// arrives.
+    pub backend: Backend,
+    pub dmabuf_state: DmabufState,
+    /// Present once a backend with a renderer has advertised its formats.
+    #[allow(dead_code)]
+    pub dmabuf_global: Option<DmabufGlobal>,
+    /// The pointer image. Built once; only a backend that has to draw its own
+    /// pointer ever uses it.
+    pub cursor: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
 }
 
 /// Hand-written because much of the protocol state smithay holds is not
@@ -156,6 +172,7 @@ impl std::fmt::Debug for Irontile {
             .field("workspaces", &self.layout.workspaces().count())
             .field("placements", &self.placements.placements.len())
             .field("focused", &self.layout.focused_window())
+            .field("backend", &self.backend)
             .field("running", &self.running)
             .finish_non_exhaustive()
     }
@@ -200,7 +217,55 @@ impl Irontile {
             config,
             config_path,
             drag: None,
+            backend: Backend::Headless,
+            dmabuf_state: DmabufState::new(),
+            dmabuf_global: None,
+            cursor: crate::cursor::arrow(),
         }
+    }
+
+    /// Advertises the buffer formats the renderer accepts.
+    ///
+    /// Called once a backend has its renderer. Without this clients fall back
+    /// to shared memory, which means every frame is drawn on the CPU and copied.
+    pub fn advertise_dmabuf(&mut self) {
+        let Some(formats) = self.backend.dmabuf_formats() else {
+            tracing::info!("no renderer; clients will use shared memory");
+            return;
+        };
+        let count = formats.iter().count();
+
+        // Version 4 of the protocol carries feedback naming the device to
+        // allocate on. Without it a client has no way to pick a GPU and falls
+        // back to shared memory, so this is the difference between clients
+        // rendering on the GPU and rendering on the CPU.
+        let global = match self.backend.dmabuf_main_device() {
+            Some(device) => {
+                match DmabufFeedbackBuilder::new(device, formats.clone()).build() {
+                    Ok(feedback) => {
+                        tracing::info!(formats = count, device, "advertising dmabuf with feedback");
+                        self.dmabuf_state
+                            .create_global_with_default_feedback::<Self>(
+                                &self.display_handle,
+                                &feedback,
+                            )
+                    }
+                    Err(err) => {
+                        // Falling back still works; clients just cannot tell
+                        // which GPU to use.
+                        tracing::warn!(%err, "could not build dmabuf feedback");
+                        self.dmabuf_state
+                            .create_global::<Self>(&self.display_handle, formats)
+                    }
+                }
+            }
+            None => {
+                tracing::info!(formats = count, "advertising dmabuf");
+                self.dmabuf_state
+                    .create_global::<Self>(&self.display_handle, formats)
+            }
+        };
+        self.dmabuf_global = Some(global);
     }
 
     /// Re-reads the configuration file.
@@ -505,6 +570,40 @@ impl Irontile {
         keyboard.set_focus(self, target, SERIAL_COUNTER.next_serial());
     }
 
+    /// The bounding size of every display together.
+    ///
+    /// Absolute pointer input is placed against the whole arrangement rather
+    /// than one screen, because a pointer crosses between displays.
+    pub fn arrangement_size(&self) -> SmithaySize<i32, Logical> {
+        let (mut w, mut h) = (0, 0);
+        for output in self.layout.outputs() {
+            w = w.max(output.logical.right());
+            h = h.max(output.logical.bottom());
+        }
+        SmithaySize::from((w, h))
+    }
+
+    /// Releases the frame callbacks of one display's windows.
+    ///
+    /// Separate from [`Irontile::send_frame_callbacks`] because on real
+    /// hardware each display flips independently, and a client should be paced
+    /// by the display it is actually on.
+    pub fn send_frame_callbacks_for(&self, output: OutputId) {
+        let time = self.start_time.elapsed();
+        let Some(smithay_output) = self.smithay_output(output) else {
+            return;
+        };
+        for placement in &self.placements.placements {
+            if placement.output != output {
+                continue;
+            }
+            if let Some(window) = self.windows.window(placement.window) {
+                let out = smithay_output.clone();
+                window.send_frame(&out, time, None, |_, _| Some(out.clone()));
+            }
+        }
+    }
+
     /// Logical size of a display.
     pub fn output_size(&self, id: OutputId) -> SmithaySize<i32, Logical> {
         self.layout
@@ -618,6 +717,13 @@ impl Irontile {
         })
     }
 
+    /// Launches whatever the configuration says to launch at startup.
+    pub fn run_startup_commands(&self) {
+        for argv in &self.config.startup {
+            self.spawn(argv);
+        }
+    }
+
     pub fn spawn(&self, argv: &[String]) {
         let Some((program, args)) = argv.split_first() else {
             return;
@@ -711,6 +817,27 @@ impl BufferHandler for Irontile {
     }
 }
 
+impl DmabufHandler for Irontile {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        if self.backend.import_dmabuf(&dmabuf) {
+            let _ = notifier.successful::<Irontile>();
+        } else {
+            // Refusing is what lets the client fall back to shared memory
+            // instead of drawing into a buffer that will never be shown.
+            notifier.failed();
+        }
+    }
+}
+
 impl ShmHandler for Irontile {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
@@ -765,6 +892,7 @@ impl ServerDndGrabHandler for Irontile {
 }
 
 delegate_compositor!(Irontile);
+smithay::delegate_dmabuf!(Irontile);
 smithay::delegate_primary_selection!(Irontile);
 smithay::delegate_cursor_shape!(Irontile);
 delegate_shm!(Irontile);

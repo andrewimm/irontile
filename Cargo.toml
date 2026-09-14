@@ -21,12 +21,19 @@ irontile-ipc = { path = "crates/irontile-ipc", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 smithay = { version = "0.7", default-features = false, features = [
     "backend_winit",
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
     "desktop",
     "renderer_gl",
     "wayland_frontend",
 ] }
+smithay-drm-extras = { version = "0.1", default-features = false }
 anyhow = "1"
 toml = "0.9"
+libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde_json = "1"

@@ -37,6 +37,11 @@ pub enum Action {
     /// Launch the configured terminal. A binding written this way keeps
     /// working when the terminal changes, which a literal `spawn` would not.
     Terminal,
+    /// Switch to another virtual terminal.
+    ///
+    /// A compositor holding the VT in graphics mode is the only thing that can
+    /// perform this; without a binding for it there is no way off the session.
+    SwitchVt(i32),
     /// Re-read the configuration file.
     Reload,
     Quit,
@@ -139,6 +144,14 @@ fn parse(input: &str) -> Result<Action, ParseError> {
         "workspace" => Action::Workspace(need_number(&mut argument, input)?),
         "move-to-workspace" => Action::MoveToWorkspace(need_number(&mut argument, input)?),
         "terminal" => Action::Terminal,
+        "vt" => {
+            let word =
+                argument().ok_or_else(|| fail(Reason::MissingArgument("a terminal number")))?;
+            Action::SwitchVt(
+                word.parse()
+                    .map_err(|_| fail(Reason::BadNumber(word.to_owned())))?,
+            )
+        }
         "reload" => Action::Reload,
         "quit" => Action::Quit,
         other => return Err(fail(Reason::UnknownVerb(other.to_owned()))),
@@ -227,6 +240,7 @@ impl fmt::Display for Action {
             Action::MoveToWorkspace(n) => write!(f, "move-to-workspace {n}"),
             Action::Spawn(argv) => write!(f, "spawn {}", argv.join(" ")),
             Action::Terminal => write!(f, "terminal"),
+            Action::SwitchVt(n) => write!(f, "vt {n}"),
             Action::Reload => write!(f, "reload"),
             Action::Quit => write!(f, "quit"),
         }
@@ -249,6 +263,7 @@ pub const VERBS: &[&str] = &[
     "move-to-workspace <n>",
     "spawn <program> [args...]",
     "terminal",
+    "vt <n>",
     "reload",
     "quit",
 ];
@@ -351,6 +366,7 @@ mod tests {
             Action::MoveToWorkspace(2),
             Action::Spawn(vec!["foot".into(), "-e".into(), "htop".into()]),
             Action::Terminal,
+            Action::SwitchVt(2),
             Action::SendToOutput(Direction::Left),
             Action::Close,
             Action::Reload,

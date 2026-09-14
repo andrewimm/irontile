@@ -7,13 +7,12 @@
 
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::Context as _;
 use smithay::reexports::calloop::EventLoop;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::wayland_server::Display;
-use smithay::wayland::socket::ListeningSocketSource;
 
-use crate::config::Config;
+use crate::backend::Options;
 use crate::ipc;
 use crate::state::{Irontile, OutputSpec};
 
@@ -21,19 +20,20 @@ use crate::state::{Irontile, OutputSpec};
 /// drawn, so this only bounds how stale a client's configure can be.
 const TICK: Duration = Duration::from_millis(16);
 
-pub fn run(
-    outputs: Vec<OutputSpec>,
-    config: Config,
-    config_path: std::path::PathBuf,
-) -> anyhow::Result<()> {
+pub fn run(outputs: Vec<OutputSpec>, options: Options) -> anyhow::Result<()> {
     let mut event_loop: EventLoop<Irontile> = EventLoop::try_new()?;
     let display: Display<Irontile> = Display::new()?;
     let display_handle = display.handle();
 
-    let socket = ListeningSocketSource::new_auto().context("failed to bind a wayland socket")?;
+    let socket = super::bind_socket(options.wayland_display.as_deref())?;
     let socket_name = socket.socket_name().to_string_lossy().into_owned();
 
-    let mut state = Irontile::new(display_handle, socket_name.clone(), config, config_path);
+    let mut state = Irontile::new(
+        display_handle,
+        socket_name.clone(),
+        options.config,
+        options.config_path,
+    );
     state
         .seat
         .add_keyboard(Default::default(), 200, 25)
@@ -68,6 +68,7 @@ pub fn run(
         displays = outputs.len(),
         "irontile is running headless"
     );
+    state.run_startup_commands();
 
     let signal = event_loop.get_signal();
     event_loop.run(Some(TICK), &mut state, move |state| {

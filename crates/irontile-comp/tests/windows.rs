@@ -258,4 +258,12 @@ fn the_advertised_protocol_surface_is_what_clients_expect() {
             "{interface} is not advertised; have {advertised:?}"
         );
     }
+
+    // dmabuf is the exception: it depends on there being a renderer, and the
+    // headless backend has none. Advertising it here would promise clients a
+    // buffer import that could only ever fail.
+    assert!(
+        !advertised.iter().any(|a| a == "zwp_linux_dmabuf_v1"),
+        "headless must not advertise dmabuf"
+    );
 }

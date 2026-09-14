@@ -7,6 +7,7 @@
 mod action;
 mod backend;
 mod config;
+mod cursor;
 mod focus;
 mod input;
 mod ipc;
@@ -31,16 +32,25 @@ USAGE:
     irontile [OPTIONS]
 
 OPTIONS:
+    --session           Drive real hardware through DRM. This is the default
+                        when there is no compositor already running to nest in.
+    --nested            Run as a window inside the compositor already running.
+                        The default when there is one.
     --headless [SPEC]   Run without a renderer, with displays described by
                         SPEC. Used for tests and for driving irontile purely
                         over its control socket. SPEC is a comma-separated list
                         of WxH or WxH+X+Y; the default is one 1920x1080 display.
+    --wayland-display NAME
+                        Bind this Wayland socket name instead of picking the
+                        first free one. Useful when you need to know the name
+                        in advance, such as on a machine where another
+                        compositor already holds wayland-1.
     --config PATH       Read configuration from PATH instead of the usual place.
     --print-config      Write the default configuration to stdout and exit.
     --help              Show this message.
 
-Without --headless, irontile runs nested: it opens as a window inside the
-compositor already running, which is the development loop.
+With no backend named, irontile nests if WAYLAND_DISPLAY or DISPLAY is set and
+takes the session otherwise, which is what each of those situations means.
 ";
 
 fn main() -> ExitCode {
@@ -54,9 +64,17 @@ fn main() -> ExitCode {
     }
 }
 
+/// Which backend to run.
+enum Chosen {
+    Nested,
+    Session,
+    Headless(Vec<OutputSpec>),
+}
+
 fn run(args: &[String]) -> anyhow::Result<()> {
-    let mut headless: Option<Vec<OutputSpec>> = None;
+    let mut chosen: Option<Chosen> = None;
     let mut config_path: Option<std::path::PathBuf> = None;
+    let mut wayland_display: Option<String> = None;
     let mut iter = args.iter().peekable();
 
     while let Some(arg) = iter.next() {
@@ -69,18 +87,26 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 print!("{}", config::default_config_text());
                 return Ok(());
             }
+            "--wayland-display" => {
+                let name = iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--wayland-display needs a name"))?;
+                wayland_display = Some(name.clone());
+            }
             "--config" => {
                 let path = iter
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("--config needs a path"))?;
                 config_path = Some(path.into());
             }
+            "--session" => chosen = Some(Chosen::Session),
+            "--nested" => chosen = Some(Chosen::Nested),
             "--headless" => {
                 let spec = match iter.peek() {
                     Some(next) if !next.starts_with("--") => Some(iter.next().expect("peeked")),
                     _ => None,
                 };
-                headless = Some(parse_outputs(spec.map(String::as_str))?);
+                chosen = Some(Chosen::Headless(parse_outputs(spec.map(String::as_str))?));
             }
             other => anyhow::bail!("unknown option {other:?}; try --help"),
         }
@@ -97,9 +123,27 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
     };
 
-    match headless {
-        Some(outputs) => backend::headless::run(outputs, config, path),
-        None => backend::nested::run(config, path),
+    let options = backend::Options {
+        config,
+        config_path: path,
+        wayland_display,
+    };
+    match chosen.unwrap_or_else(default_backend) {
+        Chosen::Headless(outputs) => backend::headless::run(outputs, options),
+        Chosen::Nested => backend::nested::run(options),
+        Chosen::Session => backend::session::run(options),
+    }
+}
+
+/// Nesting needs something to nest in; taking the session needs nothing to be
+/// there already. Which of those is true is the only sensible default.
+fn default_backend() -> Chosen {
+    let nested = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+    if nested {
+        Chosen::Nested
+    } else {
+        Chosen::Session
     }
 }
 

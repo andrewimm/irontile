@@ -4,9 +4,9 @@ use irontile_ipc::Action;
 use irontile_layout::{Command, Direction};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis as InputAxis, AxisSource, ButtonState, Event, InputBackend,
-    InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+    InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
-use smithay::input::keyboard::FilterResult;
+use smithay::input::keyboard::{FilterResult, xkb};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 
@@ -30,6 +30,20 @@ pub fn handle<B: InputBackend>(
         InputEvent::PointerMotionAbsolute { event } => {
             let location = event.position_transformed(output_size);
             pointer_motion(state, location, event.time_msec());
+        }
+        // Mice and touchpads report how far they moved, not where they are.
+        // Only a tablet or a nested window reports a position, so without this
+        // the pointer never moves on real hardware at all.
+        InputEvent::PointerMotion { event } => {
+            let Some(pointer) = state.seat.get_pointer() else {
+                return;
+            };
+            let current = pointer.current_location();
+            let moved = Point::<f64, Logical>::from((
+                current.x + event.delta_x(),
+                current.y + event.delta_y(),
+            ));
+            pointer_motion(state, clamp_to_displays(state, moved), event.time_msec());
         }
         InputEvent::PointerButton { event } => pointer_button::<B>(state, &event),
         InputEvent::PointerAxis { event } => pointer_axis::<B>(state, &event),
@@ -62,6 +76,28 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
             let sym = handle
                 .raw_latin_sym_or_raw_current_sym()
                 .unwrap_or_else(|| handle.modified_sym());
+            let matched = state.config.keymap.action_for(mods, sym).cloned();
+
+            // Only keys that could be a binding are logged, and never plain
+            // text. Logging every keysym would write everything the user types
+            // -- passwords included -- into a file as soon as anyone turned on
+            // debug logging, which is not a trade worth making for a
+            // diagnostic. A held Super, Control or Alt means the press was
+            // aimed at the compositor rather than at a document, and that is
+            // exactly the case worth being able to debug: shift alone is
+            // typing, so it does not count.
+            if should_log(matched.is_some(), mods) {
+                tracing::debug!(
+                    key = %xkb::keysym_get_name(sym),
+                    logo = mods.logo,
+                    ctrl = mods.ctrl,
+                    alt = mods.alt,
+                    shift = mods.shift,
+                    action = ?matched,
+                    "binding"
+                );
+            }
+
             match state.config.keymap.action_for(mods, sym) {
                 // Intercepting means the client never sees the key, which is what
                 // keeps a compositor binding from also typing into the window.
@@ -78,6 +114,29 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
 
 fn perform(state: &mut Irontile, action: &Action) {
     action::perform(state, action);
+}
+
+/// Whether a keypress may be written to the log.
+///
+/// A held Super, Control or Alt means the press was aimed at the compositor
+/// rather than at a document, and those are the ones worth being able to debug.
+/// Shift alone is typing. Anything else is the user's text and must not be
+/// recorded anywhere.
+fn should_log(matched: bool, mods: &smithay::input::keyboard::ModifiersState) -> bool {
+    matched || mods.logo || mods.ctrl || mods.alt
+}
+
+/// Keeps the pointer on a display, since a delta on its own respects no edges.
+fn clamp_to_displays(state: &Irontile, point: Point<f64, Logical>) -> Point<f64, Logical> {
+    let whole = irontile_layout::Point::new(point.x.floor() as i32, point.y.floor() as i32);
+    let clamped = state.layout.clamp_to_outputs(whole);
+    if clamped == whole {
+        // Already on a display; keep the sub-pixel part, which is what makes
+        // slow pointer movement smooth rather than stepped.
+        point
+    } else {
+        Point::from((f64::from(clamped.x), f64::from(clamped.y)))
+    }
 }
 
 fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32) {
@@ -277,4 +336,44 @@ fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEve
 
     pointer.axis(state, frame);
     pointer.frame(state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_log;
+    use smithay::input::keyboard::ModifiersState;
+
+    fn mods(logo: bool, shift: bool, ctrl: bool, alt: bool) -> ModifiersState {
+        ModifiersState {
+            logo,
+            shift,
+            ctrl,
+            alt,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn typing_is_never_logged() {
+        // The whole point: turning on debug logging must not turn the
+        // compositor into a keylogger. Passwords are typed with no modifier, or
+        // with shift, and neither may be recorded.
+        assert!(!should_log(false, &mods(false, false, false, false)));
+        assert!(!should_log(false, &mods(false, true, false, false)));
+    }
+
+    #[test]
+    fn presses_aimed_at_the_compositor_are_logged() {
+        // These are the ones worth debugging, and none of them are text.
+        assert!(should_log(false, &mods(true, false, false, false)));
+        assert!(should_log(false, &mods(false, false, true, true)));
+        assert!(should_log(false, &mods(false, false, false, true)));
+    }
+
+    #[test]
+    fn a_binding_that_fired_is_always_logged() {
+        // If a key did something, saying so is not a leak: the action is
+        // already visible in its effect.
+        assert!(should_log(true, &mods(false, false, false, false)));
+    }
 }

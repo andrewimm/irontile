@@ -115,6 +115,33 @@ impl Layout {
         pick_direction(origin, &candidates, dir)
     }
 
+    /// Pulls a point back onto the nearest display.
+    ///
+    /// The pointer moves by deltas, so nothing stops it walking off the side of
+    /// the arrangement or into the gap between two displays that do not touch.
+    /// Points already on a display are returned unchanged.
+    pub fn clamp_to_outputs(&self, point: Point) -> Point {
+        if self.output_at(point).is_some() {
+            return point;
+        }
+        let nearest = self
+            .outputs
+            .iter()
+            .min_by_key(|output| squared_distance(output.logical, point));
+        match nearest {
+            Some(output) => {
+                let area = output.logical;
+                // The far edges are exclusive, so the last point actually on
+                // the display is one short of them.
+                Point::new(
+                    point.x.clamp(area.x, (area.right() - 1).max(area.x)),
+                    point.y.clamp(area.y, (area.bottom() - 1).max(area.y)),
+                )
+            }
+            None => point,
+        }
+    }
+
     pub fn output_at(&self, p: Point) -> Option<OutputId> {
         self.outputs
             .iter()
@@ -1127,6 +1154,14 @@ fn grow(rect: Rect, dir: Direction, delta: i32) -> Rect {
             Rect::new(rect.x, rect.y - (h - rect.h), rect.w, h)
         }
     }
+}
+
+/// How far a point is from a rectangle, squared. Squared because only the
+/// ordering matters and a square root would add nothing but rounding.
+fn squared_distance(rect: Rect, point: Point) -> i64 {
+    let dx = i64::from((rect.x - point.x).max(point.x - (rect.right() - 1)).max(0));
+    let dy = i64::from((rect.y - point.y).max(point.y - (rect.bottom() - 1)).max(0));
+    dx * dx + dy * dy
 }
 
 /// Maps a floating rectangle from one display's work area onto another's,

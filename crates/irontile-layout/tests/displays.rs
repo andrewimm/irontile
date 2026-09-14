@@ -376,3 +376,53 @@ impl FrameOutput for Layout {
         frame(self).placement(window).map(|p| p.output)
     }
 }
+
+#[test]
+fn a_point_on_a_display_is_left_alone() {
+    let layout = two_displays();
+    for point in [
+        irontile_layout::Point::new(0, 0),
+        irontile_layout::Point::new(1919, 1079),
+        irontile_layout::Point::new(2000, 500),
+    ] {
+        assert_eq!(layout.clamp_to_outputs(point), point, "{point:?}");
+    }
+}
+
+#[test]
+fn a_point_off_the_arrangement_is_pulled_back() {
+    let layout = two_displays();
+    // The pointer moves by deltas, so nothing but this stops it walking off
+    // the side of the desk entirely.
+    let far_right = layout.clamp_to_outputs(irontile_layout::Point::new(99_999, 500));
+    assert_eq!(far_right, irontile_layout::Point::new(3839, 500));
+
+    let above = layout.clamp_to_outputs(irontile_layout::Point::new(400, -50));
+    assert_eq!(above, irontile_layout::Point::new(400, 0));
+
+    let below = layout.clamp_to_outputs(irontile_layout::Point::new(400, 99_999));
+    assert_eq!(below, irontile_layout::Point::new(400, 1079));
+}
+
+#[test]
+fn a_point_in_the_gap_between_displays_goes_to_the_nearer_one() {
+    let mut layout = Layout::new(Config::default());
+    // Two displays that do not touch, which a real desk often has.
+    layout.reconfigure_outputs(vec![
+        Output::new(LEFT, "DP-1", Rect::new(0, 0, 800, 600)),
+        Output::new(RIGHT, "DP-2", Rect::new(1200, 0, 800, 600)),
+    ]);
+
+    let near_left = layout.clamp_to_outputs(irontile_layout::Point::new(850, 300));
+    assert_eq!(near_left, irontile_layout::Point::new(799, 300));
+
+    let near_right = layout.clamp_to_outputs(irontile_layout::Point::new(1150, 300));
+    assert_eq!(near_right, irontile_layout::Point::new(1200, 300));
+}
+
+#[test]
+fn clamping_with_no_displays_is_a_no_op() {
+    let layout = Layout::new(Config::default());
+    let point = irontile_layout::Point::new(10, 20);
+    assert_eq!(layout.clamp_to_outputs(point), point);
+}

@@ -71,6 +71,10 @@ pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
             }
             Vec::new()
         }
+        Action::SwitchVt(vt) => {
+            state.backend.change_vt(*vt);
+            Vec::new()
+        }
         Action::Reload => {
             state.reload_config();
             Vec::new()
