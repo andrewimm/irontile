@@ -7,11 +7,13 @@ license.workspace = true
 repository.workspace = true
 description = "Typed control socket protocol for irontile"
 
+[[bin]]
+name = "irontilectl"
+path = "src/bin/irontilectl.rs"
+
 [dependencies]
 irontile-layout.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

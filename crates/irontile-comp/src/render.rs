@@ -52,13 +52,13 @@ where
 
         // A fullscreen window has no border, so there is no quad to put behind
         // it, and drawing one would show through at the display edges.
-        if placement.kind == PlacementKind::Fullscreen || state.theme.border_width <= 0 {
+        if placement.kind == PlacementKind::Fullscreen || state.config.theme.border_width <= 0 {
             continue;
         }
         let color = if placement.focused {
-            state.theme.border_focused
+            state.config.theme.border_focused
         } else {
-            state.theme.border_unfocused
+            state.config.theme.border_unfocused
         };
         out.push(IrontileElement::Border(SolidColorRenderElement::new(
             entry.border.clone(),

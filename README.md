@@ -9,7 +9,7 @@ not a plugin on top of a floating one.
 | --- | --- |
 | `irontile-layout` | Tiling tree, desktops, and display arrangement. Pure integer geometry, no Wayland. |
 | `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
-| `irontile-ipc` | Typed control-socket protocol, a thin envelope around the layout commands. |
+| `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
 | `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
 | `xtask` | Task runner. |
 
@@ -35,8 +35,74 @@ WAYLAND_DISPLAY=wayland-2 alacritty
 ```
 
 `RUST_LOG=irontile=debug` logs every layout event and the cell each window is
-placed in. `IRONTILE_TERMINAL` picks what the spawn binding launches; without
-it, the first of a few common emulators found on `PATH` is used.
+placed in.
+
+### Headless
+
+```
+cargo xtask run -- --headless 1920x1080,1280x1024
+```
+
+No renderer and as many displays as you ask for, driven entirely over the
+control socket. This is how the integration tests run, and it is the only way
+to exercise display arrangement, desktop transfer and hotplug without the
+hardware to do it on.
+
+### Control socket
+
+Every binding is also a command:
+
+```
+irontilectl focus left
+irontilectl workspace 3
+irontilectl send-to-output right
+
+irontilectl frame        # where every window is
+irontilectl outputs      # displays and their arrangement
+irontilectl workspaces   # desktops, and what is on them
+irontilectl layout       # the whole engine state, as JSON
+irontilectl watch        # stream events
+```
+
+`IRONTILE_SOCKET` targets a specific instance; otherwise the socket belonging to
+`WAYLAND_DISPLAY` is used. Processes irontile spawns inherit both.
+
+## Configuration
+
+TOML at `$XDG_CONFIG_HOME/irontile/irontile.toml`, or wherever `--config`
+points. There need not be one. `irontilectl reload` re-reads it, and a file that
+fails to load leaves the running configuration in place rather than taking the
+session down. `irontile --print-config` writes out the defaults.
+
+```toml
+[theme]
+border_width = 2
+border_focused = "#5c99d6"
+border_unfocused = "#292b33"
+background = "#121217"
+inner_gap = 4
+outer_gap = 4
+resize_step = 40
+terminal = "foot"        # omit to use the first one found on PATH
+
+[layout]
+smart_split = true       # split along the longer edge, rather than appending
+default_axis = "horizontal"
+reap_empty_workspaces = true
+focus_follows_move = true
+
+# A [binds] table replaces the defaults outright, so a binding can be removed.
+[binds]
+"Super+h" = "focus left"
+"Super+Shift+h" = "move left"
+"Super+Ctrl+h" = "resize left"
+"Super+1" = "workspace 1"
+"Super+Return" = "terminal"
+"Super+Shift+e" = "quit"
+```
+
+Key names are xkb keysyms, so anything `xkbcli` prints works. Unknown settings
+and unparseable bindings are errors naming the line, not silent no-ops.
 
 ### Bindings
 
@@ -52,6 +118,7 @@ All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
 | `Super` + `1`–`9`, `0` | Show desktop 1–10, creating it on first use |
 | `Super` `Shift` + `1`–`9`, `0` | Send the window to that desktop |
 | `Super` + `Return` | Spawn a terminal |
+| `Super` `Shift` + `C` | Reload the configuration |
 | `Super` + `Q` | Close the window |
 | `Super` + `F` | Toggle fullscreen |
 | `Super` `Shift` + `Space` | Toggle floating |
@@ -88,3 +155,15 @@ several desktops onto one monitor in a row does what you meant each time.
 no notion of "workspace 4"; the compositor names desktops `"1"`, `"2"` and so on
 and resolves a number to an id on first use. Fixed numeric slots are a special
 case of that, not the other way round.
+
+**One vocabulary for bindings and the socket.** A key binding, a line in the
+config file and an `irontilectl` invocation all name the same `Action` and run
+the same code, so they cannot drift apart. Precise, addressed operations — this
+window, that desktop — go over the socket as the layout engine's own commands
+instead.
+
+**The compositor is testable because the socket exists.** `Query::Layout`
+returns the entire engine state, which deserializes into a real `Layout`, so a
+test can assert on the tree or call `validate()` on it without the compositor
+growing a reporting API of its own. Combined with the headless backend, that is
+how display arrangement and hotplug are covered end to end.

@@ -13,7 +13,8 @@ use irontile_layout::{
 };
 use smithay::desktop::PopupManager;
 use smithay::input::{Seat, SeatHandler, SeatState};
-use smithay::output::Output;
+use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, DisplayHandle};
@@ -31,11 +32,42 @@ use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
 };
 
+use crate::config::Config;
 use crate::registry::Registry;
-use crate::theme::Theme;
 
-/// The single display of the nested backend.
+/// The display of the nested backend, which always has exactly one.
 pub const NESTED_OUTPUT: OutputId = OutputId(1);
+
+/// A display as a backend describes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputSpec {
+    pub id: OutputId,
+    pub name: String,
+    /// Position and size in the global logical coordinate space.
+    pub logical: Rect,
+    pub refresh: i32,
+    pub transform: smithay::utils::Transform,
+}
+
+impl OutputSpec {
+    pub fn new(id: OutputId, name: impl Into<String>, logical: Rect) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            logical,
+            refresh: 60_000,
+            transform: smithay::utils::Transform::Normal,
+        }
+    }
+}
+
+/// A connected display and the protocol object advertising it.
+#[derive(Debug)]
+pub struct OutputEntry {
+    pub id: OutputId,
+    pub output: Output,
+    global: GlobalId,
+}
 
 pub struct Irontile {
     pub display_handle: DisplayHandle,
@@ -56,27 +88,33 @@ pub struct Irontile {
     pub data_device_state: DataDeviceState,
     pub popups: PopupManager,
     pub seat: Seat<Self>,
-    pub output: Output,
+    /// Connected displays, paired with the protocol object each is advertised
+    /// through. The layout engine's arrangement is the source of truth; these
+    /// exist so clients can be told about them.
+    pub outputs: Vec<OutputEntry>,
+    pub peers: crate::ipc::Peers,
 
     pub layout: Layout,
     pub windows: Registry,
     /// The most recent frame, kept so rendering and hit-testing agree with what
     /// clients were last configured for.
     pub placements: Frame,
-    pub theme: Theme,
+    pub config: Config,
+    /// Where the configuration came from, so a reload reads the same file.
+    pub config_path: std::path::PathBuf,
 }
 
 impl Irontile {
-    pub fn new(display_handle: DisplayHandle, output: Output, socket_name: String) -> Self {
+    pub fn new(
+        display_handle: DisplayHandle,
+        socket_name: String,
+        config: Config,
+        config_path: std::path::PathBuf,
+    ) -> Self {
         let dh = &display_handle;
-        let theme = Theme::default();
         let mut seat_state = SeatState::new();
         let seat = seat_state.new_wl_seat(dh, "irontile");
-
-        let config = irontile_layout::Config {
-            params: theme.layout_params(),
-            ..Default::default()
-        };
+        let layout_config = config.layout;
 
         Self {
             display_handle: display_handle.clone(),
@@ -92,35 +130,124 @@ impl Irontile {
             data_device_state: DataDeviceState::new::<Self>(dh),
             popups: PopupManager::default(),
             seat,
-            output,
-            layout: Layout::new(config),
+            outputs: Vec::new(),
+            peers: crate::ipc::Peers::default(),
+            layout: Layout::new(layout_config),
             windows: Registry::default(),
             placements: Frame::default(),
-            theme,
+            config,
+            config_path,
         }
     }
 
-    /// Tells the layout engine how big the display is.
+    /// Re-reads the configuration file.
     ///
-    /// The nested window is the whole display, so its size is both the output
-    /// geometry and the work area; a real session subtracts layer-shell
-    /// exclusive zones here.
-    pub fn set_output_size(&mut self, size: SmithaySize<i32, Logical>) {
-        let logical = Rect::new(0, 0, size.w, size.h);
-        let output = LayoutOutput::new(NESTED_OUTPUT, self.output.name(), logical);
-        self.layout.reconfigure_outputs(vec![output]);
-        self.name_initial_workspace();
-        self.dirty = true;
+    /// A configuration that fails to load leaves the running one in place. The
+    /// alternative -- exiting over a typo -- would take the session with it.
+    pub fn reload_config(&mut self) {
+        match Config::load_from(&self.config_path) {
+            Ok(config) => {
+                self.layout.set_config(config.layout);
+                self.config = config;
+                self.dirty = true;
+                tracing::info!("configuration reloaded");
+            }
+            Err(err) => tracing::error!(%err, "keeping the running configuration"),
+        }
     }
 
-    /// Gives the desktop that comes up on first connect the name "1", so the
-    /// numeric bindings line up with what is on screen from the start.
-    fn name_initial_workspace(&mut self) {
-        if let Some(ws) = self.layout.active_workspace(NESTED_OUTPUT)
-            && self.layout.workspace(ws).is_some_and(|w| w.name.is_none())
-            && self.layout.workspace_named("1").is_none()
-        {
-            let _ = self.layout.rename_workspace(ws, Some("1".into()));
+    /// Replaces the set of connected displays.
+    ///
+    /// This is the one path by which displays appear, move, resize or go away,
+    /// for every backend. It keeps the protocol objects clients see in step
+    /// with the arrangement the layout engine works from.
+    pub fn configure_outputs(&mut self, specs: &[OutputSpec]) -> Vec<Event> {
+        // Withdraw displays that are gone, so clients stop referring to them.
+        let keep: Vec<OutputId> = specs.iter().map(|s| s.id).collect();
+        self.outputs.retain(|entry| {
+            if keep.contains(&entry.id) {
+                return true;
+            }
+            self.display_handle
+                .remove_global::<Irontile>(entry.global.clone());
+            false
+        });
+
+        for spec in specs {
+            let mode = Mode {
+                size: (spec.logical.w, spec.logical.h).into(),
+                refresh: spec.refresh,
+            };
+            let entry = match self.outputs.iter().find(|e| e.id == spec.id) {
+                Some(entry) => entry,
+                None => {
+                    let output = Output::new(
+                        spec.name.clone(),
+                        PhysicalProperties {
+                            size: (0, 0).into(),
+                            subpixel: Subpixel::Unknown,
+                            make: "irontile".into(),
+                            model: spec.name.clone(),
+                        },
+                    );
+                    let global = output.create_global::<Irontile>(&self.display_handle);
+                    self.outputs.push(OutputEntry {
+                        id: spec.id,
+                        output,
+                        global,
+                    });
+                    self.outputs.last().expect("just pushed")
+                }
+            };
+            entry.output.change_current_state(
+                Some(mode),
+                Some(spec.transform),
+                None,
+                Some((spec.logical.x, spec.logical.y).into()),
+            );
+            entry.output.set_preferred(mode);
+        }
+
+        let layout_outputs: Vec<LayoutOutput> = specs
+            .iter()
+            .map(|spec| {
+                // The nested and headless backends have no exclusive zones, so
+                // the work area is the whole display. A session backend
+                // subtracts layer-shell reservations here.
+                LayoutOutput::new(spec.id, spec.name.clone(), spec.logical)
+            })
+            .collect();
+        let events = self.layout.reconfigure_outputs(layout_outputs);
+        self.number_unnamed_workspaces();
+        self.dirty = true;
+        self.peers.broadcast(&events);
+        events
+    }
+
+    /// The protocol object for a display.
+    pub fn smithay_output(&self, id: OutputId) -> Option<&Output> {
+        self.outputs.iter().find(|e| e.id == id).map(|e| &e.output)
+    }
+
+    /// Gives every unnamed desktop the lowest free number.
+    ///
+    /// A desktop the layout engine created on its own -- the first one on a
+    /// display, or the replacement left behind when a desktop is moved away --
+    /// would otherwise have no name, and so no way to reach it by number.
+    fn number_unnamed_workspaces(&mut self) {
+        let unnamed: Vec<_> = self
+            .layout
+            .workspaces()
+            .filter(|w| w.name.is_none())
+            .map(|w| w.id)
+            .collect();
+        for ws in unnamed {
+            let Some(number) =
+                (1..=999).find(|n| self.layout.workspace_named(&n.to_string()).is_none())
+            else {
+                break;
+            };
+            let _ = self.layout.rename_workspace(ws, Some(number.to_string()));
         }
     }
 
@@ -132,27 +259,62 @@ impl Irontile {
     /// numbered slots.
     pub fn workspace_by_number(&mut self, number: u32) -> WorkspaceId {
         let name = number.to_string();
-        match self.layout.workspace_named(&name) {
-            Some(ws) => ws.id,
-            None => self.layout.create_workspace(Some(name)),
+        if let Some(ws) = self.layout.workspace_named(&name) {
+            return ws.id;
+        }
+        let workspace = self.layout.create_workspace(Some(name));
+        // This does not go through `dispatch`, so the event has to be raised
+        // here; a subscriber that missed it would never learn the desktop
+        // exists.
+        self.peers
+            .broadcast(&[Event::WorkspaceCreated { workspace }]);
+        workspace
+    }
+
+    /// Applies a command, reporting the resulting events.
+    pub fn apply(&mut self, command: Command) -> Vec<Event> {
+        match self.try_apply(command) {
+            Ok(events) => events,
+            // A binding pressed with nothing focused is a no-op, not a fault.
+            Err(LayoutError::UnknownWindow(_)) => Vec::new(),
+            Err(err) => {
+                tracing::warn!(%err, "layout rejected a command");
+                Vec::new()
+            }
         }
     }
 
-    pub fn apply(&mut self, command: Command) {
-        match dispatch(&mut self.layout, command) {
-            Ok(events) => self.absorb(&events),
-            Err(LayoutError::UnknownWindow(_)) => {}
-            Err(err) => tracing::warn!(%err, "layout rejected a command"),
+    /// Applies a command, surfacing a rejection so the control socket can
+    /// report it rather than swallowing it.
+    pub fn try_apply(&mut self, command: Command) -> Result<Vec<Event>, LayoutError> {
+        // A display change has to go through `configure_outputs`, which also
+        // creates and withdraws the protocol objects clients see. Letting it
+        // reach the layout engine directly would leave the two disagreeing
+        // about which displays exist.
+        if let Command::ReconfigureOutputs { outputs } = &command {
+            let specs: Vec<OutputSpec> = outputs
+                .iter()
+                .map(|o| OutputSpec::new(o.id, o.name.clone(), o.logical))
+                .collect();
+            return Ok(self.configure_outputs(&specs));
         }
-    }
 
-    fn absorb(&mut self, events: &[Event]) {
+        let events = dispatch(&mut self.layout, command)?;
         if !events.is_empty() {
             self.dirty = true;
         }
-        for event in events {
+        for event in &events {
             tracing::debug!(?event);
         }
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::WorkspaceCreated { .. }))
+        {
+            self.number_unnamed_workspaces();
+        }
+        // Subscribers see events from key bindings and from the socket alike.
+        self.peers.broadcast(&events);
+        Ok(events)
     }
 
     /// The rectangle the client's own surface occupies, once the border quad
@@ -162,7 +324,7 @@ impl Irontile {
             // A fullscreen window covers the display outright; a border would
             // make it not fullscreen.
             PlacementKind::Fullscreen => cell,
-            _ => cell.inset(self.theme.border_width),
+            _ => cell.inset(self.config.theme.border_width),
         }
     }
 
@@ -239,10 +401,10 @@ impl Irontile {
         keyboard.set_focus(self, target, SERIAL_COUNTER.next_serial());
     }
 
-    /// Logical size of the single display.
-    pub fn output_size(&self) -> SmithaySize<i32, Logical> {
+    /// Logical size of a display.
+    pub fn output_size(&self, id: OutputId) -> SmithaySize<i32, Logical> {
         self.layout
-            .output(NESTED_OUTPUT)
+            .output(id)
             .map(|o| SmithaySize::from((o.logical.w, o.logical.h)))
             .unwrap_or_else(|| SmithaySize::from((0, 0)))
     }
@@ -251,11 +413,15 @@ impl Irontile {
     /// what lets animating clients produce their next buffer.
     pub fn send_frame_callbacks(&self) {
         let time = self.start_time.elapsed();
-        let output = self.output.clone();
         for placement in &self.placements.placements {
-            if let Some(window) = self.windows.window(placement.window) {
-                window.send_frame(&output, time, None, |_, _| Some(output.clone()));
-            }
+            let (Some(window), Some(output)) = (
+                self.windows.window(placement.window),
+                self.smithay_output(placement.output),
+            ) else {
+                continue;
+            };
+            let output = output.clone();
+            window.send_frame(&output, time, None, |_, _| Some(output.clone()));
         }
     }
 
@@ -323,25 +489,33 @@ impl Irontile {
     /// With one display this does nothing, but it is the same call a
     /// multi-display session makes, so the binding does not have to change when
     /// a second monitor appears.
-    pub fn send_workspace_to_output(&mut self, dir: Direction) {
+    pub fn send_workspace_to_output(&mut self, dir: Direction) -> Vec<Event> {
         let Some(from) = self.layout.focused_output() else {
-            return;
+            return Vec::new();
         };
         let Some(to) = self.layout.output_in_direction(from, dir) else {
-            return;
+            return Vec::new();
         };
         let Some(ws) = self.layout.active_workspace(from) else {
-            return;
+            return Vec::new();
         };
         self.apply(Command::ShowWorkspace {
             workspace: ws,
             output: Some(to),
-        });
+        })
     }
 
-    pub fn spawn(&self, program: &str) {
+    pub fn spawn(&self, argv: &[String]) {
+        let Some((program, args)) = argv.split_first() else {
+            return;
+        };
         let mut command = std::process::Command::new(program);
+        command.args(args);
         command.env("WAYLAND_DISPLAY", &self.socket_name);
+        command.env(
+            "IRONTILE_SOCKET",
+            irontile_ipc::socket_path(&self.socket_name),
+        );
         // Children must not inherit the parent session's display, or they would
         // connect to the compositor irontile is nested inside instead.
         command.env_remove("DISPLAY");
@@ -349,6 +523,21 @@ impl Irontile {
             Ok(_) => tracing::info!(program, "spawned"),
             Err(err) => tracing::warn!(program, %err, "failed to spawn"),
         }
+    }
+
+    /// What the control socket reports for `workspaces`.
+    pub fn workspace_summaries(&self) -> Vec<irontile_ipc::WorkspaceSummary> {
+        let focused = self.layout.focused_workspace();
+        self.layout
+            .workspaces()
+            .map(|ws| irontile_ipc::WorkspaceSummary {
+                id: ws.id,
+                name: ws.name.clone(),
+                output: self.layout.output_showing(ws.id),
+                focused: Some(ws.id) == focused,
+                windows: ws.windows(),
+            })
+            .collect()
     }
 }
 

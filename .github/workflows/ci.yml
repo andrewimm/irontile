@@ -16,7 +16,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # The compositor links libxkbcommon. EGL and the GL driver are dlopened
-      # at runtime, so they are not needed to build or to run the test suite.
+      # at runtime, so they are not needed to build, and the integration tests
+      # use the headless backend, so no display server is needed to run them.
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
         with:

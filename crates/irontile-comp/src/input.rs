@@ -1,6 +1,6 @@
 //! Input handling: turning device events into layout commands.
 
-use irontile_layout::Command;
+use irontile_ipc::Action;
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis as InputAxis, AxisSource, ButtonState, Event, InputBackend,
     InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
@@ -9,7 +9,7 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 
-use crate::keymap::{Action, action_for};
+use crate::action;
 use crate::state::Irontile;
 
 /// Dispatches one input event.
@@ -48,7 +48,7 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
         key_state,
         serial,
         time,
-        |_state, mods, handle| {
+        |state, mods, handle| {
             if key_state != smithay::backend::input::KeyState::Pressed {
                 return FilterResult::Forward;
             }
@@ -58,66 +58,22 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
             let sym = handle
                 .raw_latin_sym_or_raw_current_sym()
                 .unwrap_or_else(|| handle.modified_sym());
-            match action_for(mods, sym) {
+            match state.config.keymap.action_for(mods, sym) {
                 // Intercepting means the client never sees the key, which is what
                 // keeps a compositor binding from also typing into the window.
-                Some(action) => FilterResult::Intercept(action),
+                Some(action) => FilterResult::Intercept(action.clone()),
                 None => FilterResult::Forward,
             }
         },
     );
 
     if let Some(action) = action {
-        perform(state, action);
+        perform(state, &action);
     }
 }
 
-fn perform(state: &mut Irontile, action: Action) {
-    match action {
-        Action::Focus(dir) => state.apply(Command::FocusDirection { dir }),
-        Action::Move(dir) => state.apply(Command::MoveWindow { window: None, dir }),
-        Action::Resize(dir) => {
-            let delta_px = state.theme.resize_step;
-            state.apply(Command::Resize {
-                window: None,
-                dir,
-                delta_px,
-            });
-        }
-        Action::SetAxis(axis) => state.apply(Command::SetAxis { window: None, axis }),
-        Action::Equalize => state.apply(Command::Equalize { window: None }),
-        Action::ToggleFloating => state.apply(Command::SetFloating {
-            window: None,
-            floating: None,
-        }),
-        Action::ToggleFullscreen => state.apply(Command::SetFullscreen {
-            window: None,
-            fullscreen: None,
-        }),
-        Action::CloseWindow => state.close_focused(),
-        Action::ShowWorkspace(n) => {
-            let workspace = state.workspace_by_number(n);
-            state.apply(Command::ShowWorkspace {
-                workspace,
-                output: None,
-            });
-        }
-        Action::MoveToWorkspace(n) => {
-            let workspace = state.workspace_by_number(n);
-            state.apply(Command::MoveWindowToWorkspace {
-                window: None,
-                workspace,
-                follow: false,
-            });
-        }
-        Action::FocusOutput(dir) => state.apply(Command::FocusOutputDirection { dir }),
-        Action::SendWorkspaceToOutput(dir) => state.send_workspace_to_output(dir),
-        Action::SpawnTerminal => match state.theme.terminal.clone() {
-            Some(terminal) => state.spawn(&terminal),
-            None => tracing::warn!("no terminal found; set IRONTILE_TERMINAL"),
-        },
-        Action::Quit => state.running = false,
-    }
+fn perform(state: &mut Irontile, action: &Action) {
+    action::perform(state, action);
 }
 
 fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32) {
@@ -152,7 +108,7 @@ fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButto
         && let Some(window) = state.window_at(pointer.current_location())
         && state.layout.focused_window() != Some(window)
     {
-        state.apply(Command::FocusWindow { window });
+        state.apply(irontile_layout::Command::FocusWindow { window });
         state.reflow();
     }
 
