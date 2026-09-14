@@ -1,6 +1,6 @@
 //! xdg-shell: mapping toplevels into the tiling tree.
 
-use irontile_layout::Command;
+use irontile_layout::{Command, InsertTarget};
 use smithay::{delegate_xdg_decoration, delegate_xdg_shell};
 use smithay::desktop::{
     PopupKeyboardGrab, PopupKind, PopupPointerGrab, PopupUngrabStrategy, Window,
@@ -25,19 +25,22 @@ impl XdgShellHandler for Irontile {
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        // The client is owed a configure before it may attach a buffer. It gets
-        // one with no size, leaving the first buffer's dimensions to the
-        // client; the cell it actually lands in is sent once it maps and the
-        // tree has a place for it.
-        surface.with_pending_state(|state| {
-            use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-            state.states.set(State::TiledLeft);
-            state.states.set(State::TiledRight);
-            state.states.set(State::TiledTop);
-            state.states.set(State::TiledBottom);
+        // Admitted to the tree straight away, but held out of rendering until
+        // it has drawn something. Both halves matter: a window given its cell
+        // before its first configure paints at the right size immediately,
+        // where one left to pick its own size paints at the wrong one and then
+        // visibly snaps; and holding it out of the frame until it has a buffer
+        // keeps an empty cell from appearing in the meantime.
+        let window = Window::new_wayland_window(surface);
+        let id = self.windows.insert(window);
+        self.apply(Command::AddWindow {
+            window: id,
+            workspace: None,
+            target: InsertTarget::default(),
         });
-        surface.send_configure();
-        self.windows.insert(Window::new_wayland_window(surface));
+        // Reflow now rather than on the next tick: this is what sends the
+        // client its first configure, and it carries the cell it will occupy.
+        self.reflow();
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {

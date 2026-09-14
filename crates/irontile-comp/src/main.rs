@@ -21,8 +21,6 @@ mod theme;
 
 use std::process::ExitCode;
 
-use irontile_layout::Rect;
-
 use crate::state::OutputSpec;
 
 const HELP: &str = "\
@@ -175,11 +173,14 @@ fn parse_outputs(spec: Option<&str>) -> anyhow::Result<Vec<OutputSpec>> {
         }
         let (x, y) = offset.unwrap_or((cursor, 0));
         cursor = x + w;
-        outputs.push(OutputSpec::new(
-            irontile_layout::OutputId(index as u64 + 1),
-            format!("HEADLESS-{}", index + 1),
-            Rect::new(x, y, w, h),
-        ));
+        outputs.push(
+            OutputSpec::new(
+                irontile_layout::OutputId(index as u64 + 1),
+                format!("HEADLESS-{}", index + 1),
+                irontile_layout::Size::new(w, h),
+            )
+            .at(irontile_layout::Point::new(x, y)),
+        );
     }
     if outputs.is_empty() {
         anyhow::bail!("no displays in the spec");
@@ -206,25 +207,26 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use irontile_layout::Rect;
 
     #[test]
     fn a_bare_size_becomes_one_display() {
         let outputs = parse_outputs(Some("800x600")).unwrap();
         assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].logical, Rect::new(0, 0, 800, 600));
+        assert_eq!(outputs[0].logical(), Rect::new(0, 0, 800, 600));
     }
 
     #[test]
     fn displays_without_positions_are_laid_end_to_end() {
         let outputs = parse_outputs(Some("1920x1080,1280x1024")).unwrap();
-        assert_eq!(outputs[0].logical, Rect::new(0, 0, 1920, 1080));
-        assert_eq!(outputs[1].logical, Rect::new(1920, 0, 1280, 1024));
+        assert_eq!(outputs[0].logical(), Rect::new(0, 0, 1920, 1080));
+        assert_eq!(outputs[1].logical(), Rect::new(1920, 0, 1280, 1024));
     }
 
     #[test]
     fn explicit_positions_are_honoured() {
         let outputs = parse_outputs(Some("1920x1080+100+50")).unwrap();
-        assert_eq!(outputs[0].logical, Rect::new(100, 50, 1920, 1080));
+        assert_eq!(outputs[0].logical(), Rect::new(100, 50, 1920, 1080));
     }
 
     #[test]

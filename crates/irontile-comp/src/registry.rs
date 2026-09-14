@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 
 use irontile_layout::WindowId;
-use smithay::backend::renderer::element::Id;
+use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::desktop::Window;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::get_parent;
@@ -16,9 +16,17 @@ use smithay::wayland::compositor::get_parent;
 #[derive(Debug)]
 pub struct Entry {
     pub window: Window,
-    /// Stable identity for this window's border quad, so the renderer sees one
-    /// long-lived element rather than a new one every frame.
-    pub border: Id,
+    /// This window's border quad.
+    ///
+    /// A buffer rather than a bare colour, because it carries the commit
+    /// counter damage tracking reads. Building the element with a fresh
+    /// constant counter makes a colour-only change -- which is exactly what
+    /// moving focus is -- indistinguishable from no change, and the border
+    /// never repaints.
+    /// Four strips -- top, bottom, left, right -- rather than one quad behind
+    /// the window, so a gap during a resize shows background rather than
+    /// border colour.
+    pub border: [SolidColorBuffer; 4],
 }
 
 #[derive(Debug, Default)]
@@ -41,7 +49,7 @@ impl Registry {
             id,
             Entry {
                 window,
-                border: Id::new(),
+                border: Default::default(),
             },
         );
         self.unmapped.insert(id);
@@ -65,6 +73,10 @@ impl Registry {
 
     pub fn get(&self, id: WindowId) -> Option<&Entry> {
         self.entries.get(&id)
+    }
+
+    pub fn get_mut(&mut self, id: WindowId) -> Option<&mut Entry> {
+        self.entries.get_mut(&id)
     }
 
     pub fn window(&self, id: WindowId) -> Option<&Window> {

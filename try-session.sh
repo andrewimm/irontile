@@ -32,13 +32,34 @@ if [ -z "$TERMINAL" ]; then
     exit 1
 fi
 
-# A throwaway config, so the run does not depend on what is in yours.
-CONFIG="$(mktemp -t irontile-session-XXXXXX.toml)"
-trap 'rm -f "$CONFIG"' EXIT
-cat > "$CONFIG" <<TOML
+# Use the real configuration if there is one, so a run tests what you actually
+# have. A throwaway is generated only when there is none, which is what the very
+# first runs needed and no longer the common case.
+REAL="${XDG_CONFIG_HOME:-$HOME/.config}/irontile/irontile.toml"
+CONFIG=""
+CLEANUP=""
+if [ -n "${IRONTILE_CONFIG:-}" ]; then
+    CONFIG="$IRONTILE_CONFIG"
+    echo "irontile: using $CONFIG"
+elif [ -f "$REAL" ]; then
+    CONFIG="$REAL"
+    echo "irontile: using $CONFIG"
+    if ! grep -q '^\[startup\]' "$CONFIG"; then
+        echo "irontile: NOTE - no [startup] section, so no window will open on its own."
+        echo "irontile:        Press Super+Return once it is up, or add:"
+        echo "irontile:            [startup]"
+        echo "irontile:            exec = [\"$TERMINAL\"]"
+    fi
+else
+    CONFIG="$(mktemp -t irontile-XXXXXX.toml)"
+    CLEANUP="$CONFIG"
+    trap 'rm -f "$CLEANUP"' EXIT
+    echo "irontile: no config at $REAL; using a throwaway that starts $TERMINAL"
+    cat > "$CONFIG" <<TOML
 [startup]
 exec = ["$TERMINAL"]
 TOML
+fi
 
 echo "irontile: starting $TERMINAL, logging to $LOG"
 echo "irontile: Ctrl+Alt+F<n> switches VT, Super+Shift+E quits, Super+Return opens a terminal"

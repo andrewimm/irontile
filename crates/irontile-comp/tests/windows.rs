@@ -267,3 +267,87 @@ fn the_advertised_protocol_surface_is_what_clients_expect() {
         "headless must not advertise dmabuf"
     );
 }
+
+#[test]
+fn the_frame_reports_which_window_is_focused() {
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+
+    client.map_window("one");
+    client.map_window("two");
+    let frame = compositor.wait_for_windows(2);
+
+    // The newest window has focus, and exactly one does.
+    let focused: Vec<_> = frame.placements.iter().filter(|p| p.focused).collect();
+    assert_eq!(focused.len(), 1);
+    let first_focused = focused[0].window;
+
+    compositor
+        .client
+        .action(irontile_ipc::Action::Focus(
+            irontile_layout::Direction::Left,
+        ))
+        .unwrap();
+
+    // This is what the border colour is derived from, so if it stops moving the
+    // highlight stops moving with it.
+    let frame = compositor.client.frame().unwrap();
+    let focused: Vec<_> = frame.placements.iter().filter(|p| p.focused).collect();
+    assert_eq!(focused.len(), 1, "exactly one window is focused");
+    assert_ne!(focused[0].window, first_focused, "focus should have moved");
+}
+
+#[test]
+fn a_new_window_is_configured_for_its_cell_before_it_draws() {
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+
+    // `map_window` waits for the first configure and only then attaches a
+    // buffer, so this is what the client is told before it has drawn anything.
+    let solo = client.map_window("solo");
+    compositor.wait_for_windows(1);
+    let configured = client.configured(solo);
+    // The whole work area, less gaps and border: its real cell, not a size the
+    // client picked for itself. Painting at the wrong size and then snapping is
+    // what a flash on open looks like.
+    assert_eq!(
+        (configured.width, configured.height),
+        (1920 - 12, 1080 - 12)
+    );
+
+    // A second window is told its half straight away, rather than opening full
+    // width and shrinking.
+    let second = client.map_window("second");
+    compositor.wait_for_windows(2);
+    let configured = client.configured(second);
+    assert!(
+        configured.width < 1000,
+        "opened at {}px, so it was sized before the split rather than after",
+        configured.width
+    );
+    assert!(configured.tiled);
+}
+
+#[test]
+fn a_window_that_never_draws_is_not_rendered() {
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+
+    client.map_window("drawn");
+    compositor.wait_for_windows(1);
+
+    // A toplevel that exists but has committed no buffer takes part in the
+    // layout, so the drawn windows resize around it, but must not appear.
+    let pending = client.create_toplevel_without_buffer("pending");
+    let frame = compositor.wait_for_windows(1);
+    assert_eq!(
+        frame.placements.len(),
+        1,
+        "an undrawn window must not be shown"
+    );
+
+    // Once it draws, it appears.
+    client.attach_buffer(pending);
+    let frame = compositor.wait_for_windows(2);
+    assert_eq!(frame.placements.len(), 2);
+}

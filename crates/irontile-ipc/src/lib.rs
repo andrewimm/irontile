@@ -27,8 +27,8 @@ use serde::{Deserialize, Serialize};
 pub use action::{Action, ParseError, Reason, VERBS, parse_action};
 pub use client::{Client, ClientError};
 pub use irontile_layout::{
-    Command, Event, Frame, Layout, LayoutError, Output, OutputId, Placement, PlacementKind, Rect,
-    WindowId, Workspace, WorkspaceId,
+    Axis, Command, Direction, Event, Frame, Layout, LayoutError, Output, OutputId, Placement,
+    PlacementKind, Rect, WindowId, Workspace, WorkspaceId,
 };
 pub use wire::{Decoder, MAX_MESSAGE, WireError, read_message, write_message};
 

@@ -4,6 +4,8 @@
 //! Deliberately dependency-free: argument parsing is hand-rolled so the build
 //! graph for `cargo xtask` stays as small as the workspace itself.
 
+mod multihead;
+
 use std::env;
 use std::process::{Command, ExitCode};
 
@@ -18,6 +20,10 @@ SUBCOMMANDS:
             to the compositor binary.
     test    Verify the workspace: rustfmt check, clippy (warnings denied), then
             the full test suite.
+    multihead
+            Exercise multi-display behaviour against a running compositor over
+            its control socket, writing a log. Started by try-multihead.sh as a
+            startup command, so it runs inside the session under test.
 
 OPTIONS (test):
     --skip-lints    Run only the test suite, skipping rustfmt and clippy.
@@ -50,6 +56,7 @@ fn run(args: &[String]) -> Result<(), String> {
     match subcommand {
         "run" => cmd_run(rest),
         "test" => cmd_test(rest),
+        "multihead" => multihead::run(rest),
         "help" | "-h" | "--help" => {
             print!("{HELP}");
             Ok(())

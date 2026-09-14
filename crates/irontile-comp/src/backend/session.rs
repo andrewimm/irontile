@@ -24,7 +24,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use irontile_layout::{OutputId, Point, Rect};
+use irontile_layout::{OutputId, Point};
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::drm::compositor::{DrmCompositor, FrameFlags};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
@@ -185,22 +185,14 @@ impl Session {
                 let mut spec = OutputSpec::new(
                     surface.id,
                     surface.output.name(),
-                    Rect::new(0, 0, mode.size.w, mode.size.h),
+                    irontile_layout::Size::new(mode.size.w, mode.size.h),
                 );
                 spec.refresh = mode.refresh;
-                spec
+                // The same object the `DrmCompositor` reads its scale from.
+                spec.with_output(surface.output.clone())
             })
             .collect();
         specs.sort_by_key(|spec| spec.id.0);
-
-        // Lay the displays out left to right in the order they were found.
-        // A real arrangement is the user's to configure; this at least never
-        // stacks two displays on top of each other.
-        let mut x = 0;
-        for spec in &mut specs {
-            spec.logical = Rect::new(x, 0, spec.logical.w, spec.logical.h);
-            x += spec.logical.w;
-        }
         specs
     }
 }
@@ -430,7 +422,17 @@ fn device_added(
             token,
         },
     );
-    tracing::info!(device = %path.display(), primary = is_primary, "gpu added");
+    let cursor_size = session
+        .devices
+        .get(&node)
+        .map(|device| device.drm.cursor_size())
+        .unwrap_or_default();
+    tracing::info!(
+        device = %path.display(),
+        primary = is_primary,
+        cursor = %format!("{}x{}", cursor_size.w, cursor_size.h),
+        "gpu added"
+    );
 
     device_changed(state, device_id);
     Ok(())
@@ -442,6 +444,9 @@ fn device_changed(state: &mut Irontile, device_id: libc::dev_t) {
     let Ok(node) = DrmNode::from_dev_id(device_id) else {
         return;
     };
+    // Cloned out before the backend is borrowed, so the mode a connector should
+    // come up in is available while it is being lit.
+    let wanted = state.config.outputs.clone();
     let Backend::Session(session) = &mut state.backend else {
         return;
     };
@@ -459,7 +464,7 @@ fn device_changed(state: &mut Irontile, device_id: libc::dev_t) {
                 connector,
                 crtc: Some(crtc),
             } => {
-                if let Err(err) = connector_connected(session, node, connector, crtc) {
+                if let Err(err) = connector_connected(session, node, connector, crtc, &wanted) {
                     tracing::warn!(%err, "failed to light a connector");
                 }
             }
@@ -486,29 +491,39 @@ fn connector_connected(
     node: DrmNode,
     connector: connector::Info,
     crtc: crtc::Handle,
+    wanted: &[crate::config::OutputConfig],
 ) -> anyhow::Result<()> {
     if !session.devices.contains_key(&node) {
         return Ok(());
     }
-
-    // The mode the display says it prefers, or its first, which is the best
-    // guess available without a configuration file saying otherwise.
-    let mode = connector
-        .modes()
-        .iter()
-        .find(|mode| {
-            mode.mode_type()
-                .contains(smithay::reexports::drm::control::ModeTypeFlags::PREFERRED)
-        })
-        .or_else(|| connector.modes().first())
-        .copied()
-        .context("connector reports no modes")?;
 
     let name = format!(
         "{}-{}",
         connector.interface().as_str(),
         connector.interface_id()
     );
+
+    // A configured mode if one matches, then the mode the display says it
+    // prefers, then whatever it listed first.
+    let requested = wanted
+        .iter()
+        .find(|o| o.name == name)
+        .or_else(|| wanted.iter().find(|o| o.name == "*"))
+        .and_then(|o| o.mode);
+    let mode = requested
+        .and_then(|want| pick_mode(&connector, want))
+        .or_else(|| {
+            connector.modes().iter().copied().find(|mode| {
+                mode.mode_type()
+                    .contains(smithay::reexports::drm::control::ModeTypeFlags::PREFERRED)
+            })
+        })
+        .or_else(|| connector.modes().first().copied())
+        .context("connector reports no modes")?;
+    if requested.is_some() {
+        let (w, h) = mode.size();
+        tracing::info!(connector = %name, mode = %format!("{w}x{h}"), "using a configured mode");
+    }
     // The same connector always gets the same id, so a desktop that prefers
     // this display is restored to it when it comes back.
     let id = match session.identities.get(&name) {
@@ -593,6 +608,32 @@ fn connector_connected(
     );
     tracing::info!(connector = %name, mode = %format!("{width}x{height}"), "display lit");
     Ok(())
+}
+
+/// Finds the listed mode closest to what was asked for.
+///
+/// An exact size is required, since a display cannot invent one, but the
+/// refresh rate is matched loosely: asking for 60 should accept 59.997, which
+/// is what a display will actually report.
+fn pick_mode(
+    connector: &connector::Info,
+    want: crate::config::ModeSpec,
+) -> Option<smithay::reexports::drm::control::Mode> {
+    let matching: Vec<_> = connector
+        .modes()
+        .iter()
+        .filter(|mode| {
+            let (w, h) = mode.size();
+            i32::from(w) == want.width && i32::from(h) == want.height
+        })
+        .copied()
+        .collect();
+    match want.refresh {
+        None => matching.iter().copied().max_by_key(refresh_millihertz),
+        Some(target) => matching
+            .into_iter()
+            .min_by_key(|mode| (refresh_millihertz(mode) - target).abs()),
+    }
 }
 
 fn device_removed(
@@ -708,12 +749,27 @@ enum Composed {
 }
 
 fn compose(state: &mut Irontile, id: OutputId) -> Composed {
-    // Nothing else draws a pointer on real hardware, so the position is read
-    // before the state is split up for rendering.
+    // Nothing else draws a pointer on real hardware. Both the position and the
+    // image are resolved before the state is split up for rendering, because
+    // resolving the image needs the whole compositor.
     let pointer = state
         .seat
         .get_pointer()
         .map(|pointer| pointer.current_location());
+    let display_scale = state
+        .smithay_output(id)
+        .map(|output| output.current_scale().fractional_scale())
+        .unwrap_or(1.0);
+    let surface_cursor = state.cursor_surface();
+    let image_cursor = match surface_cursor {
+        // A client drawing its own pointer needs no image from us.
+        Some(_) => None,
+        None => state.cursor_image(display_scale),
+    };
+    let cursor_size = image_cursor
+        .as_ref()
+        .map(|image| image.size)
+        .unwrap_or((0, 0));
     let Irontile {
         backend,
         placements,
@@ -721,7 +777,6 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         outputs,
         layout,
         config,
-        cursor,
         ..
     } = state;
     let Backend::Session(session) = backend else {
@@ -746,14 +801,38 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
     }
     surface.pending = false;
 
-    let scale = surface.output.current_scale().fractional_scale();
+    // The display's one `Output`, which the `DrmCompositor` also reads when it
+    // sizes elements, so the two cannot disagree.
+    let scale = outputs
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| entry.output.current_scale().fractional_scale())
+        .unwrap_or(1.0);
     let scene = Scene {
         frame: placements,
         windows,
         outputs,
         layout,
         theme: &config.theme,
-        cursor: pointer.map(|at| (&*cursor, Point::new(at.x as i32, at.y as i32))),
+        cursor: pointer.and_then(|at| {
+            let at = Point::new(at.x as i32, at.y as i32);
+            match (&surface_cursor, &image_cursor) {
+                (Some((surface, hotspot)), _) => Some(crate::render::Cursor::Surface {
+                    surface,
+                    hotspot: *hotspot,
+                    at,
+                }),
+                (None, Some(image)) => Some(crate::render::Cursor::Image {
+                    buffer: &image.buffer,
+                    hotspot: image.hotspot,
+                    size: image.logical_size,
+                    source: image.size,
+                    at,
+                }),
+                // The client asked for no pointer at all.
+                (None, None) => None,
+            }
+        }),
     };
     let elements = render::elements(&scene, renderer, id, scale);
 
@@ -775,6 +854,7 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
                 tracing::info!(
                     output = id.0,
                     hardware = on_plane,
+                    image = %format!("{}x{}", cursor_size.0, cursor_size.1),
                     "cursor plane assignment changed"
                 );
             }

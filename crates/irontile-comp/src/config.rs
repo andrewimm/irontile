@@ -23,6 +23,9 @@ pub struct Config {
     pub theme: Theme,
     pub layout: irontile_layout::Config,
     pub keymap: Keymap,
+    pub cursor: CursorConfig,
+    /// Per-display settings, matched by connector name.
+    pub outputs: Vec<OutputConfig>,
     /// Commands run once the compositor is up.
     ///
     /// Mostly this is how a bar gets started, but on a first run on real
@@ -42,6 +45,8 @@ impl Default for Config {
             },
             theme,
             keymap: Keymap::defaults(),
+            cursor: CursorConfig::default(),
+            outputs: Vec::new(),
             startup: Vec::new(),
         }
     }
@@ -142,12 +147,147 @@ impl Config {
             .filter(|argv: &Vec<String>| !argv.is_empty())
             .collect();
 
+        let outputs = file
+            .outputs
+            .into_iter()
+            .map(OutputFile::into_output)
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Config {
             layout: file.layout.into_layout(theme.layout_params()),
             theme,
             keymap,
+            cursor: file.cursor,
+            outputs,
             startup,
         })
+    }
+}
+
+/// Which pointer images to use.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct CursorConfig {
+    /// An XCursor theme name. Empty means the built-in arrow only.
+    pub theme: String,
+    /// Nominal size in logical pixels; a display at twice the scale gets twice
+    /// the image.
+    pub size: i32,
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            // What the environment already says, if anything, so the pointer
+            // matches the rest of the desktop without being configured twice.
+            theme: std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into()),
+            size: std::env::var("XCURSOR_SIZE")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(24),
+        }
+    }
+}
+
+/// How one display should be set up.
+///
+/// Matched on the connector name the hardware reports, such as `eDP-1` or
+/// `DP-3`. A `*` entry applies to any display without one of its own, which is
+/// how a scale can be set for every monitor at once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutputConfig {
+    pub name: String,
+    /// Top-left corner in the global logical space. Displays without one are
+    /// laid end to end to the right of everything that has one.
+    pub position: Option<(i32, i32)>,
+    /// Preferred mode. Without one, the display's own preferred mode is used.
+    pub mode: Option<ModeSpec>,
+    pub scale: Option<f64>,
+    pub transform: Option<OutputTransform>,
+    pub enabled: bool,
+}
+
+/// A requested display mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModeSpec {
+    pub width: i32,
+    pub height: i32,
+    /// Refresh in millihertz, if one was asked for.
+    pub refresh: Option<i32>,
+}
+
+impl ModeSpec {
+    /// Parses `2256x1504` or `2256x1504@59.99`.
+    pub fn parse(text: &str) -> Option<ModeSpec> {
+        let (size, refresh) = match text.split_once('@') {
+            Some((size, rate)) => {
+                let hz: f64 = rate.trim().trim_end_matches("Hz").trim().parse().ok()?;
+                if !(hz.is_finite() && hz > 0.0) {
+                    return None;
+                }
+                // Millihertz, which is how DRM reports it.
+                (size, Some((hz * 1000.0).round() as i32))
+            }
+            None => (text, None),
+        };
+        let (w, h) = size.trim().split_once('x')?;
+        let width: i32 = w.trim().parse().ok()?;
+        let height: i32 = h.trim().parse().ok()?;
+        (width > 0 && height > 0).then_some(ModeSpec {
+            width,
+            height,
+            refresh,
+        })
+    }
+}
+
+/// A display's orientation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputTransform {
+    Normal,
+    Rotate90,
+    Rotate180,
+    Rotate270,
+    Flipped,
+    Flipped90,
+    Flipped180,
+    Flipped270,
+}
+
+impl OutputTransform {
+    pub fn parse(text: &str) -> Option<OutputTransform> {
+        Some(match text.trim() {
+            "normal" | "0" => OutputTransform::Normal,
+            "90" => OutputTransform::Rotate90,
+            "180" => OutputTransform::Rotate180,
+            "270" => OutputTransform::Rotate270,
+            "flipped" => OutputTransform::Flipped,
+            "flipped-90" => OutputTransform::Flipped90,
+            "flipped-180" => OutputTransform::Flipped180,
+            "flipped-270" => OutputTransform::Flipped270,
+            _ => return None,
+        })
+    }
+
+    /// Whether the orientation swaps width and height.
+    pub fn is_sideways(self) -> bool {
+        matches!(
+            self,
+            OutputTransform::Rotate90
+                | OutputTransform::Rotate270
+                | OutputTransform::Flipped90
+                | OutputTransform::Flipped270
+        )
+    }
+}
+
+impl Config {
+    /// The settings for a display, preferring an exact name over the wildcard.
+    pub fn output(&self, name: &str) -> Option<&OutputConfig> {
+        self.outputs
+            .iter()
+            .find(|o| o.name == name)
+            .or_else(|| self.outputs.iter().find(|o| o.name == "*"))
     }
 }
 
@@ -165,6 +305,75 @@ struct ConfigFile {
     /// Key combination to action text. An empty table means the defaults.
     binds: BTreeMap<String, String>,
     startup: StartupConfig,
+    cursor: CursorConfig,
+    #[serde(rename = "output")]
+    outputs: Vec<OutputFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct OutputFile {
+    name: String,
+    position: Option<[i32; 2]>,
+    mode: Option<String>,
+    scale: Option<f64>,
+    transform: Option<String>,
+    enabled: bool,
+}
+
+impl Default for OutputFile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            position: None,
+            mode: None,
+            scale: None,
+            transform: None,
+            enabled: true,
+        }
+    }
+}
+
+impl OutputFile {
+    fn into_output(self) -> Result<OutputConfig, ParseFailure> {
+        let fail = |message: String| ParseFailure::Binding {
+            key: format!("output.{}", self.name),
+            message,
+        };
+        if self.name.is_empty() {
+            return Err(ParseFailure::Binding {
+                key: "output".into(),
+                message: "every [[output]] needs a name, such as \"eDP-1\" or \"*\"".into(),
+            });
+        }
+        let mode = match &self.mode {
+            Some(text) => Some(
+                ModeSpec::parse(text)
+                    .ok_or_else(|| fail(format!("{text:?} is not a mode like \"2256x1504@60\"")))?,
+            ),
+            None => None,
+        };
+        let transform = match &self.transform {
+            Some(text) => Some(
+                OutputTransform::parse(text)
+                    .ok_or_else(|| fail(format!("{text:?} is not an orientation")))?,
+            ),
+            None => None,
+        };
+        if let Some(scale) = self.scale
+            && !(scale.is_finite() && scale > 0.0)
+        {
+            return Err(fail(format!("{scale} is not a usable scale")));
+        }
+        Ok(OutputConfig {
+            name: self.name,
+            position: self.position.map(|p| (p[0], p[1])),
+            mode,
+            scale: self.scale,
+            transform,
+            enabled: self.enabled,
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

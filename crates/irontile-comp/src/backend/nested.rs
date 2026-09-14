@@ -126,7 +126,7 @@ fn nested_spec(size: smithay::utils::Size<i32, smithay::utils::Logical>) -> Outp
     let mut spec = OutputSpec::new(
         NESTED_OUTPUT,
         "irontile-nested",
-        irontile_layout::Rect::new(0, 0, size.w, size.h),
+        irontile_layout::Size::new(size.w, size.h),
     );
     spec.transform = NESTED_TRANSFORM;
     spec

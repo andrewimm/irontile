@@ -238,6 +238,13 @@ impl TestClient {
     /// Creates a toplevel, waits for its first configure, and gives it a
     /// buffer, which is the point at which the compositor treats it as mapped.
     pub fn map_window(&mut self, title: &str) -> WindowId {
+        let id = self.create_toplevel_without_buffer(title);
+        self.attach_buffer(id);
+        id
+    }
+
+    /// Creates the toplevel and commits it, without a buffer.
+    fn begin_window(&mut self, title: &str) -> usize {
         let handle = self.queue.handle();
         let globals = &self.state.globals;
         let compositor = globals.compositor.clone().expect("checked at connect");
@@ -275,21 +282,29 @@ impl TestClient {
             mapped: false,
         });
 
-        // The first commit carries no buffer; the compositor replies with a
-        // configure, and only then may a buffer be attached.
+        index
+    }
+
+    /// Creates a toplevel and waits for its first configure, but attaches no
+    /// buffer, so the compositor sees a window that has not drawn yet.
+    pub fn create_toplevel_without_buffer(&mut self, title: &str) -> WindowId {
+        let index = self.begin_window(title);
         self.wait_until(
             |state| state.windows[index].configures > 0,
             "first configure",
         );
+        WindowId(index)
+    }
 
-        let window = &mut self.state.windows[index];
-        window.surface.attach(Some(&window.buffer), 0, 0);
+    /// Gives a window its first buffer, which is what makes it mapped.
+    pub fn attach_buffer(&mut self, id: WindowId) {
+        let buffer = self.buffer();
+        let window = &mut self.state.windows[id.0];
+        window.surface.attach(Some(&buffer), 0, 0);
         window.surface.damage(0, 0, i32::MAX, i32::MAX);
         window.surface.commit();
         window.mapped = true;
         self.roundtrip();
-
-        WindowId(index)
     }
 
     /// Unmaps and destroys a window.
