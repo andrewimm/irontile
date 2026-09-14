@@ -13,7 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 irontile-layout.workspace = true
-irontile-ipc.workspace = true
+smithay.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

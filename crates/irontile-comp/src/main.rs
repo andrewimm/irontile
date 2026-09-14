@@ -1,17 +1,30 @@
 //! The irontile compositor.
 //!
-//! This binary owns every Wayland and rendering concern. It holds no layout
-//! policy of its own: it translates protocol events into [`irontile_layout`]
-//! commands and turns the resulting [`Frame`] back into surface configures.
-//!
-//! [`Frame`]: irontile_layout::Frame
+//! The binary owns every Wayland and rendering concern and holds no layout
+//! policy of its own: protocol events become [`irontile_layout`] commands, and
+//! the frame that comes back becomes surface configures and render elements.
 
-fn main() {
-    // TODO: bring up the Smithay backend, seat, and output handling, then drive
-    // `irontile_layout::dispatch` from protocol events.
-    eprintln!(
-        "irontile {}: compositor backend is not implemented yet",
-        env!("CARGO_PKG_VERSION")
-    );
-    std::process::exit(1);
+mod backend;
+mod input;
+mod keymap;
+mod registry;
+mod render;
+mod shell;
+mod state;
+mod theme;
+
+fn main() -> anyhow::Result<()> {
+    init_tracing();
+    backend::nested::run()
+}
+
+fn init_tracing() {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        // Escape codes in a redirected log make it unreadable and unparseable.
+        .with_ansi(std::io::stdout().is_terminal())
+        .init();
 }
