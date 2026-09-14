@@ -76,6 +76,10 @@ impl Irontile {
         // `publish_outputs` arranges every map before reading its zone, so this
         // is only the name the layer-shell side calls it by.
         self.publish_outputs();
+        // A panel appearing or going away can change who owns the keyboard, and
+        // that has to settle now rather than on the next reflow: a launcher
+        // that has to wait a frame for focus loses the first thing typed.
+        self.reflow();
     }
 
     /// Whether a surface belongs to a layer surface on any display.

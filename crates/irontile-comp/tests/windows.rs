@@ -252,6 +252,10 @@ fn the_advertised_protocol_surface_is_what_clients_expect() {
         "wp_cursor_shape_manager_v1",
         "wl_data_device_manager",
         "zxdg_output_manager_v1",
+        // Fractional scale is useless without viewporter: a client rendering
+        // at 1.5x has no other way to say how large the result should be.
+        "wp_fractional_scale_manager_v1",
+        "wp_viewporter",
     ] {
         assert!(
             advertised.iter().any(|a| a == interface),
@@ -350,4 +354,49 @@ fn a_window_that_never_draws_is_not_rendered() {
     client.attach_buffer(pending);
     let frame = compositor.wait_for_windows(2);
     assert_eq!(frame.placements.len(), 2);
+}
+
+#[test]
+fn a_client_is_told_the_exact_scale_of_its_display() {
+    let config = harness::TempConfig::new(
+        r#"
+        [[output]]
+        name = "HEADLESS-1"
+        scale = 1.5
+        "#,
+    );
+    let mut compositor = Compositor::with_config("2256x1504", Some(config.path()));
+    let mut client = compositor.connect_client();
+
+    let window = client.map_window("solo");
+    compositor.wait_for_windows(1);
+
+    // The protocol carries 120ths, so 1.5 arrives as 180. A whole number is all
+    // wl_output can express, and a client given only that renders at 2x and is
+    // resampled down.
+    client.wait_for(|c| c.configured(window).fractional_scale.is_some());
+    assert_eq!(client.configured(window).fractional_scale, Some(180));
+}
+
+#[test]
+fn fractional_scale_divides_the_logical_size() {
+    let config = harness::TempConfig::new(
+        r#"
+        [[output]]
+        name = "HEADLESS-1"
+        scale = 1.5
+        "#,
+    );
+    let mut compositor = Compositor::with_config("2256x1504", Some(config.path()));
+    let layout = compositor.client.layout().unwrap();
+    // 2256/1.5 = 1504, 1504/1.5 = 1002.67 which rounds to 1003.
+    assert_eq!(
+        layout.outputs()[0].logical,
+        irontile_ipc::Rect::new(0, 0, 1504, 1003)
+    );
+
+    let mut client = compositor.connect_client();
+    client.map_window("solo");
+    let frame = compositor.wait_for_windows(1);
+    assert_eq!(frame.placements[0].rect.w, 1504 - 8);
 }

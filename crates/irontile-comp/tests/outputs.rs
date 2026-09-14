@@ -161,3 +161,42 @@ fn a_bad_output_entry_names_the_display_it_came_from() {
     let outputs = outputs(&mut compositor);
     assert_eq!(outputs[0].logical, Rect::new(0, 0, 1920, 1080));
 }
+
+#[test]
+fn four_thirds_divides_a_2256x1504_panel_exactly() {
+    // The scale this laptop panel actually wants: 2256 * 3/4 = 1692 and
+    // 1504 * 3/4 = 1128, both whole, so nothing is lost to rounding.
+    let config = TempConfig::new(
+        r#"
+        [[output]]
+        name = "HEADLESS-1"
+        scale = 1.3333
+        "#,
+    );
+    let mut compositor = Compositor::with_config("2256x1504", Some(config.path()));
+    let outputs = outputs(&mut compositor);
+    assert_eq!(outputs[0].logical, Rect::new(0, 0, 1692, 1128));
+}
+
+#[test]
+fn a_client_is_told_the_same_scale_the_layout_used() {
+    let config = TempConfig::new(
+        r#"
+        [[output]]
+        name = "HEADLESS-1"
+        scale = 1.3333
+        "#,
+    );
+    let mut compositor = Compositor::with_config("2256x1504", Some(config.path()));
+    let mut client = compositor.connect_client();
+    let window = client.map_window("solo");
+    compositor.wait_for_windows(1);
+
+    // 160/120 is four thirds exactly. Had the compositor kept 1.3333 and told
+    // the client 160, the two would be laying out against different numbers.
+    client.wait_for(|c| c.configured(window).fractional_scale.is_some());
+    assert_eq!(client.configured(window).fractional_scale, Some(160));
+
+    let layout = compositor.client.layout().unwrap();
+    assert_eq!(layout.outputs()[0].logical.w, 1692);
+}

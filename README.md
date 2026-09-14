@@ -118,6 +118,24 @@ outer_gap = 4
 resize_step = 40
 terminal = "foot"        # omit to use the first one found on PATH
 
+[cursor]
+theme = "Adwaita"        # an XCursor theme; defaults to $XCURSOR_THEME
+size = 24                # logical pixels; a scaled display gets a larger image
+
+# One per display, matched on the connector name the hardware reports. A "*"
+# entry applies to any display without one of its own.
+[[output]]
+name = "DP-4"
+position = [0, 0]        # top-left corner in the global logical space
+
+[[output]]
+name = "eDP-1"
+mode = "2256x1504@60"    # size must match exactly; refresh is matched loosely
+scale = 1.3333           # snapped to the nearest 120th, so this is four thirds
+transform = "normal"     # or 90, 180, 270, flipped, flipped-90, ...
+position = [1156, 1440]
+enabled = true
+
 [layout]
 smart_split = true       # split along the longer edge, rather than appending
 default_axis = "horizontal"
@@ -170,17 +188,16 @@ All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
 | `xdg-decoration` | Every request is answered server-side; clients never draw their own titlebars |
 | `wlr-layer-shell` | Bars and panels; exclusive zones shrink the work area windows tile into |
 | `wl_data_device`, `primary-selection` | Clipboard and middle-click paste |
-| `cursor-shape` | Clients name a cursor rather than supplying a buffer |
+| `cursor-shape` | Clients name a cursor and the compositor supplies the image, from an XCursor theme |
 | `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
+| `fractional-scale`, `viewporter` | A client is told the exact scale of the display it is on, so it can render at 1.5x rather than at 2x and be resampled down. The two go together: without viewporter there is no way to say how large a 1.5x buffer should appear |
 
-The pointer image is a built-in arrow, drawn by the compositor because on real
-hardware nothing else will. It does not yet change shape: a client asking for an
-I-beam over text, or supplying its own cursor surface, is currently ignored and
-gets the arrow.
+The pointer is drawn by the compositor, because on real hardware nothing else
+will. A client that supplies its own cursor surface gets that; one that names a
+shape gets it from an XCursor theme; and a built-in arrow covers the case where
+no theme is installed, which is what a fresh machine looks like.
 
-Not yet implemented: cursor shapes and client cursor surfaces, XWayland,
-`viewporter` and `fractional-scale`, `pointer-constraints` and
-`relative-pointer`.
+Not yet implemented: XWayland, `pointer-constraints` and `relative-pointer`.
 
 ## Backends
 
@@ -256,6 +273,18 @@ test can assert on the tree or call `validate()` on it without the compositor
 growing a reporting API of its own. Combined with the headless backend, that is
 how display arrangement and hotplug are covered end to end.
 
+**A border is a border, not a backdrop.** It is drawn as four strips around a
+window rather than a filled quad behind one. The difference shows only while a
+client's buffer is smaller than its cell -- during a resize, or in a new
+window's first frames -- and then a backdrop paints that gap border-coloured,
+which reads as a flash.
+
+**A window is told its cell before it paints.** A toplevel joins the tree as
+soon as it appears, so its first configure carries the size it will actually
+occupy, but it is held out of the frame until it has committed a buffer. Either
+half alone is visible: configured late, it paints at the wrong size and snaps;
+rendered early, an empty bordered rectangle sits on screen until it draws.
+
 **Decoration is not the client's decision.** The compositor draws a border
 rectangle and nothing else, so every `xdg-decoration` request is answered
 server-side whatever it asked for. Without the protocol advertised at all,
@@ -266,6 +295,16 @@ than either choice made deliberately.
 pixels at the top of a display shrinks that display's work area, and the layout
 engine tiles into what is left. The engine never learns that layer-shell exists;
 it is handed a rectangle.
+
+**Scales are snapped to 120ths.** That is the granularity the fractional-scale
+protocol can express, so rounding to it means the compositor lays windows out at
+exactly the number clients were told, and it turns the approximations people
+write into the values they meant: `1.3333` is four thirds.
+
+**Physical pixels and logical pixels are kept apart.** A display scans out a
+mode; windows are laid out in that divided by its scale. Conflating the two is
+what makes a scaled display either tiny or blurry, and the failure is invisible
+at scale one, so it only shows up on a second monitor.
 
 **A display keeps its identity across unplugging.** Connector names map to
 output ids for the life of the session, so a monitor that comes back is the same

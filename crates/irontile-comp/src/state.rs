@@ -26,6 +26,9 @@ use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::dmabuf::{
     DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
 };
+use smithay::wayland::fractional_scale::{
+    FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
+};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
@@ -169,6 +172,15 @@ pub struct Irontile {
     /// for its global.
     #[allow(dead_code)]
     pub cursor_shape_state: CursorShapeManagerState,
+    /// Lets a client be told the exact scale of the display it is on, rather
+    /// than the whole number `wl_output` is limited to. Held for its global.
+    #[allow(dead_code)]
+    pub fractional_scale_state: FractionalScaleManagerState,
+    /// Required alongside fractional scale: a client rendering at 1.5x has no
+    /// way to say how large the result should be without it. Held for its
+    /// global.
+    #[allow(dead_code)]
+    pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
     pub popups: PopupManager,
     pub seat: Seat<Self>,
     /// Connected displays, paired with the protocol object each is advertised
@@ -250,6 +262,8 @@ impl Irontile {
             data_device_state: DataDeviceState::new::<Self>(dh),
             primary_selection_state: PrimarySelectionState::new::<Self>(dh),
             cursor_shape_state: CursorShapeManagerState::new::<Self>(dh),
+            fractional_scale_state: FractionalScaleManagerState::new::<Self>(dh),
+            viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Self>(dh),
             popups: PopupManager::default(),
             seat,
             outputs: Vec::new(),
@@ -682,6 +696,7 @@ impl Irontile {
         }
         self.placements = next;
         self.sync_borders();
+        self.sync_surface_outputs();
         self.refresh_keyboard_focus();
     }
 
@@ -717,6 +732,86 @@ impl Irontile {
                 }
             });
             toplevel.send_pending_configure();
+        }
+    }
+
+    /// The topmost layer surface asking for the keyboard, if any.
+    ///
+    /// Overlay before top before the rest, so a launcher drawn over a bar is
+    /// the one that receives what is typed.
+    fn keyboard_layer(&self) -> Option<smithay::desktop::LayerSurface> {
+        use smithay::wayland::shell::wlr_layer::Layer;
+        for wanted in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
+            for entry in &self.outputs {
+                let map = smithay::desktop::layer_map_for_output(&entry.output);
+                if let Some(layer) = map
+                    .layers()
+                    .rev()
+                    .find(|l| l.layer() == wanted && l.can_receive_keyboard_focus())
+                {
+                    return Some(layer.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// The scale of the display a surface is being shown on.
+    ///
+    /// Falls back to the focused display, which is where a surface that is not
+    /// placed yet -- one still waiting for its first buffer -- will appear.
+    fn scale_for_surface(&self, surface: &WlSurface) -> f64 {
+        let output = self
+            .windows
+            .find(surface)
+            .and_then(|(id, _)| {
+                self.placements
+                    .placements
+                    .iter()
+                    .find(|p| p.window == id)
+                    .map(|p| p.output)
+            })
+            .or_else(|| self.layout.focused_output());
+        output
+            .and_then(|id| self.smithay_output(id))
+            .map(|output| output.current_scale().fractional_scale())
+            .unwrap_or(1.0)
+    }
+
+    /// Tells each window which display it is on, and at what scale.
+    ///
+    /// Without the enter event a client has no idea which display it is on and
+    /// so renders at scale one, which the compositor then has to resample. This
+    /// is what makes a window sharp on a scaled display rather than merely the
+    /// right size.
+    fn sync_surface_outputs(&self) {
+        for entry in &self.outputs {
+            let scale = display_scale(&entry.output);
+            for placement in &self.placements.placements {
+                let Some(window) = self.windows.window(placement.window) else {
+                    continue;
+                };
+                let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) else {
+                    continue;
+                };
+                // The overlap is given in surface-local coordinates, so a
+                // window on this display covers all of itself and a window
+                // elsewhere covers none of it.
+                let overlap = (placement.output == entry.id).then(|| {
+                    smithay::utils::Rectangle::from_size(
+                        (placement.rect.w, placement.rect.h).into(),
+                    )
+                });
+                smithay::desktop::utils::output_update(&entry.output, overlap, &surface);
+
+                if placement.output == entry.id {
+                    smithay::wayland::compositor::with_states(&surface, |states| {
+                        with_fractional_scale(states, |fractional| {
+                            fractional.set_preferred_scale(scale);
+                        });
+                    });
+                }
+            }
         }
     }
 
@@ -762,12 +857,20 @@ impl Irontile {
         if keyboard.is_grabbed() {
             return;
         }
+        // A layer surface that asked for the keyboard outranks the tiling tree
+        // -- that is what makes a launcher able to read what is typed into it.
+        // The window underneath keeps its place and gets focus back when the
+        // layer surface goes away.
         let target = self
-            .placements
-            .focused
-            .and_then(|id| self.windows.window(id))
-            .cloned()
-            .map(crate::focus::KeyboardFocus::Window);
+            .keyboard_layer()
+            .map(crate::focus::KeyboardFocus::Layer)
+            .or_else(|| {
+                self.placements
+                    .focused
+                    .and_then(|id| self.windows.window(id))
+                    .cloned()
+                    .map(crate::focus::KeyboardFocus::Window)
+            });
         if keyboard.current_focus() == target {
             return;
         }
@@ -944,6 +1047,46 @@ impl Irontile {
         }
     }
 
+    /// What the control socket reports for `windows`.
+    pub fn window_infos(&self) -> Vec<irontile_ipc::WindowInfo> {
+        let focused = self.layout.focused_window();
+        self.layout
+            .workspaces()
+            .flat_map(|ws| {
+                let output = self.layout.output_showing(ws.id);
+                ws.windows().into_iter().map(move |window| (window, ws.id, output))
+            })
+            .filter_map(|(window, workspace, output)| {
+                let (title, app_id) = self.window_names(window);
+                Some(irontile_ipc::WindowInfo {
+                    id: window,
+                    title,
+                    app_id,
+                    workspace,
+                    output,
+                    focused: focused == Some(window),
+                })
+            })
+            .collect()
+    }
+
+    /// What a window calls itself, if it has said.
+    pub fn window_names(&self, window: WindowId) -> (Option<String>, Option<String>) {
+        let Some(toplevel) = self.windows.window(window).and_then(|w| w.toplevel()) else {
+            return (None, None);
+        };
+        smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .map(|data| {
+                    let attrs = data.lock().unwrap();
+                    (attrs.title.clone(), attrs.app_id.clone())
+                })
+                .unwrap_or((None, None))
+        })
+    }
+
     /// What the control socket reports for `workspaces`.
     pub fn workspace_summaries(&self) -> Vec<irontile_ipc::WorkspaceSummary> {
         let focused = self.layout.focused_workspace();
@@ -1086,6 +1229,22 @@ impl DataDeviceHandler for Irontile {
 /// requires this even on a compositor with no tablet support of its own.
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Irontile {}
 
+impl FractionalScaleHandler for Irontile {
+    /// A client asked what scale its surface is being shown at.
+    ///
+    /// Answering immediately matters: a client that gets no reply falls back to
+    /// the whole-number scale from `wl_output`, renders at that, and is then
+    /// resampled to the real one.
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let scale = self.scale_for_surface(&surface);
+        smithay::wayland::compositor::with_states(&surface, |states| {
+            with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(scale);
+            });
+        });
+    }
+}
+
 impl PrimarySelectionHandler for Irontile {
     fn primary_selection_state(&self) -> &PrimarySelectionState {
         &self.primary_selection_state
@@ -1100,6 +1259,8 @@ impl ServerDndGrabHandler for Irontile {
 
 delegate_compositor!(Irontile);
 smithay::delegate_dmabuf!(Irontile);
+smithay::delegate_fractional_scale!(Irontile);
+smithay::delegate_viewporter!(Irontile);
 smithay::delegate_primary_selection!(Irontile);
 smithay::delegate_cursor_shape!(Irontile);
 delegate_shm!(Irontile);
@@ -1129,4 +1290,8 @@ fn transform_of(transform: crate::config::OutputTransform) -> smithay::utils::Tr
         T::Flipped180 => S::Flipped180,
         T::Flipped270 => S::Flipped270,
     }
+}
+
+fn display_scale(output: &Output) -> f64 {
+    output.current_scale().fractional_scale()
 }

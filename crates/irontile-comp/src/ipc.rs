@@ -269,6 +269,7 @@ fn query_reply(state: &mut Irontile, query: Query) -> ResponsePayload {
         Query::Frame => ResponsePayload::Frame(state.placements.clone()),
         Query::Outputs => ResponsePayload::Outputs(state.layout.outputs().to_vec()),
         Query::Workspaces => ResponsePayload::Workspaces(state.workspace_summaries()),
+        Query::Windows => ResponsePayload::Windows(state.window_infos()),
         Query::Layout => ResponsePayload::Layout(Box::new(state.layout.clone())),
         // The protocol is `#[non_exhaustive]`; an unknown query is an error
         // rather than a panic.

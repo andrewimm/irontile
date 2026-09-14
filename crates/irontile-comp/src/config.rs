@@ -241,6 +241,21 @@ impl ModeSpec {
     }
 }
 
+/// Snaps a scale to the nearest 120th.
+///
+/// The fractional-scale protocol carries scales as 120ths, so that is the
+/// finest a client can be told about. Rounding here means the compositor lays
+/// windows out at exactly the number the client was given, rather than at a
+/// slightly different one the protocol had no way to express. It also turns the
+/// approximations people actually write into the exact values they meant:
+/// `1.3333` becomes four thirds, `1.1666` becomes seven sixths.
+pub fn quantize_scale(scale: f64) -> f64 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 1.0;
+    }
+    ((scale * 120.0).round() / 120.0).max(1.0 / 120.0)
+}
+
 /// A display's orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputTransform {
@@ -369,7 +384,7 @@ impl OutputFile {
             name: self.name,
             position: self.position.map(|p| (p[0], p[1])),
             mode,
-            scale: self.scale,
+            scale: self.scale.map(quantize_scale),
             transform,
             enabled: self.enabled,
         })
@@ -618,6 +633,34 @@ mod tests {
         assert_eq!(config.layout.default_axis, Axis::Vertical);
         // Gaps configured on the theme must reach the layout engine.
         assert_eq!(config.layout.params.inner_gap, 12);
+    }
+
+    #[test]
+    fn scales_are_snapped_to_what_the_protocol_can_express() {
+        // Four thirds is what someone means by 1.3333, and 160/120 is exactly
+        // that, so the compositor and the client end up using the same number.
+        assert_eq!(quantize_scale(1.3333), 160.0 / 120.0);
+        assert_eq!(quantize_scale(1.333_333_333), 160.0 / 120.0);
+        // The common scales are already exact.
+        for exact in [1.0, 1.25, 1.5, 1.75, 2.0, 3.0] {
+            assert_eq!(quantize_scale(exact), exact, "{exact} should not move");
+        }
+        // Nonsense cannot produce a scale that would divide by zero.
+        assert_eq!(quantize_scale(0.0), 1.0);
+        assert_eq!(quantize_scale(f64::NAN), 1.0);
+    }
+
+    #[test]
+    fn a_configured_scale_is_quantized() {
+        let config = Config::parse(
+            r#"
+            [[output]]
+            name = "eDP-1"
+            scale = 1.3333
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.outputs[0].scale, Some(160.0 / 120.0));
     }
 
     #[test]

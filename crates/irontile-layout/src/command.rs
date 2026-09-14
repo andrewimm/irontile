@@ -126,6 +126,11 @@ pub enum Event {
     WindowRemoved {
         window: WindowId,
     },
+    /// A window changed what it calls itself. An event rather than something to
+    /// poll for, because a title changes while nothing else does.
+    WindowRenamed {
+        window: WindowId,
+    },
     WindowMoved {
         window: WindowId,
         from: WorkspaceId,

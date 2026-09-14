@@ -65,6 +65,8 @@ pub enum Query {
     Outputs,
     /// Every desktop, whether it is on screen and what it holds.
     Workspaces,
+    /// Every managed window, with what it calls itself.
+    Windows,
     /// The entire layout engine state.
     Layout,
 }
@@ -87,6 +89,7 @@ pub enum ResponsePayload {
     Frame(Frame),
     Outputs(Vec<Output>),
     Workspaces(Vec<WorkspaceSummary>),
+    Windows(Vec<WindowInfo>),
     /// Boxed because it is much larger than every other variant.
     Layout(Box<Layout>),
     /// Pushed to subscribers, carrying the id of their `Subscribe` request.
@@ -94,6 +97,24 @@ pub enum ResponsePayload {
     Error {
         message: String,
     },
+}
+
+/// What a window calls itself, and where it is.
+///
+/// Titles and application ids exist so that something outside the compositor
+/// can say what a window is. Without them a bar can list windows but not name
+/// them, which is most of the point of listing them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowInfo {
+    pub id: WindowId,
+    /// What the window calls itself, if it has said.
+    pub title: Option<String>,
+    /// The class of application, such as `org.mozilla.firefox`.
+    pub app_id: Option<String>,
+    pub workspace: WorkspaceId,
+    /// The display it is on, or `None` when its desktop is off screen.
+    pub output: Option<OutputId>,
+    pub focused: bool,
 }
 
 /// What a desktop holds, without its whole tree.

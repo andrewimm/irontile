@@ -20,6 +20,11 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
+use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
     zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
@@ -47,6 +52,10 @@ pub struct Configured {
     pub tiled: bool,
     /// What the compositor chose, once it has said.
     pub decoration: Option<zxdg_toplevel_decoration_v1::Mode>,
+    /// The exact scale of the display, in 120ths, once the compositor has said.
+    pub fractional_scale: Option<u32>,
+    /// How many displays the surface has been told it is on.
+    pub outputs: usize,
 }
 
 struct Window {
@@ -54,6 +63,7 @@ struct Window {
     xdg_surface: XdgSurface,
     toplevel: XdgToplevel,
     decoration: Option<ZxdgToplevelDecorationV1>,
+    fractional: Option<WpFractionalScaleV1>,
     buffer: WlBuffer,
     /// Pending values from the last configure, applied when it is acked.
     pending: Configured,
@@ -70,6 +80,8 @@ struct Globals {
     wm_base: Option<XdgWmBase>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    fractional_scale: Option<WpFractionalScaleManagerV1>,
+    viewporter: Option<WpViewporter>,
 }
 
 struct State {
@@ -266,6 +278,15 @@ impl TestClient {
             decoration
         });
 
+        // Asking for the exact scale is what a client that wants to render
+        // sharply on a scaled display does.
+        let fractional = self
+            .state
+            .globals
+            .fractional_scale
+            .clone()
+            .map(|manager| manager.get_fractional_scale(&surface, &handle, index));
+
         let buffer = self.buffer();
         surface.commit();
 
@@ -274,6 +295,7 @@ impl TestClient {
             xdg_surface,
             toplevel,
             decoration,
+            fractional,
             buffer,
             pending: Configured::default(),
             current: Configured::default(),
@@ -310,6 +332,9 @@ impl TestClient {
     /// Unmaps and destroys a window.
     pub fn close_window(&mut self, id: WindowId) {
         let window = &mut self.state.windows[id.0];
+        if let Some(fractional) = window.fractional.take() {
+            fractional.destroy();
+        }
         if let Some(decoration) = window.decoration.take() {
             decoration.destroy();
         }
@@ -429,6 +454,13 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             "zxdg_decoration_manager_v1" => {
                 state.globals.decoration_manager =
                     Some(registry.bind(name, version.min(1), handle, ()));
+            }
+            "wp_fractional_scale_manager_v1" => {
+                state.globals.fractional_scale =
+                    Some(registry.bind(name, version.min(1), handle, ()));
+            }
+            "wp_viewporter" => {
+                state.globals.viewporter = Some(registry.bind(name, version.min(1), handle, ()));
             }
             "zwlr_layer_shell_v1" => {
                 state.globals.layer_shell = Some(registry.bind(name, version.min(4), handle, ()));
@@ -562,6 +594,38 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
     }
 }
 
+impl Dispatch<WpFractionalScaleV1, usize> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        index: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
+            // Unlike the toplevel configure, this applies at once rather than
+            // on the next ack.
+            state.windows[*index].pending.fractional_scale = Some(scale);
+            state.windows[*index].current.fractional_scale = Some(scale);
+        }
+    }
+}
+
+impl Dispatch<wayland_client::protocol::wl_output::WlOutput, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &wayland_client::protocol::wl_output::WlOutput,
+        _: wayland_client::protocol::wl_output::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+delegate_noop!(State: ignore WpFractionalScaleManagerV1);
+delegate_noop!(State: ignore WpViewporter);
 delegate_noop!(State: ignore ZwlrLayerShellV1);
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);

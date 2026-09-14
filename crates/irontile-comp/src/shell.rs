@@ -166,6 +166,14 @@ impl XdgShellHandler for Irontile {
         }
     }
 
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        self.announce_rename(&surface);
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        self.announce_rename(&surface);
+    }
+
     fn move_request(&mut self, _surface: ToplevelSurface, _seat: WlSeat, _serial: Serial) {
         // Position is the tree's decision, not the client's.
     }
@@ -210,6 +218,20 @@ fn set_server_side(toplevel: &ToplevelSurface) {
     // the reply belongs to the initial configure the shell handler sends.
     if toplevel.is_initial_configure_sent() {
         toplevel.send_pending_configure();
+    }
+}
+
+impl Irontile {
+    /// Tells subscribers a window changed what it calls itself.
+    ///
+    /// Nothing about the layout changed, so no reflow: this exists purely so a
+    /// bar showing titles does not have to poll for them.
+    fn announce_rename(&mut self, surface: &ToplevelSurface) {
+        let Some(window) = self.windows.id_of(surface.wl_surface()) else {
+            return;
+        };
+        self.peers
+            .broadcast(&[irontile_layout::Event::WindowRenamed { window }]);
     }
 }
 
