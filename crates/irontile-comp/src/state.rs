@@ -221,6 +221,8 @@ pub struct Irontile {
     pub drag: Option<ResizeDrag>,
     /// The binding currently repeating, if a key is being held down.
     pub repeat: Option<KeyRepeat>,
+    /// Children started and not yet waited for. See [`Irontile::spawn`].
+    children: std::cell::RefCell<Vec<std::process::Child>>,
     /// Kept so that a held binding can drive itself from a timer. Holding a key
     /// produces no further events -- repeat is the compositor's job, and for a
     /// binding it cannot be handed to the client the way typing is.
@@ -301,6 +303,7 @@ impl Irontile {
             config_path,
             drag: None,
             repeat: None,
+            children: std::cell::RefCell::new(Vec::new()),
             loop_handle,
             backend: Backend::Headless,
             dmabuf_state: DmabufState::new(),
@@ -881,6 +884,65 @@ impl Irontile {
         }
     }
 
+    /// Every panel and overlay on screen, bottom stratum first.
+    ///
+    /// A layer surface is neither a window nor a display, so nothing else
+    /// reported here describes one -- which leaves a bar or a notification that
+    /// fails to appear with nothing to look at but the screen it is not on.
+    pub fn layer_infos(&self) -> Vec<irontile_ipc::LayerInfo> {
+        use irontile_ipc::{LayerInfo, LayerKind};
+        use smithay::wayland::shell::wlr_layer::{ExclusiveZone, KeyboardInteractivity, Layer};
+
+        let mut out = Vec::new();
+        for spec in &self.arrangement {
+            let Some(entry) = self.outputs.iter().find(|e| e.id == spec.id) else {
+                continue;
+            };
+            let area = spec.logical();
+            let map = layer_map_for_output(&entry.output);
+            for layer in map.layers() {
+                let Some(geometry) = map.layer_geometry(layer) else {
+                    continue;
+                };
+                // A panel that has unmapped itself keeps its place in the map
+                // with nothing in it. It is not on screen, and reporting it as
+                // though it were is how "it never opened again" reads as "it is
+                // still open".
+                if geometry.size.w <= 0 || geometry.size.h <= 0 {
+                    continue;
+                }
+                let state = layer.cached_state();
+                out.push(LayerInfo {
+                    namespace: layer.namespace().to_owned(),
+                    layer: match state.layer {
+                        Layer::Background => LayerKind::Background,
+                        Layer::Bottom => LayerKind::Bottom,
+                        Layer::Top => LayerKind::Top,
+                        Layer::Overlay => LayerKind::Overlay,
+                    },
+                    output: spec.id,
+                    // The map works in its display's coordinates; everything
+                    // reported over the socket is in the shared one.
+                    rect: Rect::new(
+                        area.x + geometry.loc.x,
+                        area.y + geometry.loc.y,
+                        geometry.size.w,
+                        geometry.size.h,
+                    ),
+                    // Neutral means "leave me where the others put me" and
+                    // DontCare means "ignore everyone else"; neither reserves
+                    // anything, which is what this number is about.
+                    exclusive: match state.exclusive_zone {
+                        ExclusiveZone::Exclusive(n) => n as i32,
+                        ExclusiveZone::Neutral | ExclusiveZone::DontCare => 0,
+                    },
+                    keyboard: !matches!(state.keyboard_interactivity, KeyboardInteractivity::None),
+                });
+            }
+        }
+        out
+    }
+
     /// Brings each window's border strips in line with the frame.
     ///
     /// Done here rather than while rendering because the buffers have to be
@@ -1164,8 +1226,19 @@ impl Irontile {
         // Children must not inherit the parent session's display, or they would
         // connect to the compositor irontile is nested inside instead.
         command.env_remove("DISPLAY");
+        // Anything already finished is cleared out first. A process nobody
+        // waits on stays in the table as a zombie, and a binding that repeats
+        // -- a volume key held down -- starts one every forty milliseconds.
+        // Left alone they accumulate until the process table is full, and then
+        // nothing can be spawned at all: the binding that worked this morning
+        // silently does nothing, which is a miserable thing to debug.
+        let mut children = self.children.borrow_mut();
+        children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
         match command.spawn() {
-            Ok(_) => tracing::info!(program, "spawned"),
+            Ok(child) => {
+                children.push(child);
+                tracing::info!(program, "spawned");
+            }
             Err(err) => tracing::warn!(program, %err, "failed to spawn"),
         }
     }
@@ -1234,8 +1307,24 @@ pub struct ClientState {
 }
 
 impl ClientData for ClientState {
-    fn initialized(&self, _id: ClientId) {}
-    fn disconnected(&self, _id: ClientId, _reason: DisconnectReason) {}
+    fn initialized(&self, id: ClientId) {
+        tracing::debug!(?id, "client connected");
+    }
+
+    /// Why a client went away, which is otherwise invisible from this side.
+    ///
+    /// A client that is gone explains everything it used to do that no longer
+    /// happens, and a protocol error says whose fault that was: the compositor
+    /// disconnects a client it thinks has misbehaved, and from the outside that
+    /// is indistinguishable from the client simply never coming back.
+    fn disconnected(&self, id: ClientId, reason: DisconnectReason) {
+        match reason {
+            DisconnectReason::ConnectionClosed => {
+                tracing::debug!(?id, "client disconnected");
+            }
+            other => tracing::warn!(?id, ?other, "client dropped"),
+        }
+    }
 }
 
 impl CompositorHandler for Irontile {
@@ -1254,10 +1343,22 @@ impl CompositorHandler for Irontile {
         if let Some(layer) = self.layer_for_surface(surface) {
             // A layer surface must be configured before it may attach a
             // buffer, and re-arranged after, since its size or exclusive zone
-            // may have changed what is left for everything else. Only when
-            // something is actually different, though: a configure on every
-            // commit tells a client to redraw because it just drew.
-            layer.layer_surface().send_pending_configure();
+            // may have changed what is left for everything else.
+            //
+            // With no buffer attached this is either the surface's first commit
+            // or one that has just unmapped itself, and layer-shell says a
+            // surface returns to its initial state when it unmaps: it may not
+            // attach another buffer until it is configured again. Leaving that
+            // to `send_pending_configure` means nothing is sent, because
+            // nothing about the configuration changed -- and a panel that hides
+            // itself then waits for ever to be allowed back. Once it is mapped
+            // the opposite applies: a configure on every commit tells a client
+            // to redraw because it just drew.
+            if has_buffer(surface) {
+                layer.layer_surface().send_pending_configure();
+            } else {
+                layer.layer_surface().send_configure();
+            }
             self.refresh_layers();
             return;
         }

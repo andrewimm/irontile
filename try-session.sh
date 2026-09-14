@@ -70,6 +70,34 @@ exec = ["$TERMINAL"]
 TOML
 fi
 
+# A second graphical session for the same user shares that user's D-Bus session
+# bus with the first one, and a notification daemon can only own its name once.
+# Started from here without a bus of its own, swaync finds the name taken and
+# exits -- and `swaync-client` then reaches the instance belonging to the other
+# session, which draws the panel on the other VT. Anything on the session bus
+# behaves this way: media players found by playerctl, portals, the lot.
+#
+# A bus per session is what makes this a session rather than a program sharing
+# somebody else's. Set IRONTILE_SHARE_BUS=1 to use the outer one instead.
+#
+# The display has to be in the environment *before* the bus starts, not just in
+# the compositor's. A program started by D-Bus activation rather than by the
+# compositor inherits the bus daemon's environment, and on a bare VT that has no
+# WAYLAND_DISPLAY at all -- so an activated notification daemon has no
+# compositor to draw on and never appears anywhere, on any VT. It is fixed here
+# because irontile is told which socket to bind rather than choosing one.
+export WAYLAND_DISPLAY=irontile-0
+
+PREFIX=""
+if [ -z "${IRONTILE_SHARE_BUS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    PREFIX="dbus-run-session --"
+    if pgrep -x swaync >/dev/null 2>&1 || pgrep -x mako >/dev/null 2>&1 \
+        || pgrep -x dunst >/dev/null 2>&1; then
+        echo "irontile: a notification daemon is already running elsewhere;"
+        echo "irontile: this session gets its own bus so it starts its own."
+    fi
+fi
+
 echo "irontile: starting $TERMINAL, logging to $LOG"
 echo "irontile: Ctrl+Alt+F<n> switches VT, Super+Shift+E quits, Super+Return opens a terminal"
 echo "irontile: the ${LIMIT}s timeout is the backstop if none of those work"
@@ -78,7 +106,7 @@ sleep 2
 # The timeout is the point of this script: whatever happens, the machine comes
 # back on its own. A first run of an untested compositor should not be able to
 # hold the seat indefinitely.
-RUST_LOG="${RUST_LOG:-irontile=debug}" timeout --signal=TERM "$LIMIT" \
+RUST_LOG="${RUST_LOG:-irontile=debug}" $PREFIX timeout --signal=TERM "$LIMIT" \
     "$BIN" --session --wayland-display irontile-0 --config "$CONFIG" > "$LOG" 2>&1
 status=$?
 

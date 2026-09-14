@@ -16,6 +16,7 @@ SUBCOMMANDS:
     outputs             Connected displays and their arrangement
     workspaces          Every desktop, and what is on it
     windows             Every window, with its title and application id
+    layers              Panels and overlays on screen, and what they reserve
     layout              The whole layout engine state, as JSON
     watch               Stream events until interrupted
     help                Show this message
@@ -62,6 +63,7 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "outputs" => show(client.query(Query::Outputs)?),
         "workspaces" => show(client.query(Query::Workspaces)?),
         "windows" => show(client.query(Query::Windows)?),
+        "layers" => show(client.query(Query::Layers)?),
         "layout" => show(client.query(Query::Layout)?),
         "watch" => watch(&mut client)?,
         _ => {

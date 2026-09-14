@@ -69,6 +69,8 @@ pub enum Query {
     Windows,
     /// The entire layout engine state.
     Layout,
+    /// Every panel and overlay on screen.
+    Layers,
 }
 
 /// A single compositor-to-client message.
@@ -92,11 +94,41 @@ pub enum ResponsePayload {
     Windows(Vec<WindowInfo>),
     /// Boxed because it is much larger than every other variant.
     Layout(Box<Layout>),
+    Layers(Vec<LayerInfo>),
     /// Pushed to subscribers, carrying the id of their `Subscribe` request.
     Event(Event),
     Error {
         message: String,
     },
+}
+
+/// A panel or overlay the compositor is showing.
+///
+/// Layer surfaces are the one thing on screen that is neither a window nor a
+/// display, so nothing else here describes them -- and a bar, a notification or
+/// a lock screen that fails to appear otherwise leaves nothing to look at.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerInfo {
+    /// What the client called it, such as `"irontile-bar"` or `"notifications"`.
+    pub namespace: String,
+    pub layer: LayerKind,
+    pub output: OutputId,
+    /// Where it sits, in the space the displays share.
+    pub rect: Rect,
+    /// How much of its display it reserves for itself.
+    pub exclusive: i32,
+    /// Whether it has asked for the keyboard.
+    pub keyboard: bool,
+}
+
+/// Which stratum a panel sits in, from the bottom up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerKind {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
 }
 
 /// What a window calls itself, and where it is.

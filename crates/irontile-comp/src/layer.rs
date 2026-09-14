@@ -47,6 +47,10 @@ impl WlrLayerShellHandler for Irontile {
             tracing::warn!(%err, "failed to map a layer surface");
             return;
         }
+        // A panel appearing and going away is worth a line each: it is what
+        // tells a panel that never came back apart from one that came back and
+        // was not drawn, and the two have nothing else in common.
+        tracing::debug!(namespace = %layer.namespace(), "panel mapped");
         self.refresh_layers();
     }
 
@@ -61,6 +65,7 @@ impl WlrLayerShellHandler for Irontile {
         }) else {
             return;
         };
+        tracing::debug!(namespace = %layer.namespace(), "panel gone");
         layer_map_for_output(&output).unmap_layer(&layer);
         self.refresh_layers();
     }

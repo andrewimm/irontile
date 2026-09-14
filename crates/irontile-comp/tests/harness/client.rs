@@ -116,6 +116,8 @@ struct LayerPanel {
     /// The exact scale of the display, in 120ths, once the compositor has said.
     fractional_scale: Option<u32>,
     configures: u32,
+    /// How many configures had arrived when this panel last unmapped itself.
+    unmapped_at: u32,
     mapped: bool,
 }
 
@@ -202,20 +204,22 @@ impl TestClient {
 
     /// Maps a layer surface that asks for the keyboard, as a launcher does.
     pub fn map_launcher(&mut self, height: i32) -> LayerId {
-        self.map_top_bar_inner(height, 0, true, None)
+        // Its own name: a namespace is how panels are told apart, both here
+        // and by anything asking the compositor what is on screen.
+        self.map_top_bar_inner(height, 0, true, None, "irontile-test-launcher")
     }
 
     /// Maps a layer surface anchored to the top of the display, reserving
     /// `exclusive` pixels — which is what a bar does.
     pub fn map_top_bar(&mut self, height: i32, exclusive: i32) -> LayerId {
-        self.map_top_bar_inner(height, exclusive, false, None)
+        self.map_top_bar_inner(height, exclusive, false, None, "irontile-test-bar")
     }
 
     /// Maps a bar on a named display rather than letting the compositor choose.
     ///
     /// Displays are numbered in the order the compositor advertised them.
     pub fn map_top_bar_on(&mut self, display: usize, height: i32, exclusive: i32) -> LayerId {
-        self.map_top_bar_inner(height, exclusive, false, Some(display))
+        self.map_top_bar_inner(height, exclusive, false, Some(display), "irontile-test-bar")
     }
 
     /// How many displays the compositor has advertised.
@@ -230,6 +234,7 @@ impl TestClient {
         exclusive: i32,
         keyboard: bool,
         display: Option<usize>,
+        namespace: &str,
     ) -> LayerId {
         let handle = self.queue.handle();
         let compositor = self
@@ -259,7 +264,7 @@ impl TestClient {
             &surface,
             output.as_ref(),
             zwlr_layer_shell_v1::Layer::Top,
-            "irontile-test-bar".to_owned(),
+            namespace.to_owned(),
             &handle,
             index,
         );
@@ -291,6 +296,7 @@ impl TestClient {
             fractional,
             fractional_scale: None,
             configures: 0,
+            unmapped_at: 0,
             mapped: false,
         });
 
@@ -349,6 +355,39 @@ impl TestClient {
     pub fn layer_configures(&mut self, id: LayerId) -> u32 {
         self.roundtrip();
         self.state.layers[id.0].configures
+    }
+
+    /// Hides a panel by attaching no buffer, the way one that can be toggled
+    /// does, keeping the layer surface itself.
+    pub fn unmap_layer(&mut self, id: LayerId) {
+        let panel = &mut self.state.layers[id.0];
+        // Noted before the unmap: the configure that lets it come back is the
+        // one this unmap provokes, so counting from after would wait for a
+        // second one that never comes.
+        panel.unmapped_at = panel.configures;
+        panel.surface.attach(None, 0, 0);
+        panel.surface.commit();
+        panel.mapped = false;
+        self.roundtrip();
+    }
+
+    /// Shows it again. Layer-shell says an unmapped surface may not attach a
+    /// buffer until it has been configured afresh, so this waits for that
+    /// rather than attaching straight away.
+    pub fn remap_layer(&mut self, id: LayerId) {
+        // What the count was before the unmap, because the configure being
+        // waited for is the one the unmap itself provokes.
+        let before = self.state.layers[id.0].unmapped_at;
+        self.wait_until(
+            |state| state.layers[id.0].configures > before,
+            "a configure after unmapping, without which a panel may never come back",
+        );
+        let panel = &mut self.state.layers[id.0];
+        panel.surface.attach(Some(&panel.buffer), 0, 0);
+        panel.surface.damage(0, 0, i32::MAX, i32::MAX);
+        panel.surface.commit();
+        panel.mapped = true;
+        self.roundtrip();
     }
 
     /// Unmaps a layer surface, which should give its reserved space back.
@@ -517,15 +556,44 @@ impl TestClient {
         }
     }
 
+    /// Waits for something to become true, or fails the test.
+    ///
+    /// Polled rather than blocked on: an event that never arrives would
+    /// otherwise leave the test sitting in `blocking_dispatch` for ever,
+    /// because the deadline is only looked at between events. A test that hangs
+    /// says far less than one that fails, and takes much longer to say it.
     fn wait_until(&mut self, done: impl Fn(&State) -> bool, what: &str) {
         let deadline = Instant::now() + TIMEOUT;
         while !done(&self.state) {
             if Instant::now() >= deadline {
                 panic!("timed out waiting for {what}");
             }
+            self.queue.flush().expect("wayland flush failed");
             self.queue
-                .blocking_dispatch(&mut self.state)
+                .dispatch_pending(&mut self.state)
                 .expect("wayland dispatch failed");
+            if done(&self.state) {
+                return;
+            }
+            let fd = self.connection.prepare_read().map(|guard| {
+                let fd = guard.connection_fd().try_clone_to_owned();
+                drop(guard);
+                fd
+            });
+            if let Some(Ok(fd)) = fd {
+                let mut fds = [rustix::event::PollFd::new(
+                    &fd,
+                    rustix::event::PollFlags::IN,
+                )];
+                let tick = rustix::time::Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 20_000_000,
+                };
+                let _ = rustix::event::poll(&mut fds, Some(&tick));
+            }
+            self.queue
+                .roundtrip(&mut self.state)
+                .expect("wayland roundtrip failed");
         }
     }
 

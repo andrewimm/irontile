@@ -234,3 +234,62 @@ fn a_subscriber_that_falls_behind_is_waited_for_rather_than_cut_off() {
         "the connection came out of the burst still speaking the protocol"
     );
 }
+
+#[test]
+fn spawned_programs_do_not_pile_up_as_zombies() {
+    // Nothing waits on a program a binding starts, so every one of them stays
+    // in the process table until something does. A binding that repeats -- a
+    // volume key held down -- starts one every forty milliseconds, and when the
+    // table fills nothing can be started at all: the binding that worked an
+    // hour ago silently does nothing.
+    let mut compositor = Compositor::start("1920x1080");
+    for _ in 0..40 {
+        compositor
+            .client
+            .action(Action::Spawn(vec!["true".into()]))
+            .expect("the compositor refused to spawn");
+    }
+
+    // They have to be given a moment to exit before they can be counted.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        // One more spawn is what clears the finished ones out.
+        compositor
+            .client
+            .action(Action::Spawn(vec!["true".into()]))
+            .expect("spawn");
+        let zombies = zombies_of(compositor.pid());
+        if zombies <= 2 {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{zombies} of them are still sitting in the process table"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// How many of a process's children have exited without being waited for.
+fn zombies_of(parent: u32) -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let Ok(status) = std::fs::read_to_string(entry.path().join("status")) else {
+                return false;
+            };
+            let field = |key: &str| {
+                status
+                    .lines()
+                    .find(|line| line.starts_with(key))
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .map(str::to_owned)
+            };
+            field("PPid:").as_deref() == Some(&parent.to_string())
+                && field("State:").as_deref() == Some("Z")
+        })
+        .count()
+}

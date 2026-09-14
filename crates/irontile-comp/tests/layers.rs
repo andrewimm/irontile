@@ -7,7 +7,7 @@
 mod harness;
 
 use harness::Compositor;
-use irontile_ipc::Action;
+use irontile_ipc::{Action, LayerKind};
 
 const BAR: i32 = 30;
 
@@ -280,4 +280,78 @@ fn a_panel_receives_the_pointer() {
         .action(Action::WarpPointer(960, 540))
         .expect("warp");
     client.wait_for(|client| !client.pointer_on_layer(bar));
+}
+
+#[test]
+fn the_panels_on_screen_can_be_asked_about() {
+    // A layer surface is neither a window nor a display, so nothing else the
+    // socket reports describes one. Without this, a notification daemon or a
+    // bar that fails to appear leaves nothing to look at but the screen it is
+    // not on.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    assert!(
+        layers(&mut compositor).is_empty(),
+        "nothing has mapped a panel yet"
+    );
+
+    let _bar = client.map_top_bar(BAR, BAR);
+    let _launcher = client.map_launcher(200);
+
+    let found = layers(&mut compositor);
+    assert_eq!(found.len(), 2, "both panels: {found:?}");
+
+    let bar = found
+        .iter()
+        .find(|l| l.namespace == "irontile-test-bar")
+        .expect("the bar");
+    assert_eq!(bar.layer, LayerKind::Top);
+    // The rectangle is what the surface actually occupies rather than what it
+    // asked for, so a client whose buffer does not match its request is
+    // reported where it really is.
+    assert_eq!(bar.rect.x, 0);
+    assert_eq!(bar.rect.y, 0);
+    assert_eq!(bar.exclusive, BAR, "it reserves its own height");
+    assert!(!bar.keyboard, "a bar is not typed into");
+
+    let launcher = found
+        .iter()
+        .find(|l| l.namespace == "irontile-test-launcher")
+        .expect("the launcher");
+    assert_eq!(launcher.exclusive, 0, "a launcher reserves nothing");
+    assert!(
+        launcher.keyboard,
+        "it asked for the keyboard, which is what a launcher is for"
+    );
+}
+
+fn layers(compositor: &mut Compositor) -> Vec<irontile_ipc::LayerInfo> {
+    match compositor.client.query(irontile_ipc::Query::Layers) {
+        Ok(irontile_ipc::ResponsePayload::Layers(layers)) => layers,
+        other => panic!("expected panels, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_panel_that_hides_itself_can_come_back() {
+    // What a notification centre does every time it is toggled: it attaches no
+    // buffer to hide, and attaches one again to show. Layer-shell says an
+    // unmapped surface returns to its initial state and may not attach another
+    // buffer until it has been configured afresh -- so a compositor that only
+    // configures when its own idea of the surface has changed sends nothing,
+    // and the panel waits for ever. It opens once, closes, and never opens
+    // again.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    let bar = client.map_top_bar(BAR, BAR);
+    let shown = |c: &mut Compositor| layers(c).iter().any(|l| l.namespace == "irontile-test-bar");
+    assert!(shown(&mut compositor), "it is up to begin with");
+
+    for round in 1..=3 {
+        client.unmap_layer(bar);
+        assert!(!shown(&mut compositor), "hidden on round {round}");
+        // This is the part that hangs without the configure.
+        client.remap_layer(bar);
+        assert!(shown(&mut compositor), "shown again on round {round}");
+    }
 }

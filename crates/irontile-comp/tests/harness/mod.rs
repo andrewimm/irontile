@@ -94,6 +94,11 @@ impl Compositor {
 }
 
 impl Compositor {
+    /// The compositor process, for tests that need to look at it from outside.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Opens another control connection, for tests that need a second one.
     pub fn connect_control(&self) -> Client {
         Client::connect(&self.control_socket).expect("could not reach the control socket")
@@ -176,6 +181,28 @@ struct Startup {
     wayland: String,
 }
 
+/// Keeps reading the compositor's output so it never blocks on a full pipe.
+///
+/// Set `IRONTILE_TEST_LOG` to see it; a passing test has nothing to say and
+/// several running at once would interleave into nonsense.
+fn drain(mut reader: BufReader<std::process::ChildStdout>) {
+    let echo = std::env::var_os("IRONTILE_TEST_LOG").is_some();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {
+                    if echo {
+                        eprint!("compositor: {line}");
+                    }
+                }
+            }
+        }
+    });
+}
+
 /// Reads the startup line and pulls both socket names out of it.
 fn read_startup(child: &mut Child) -> Startup {
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -196,6 +223,11 @@ fn read_startup(child: &mut Child) -> Startup {
                         .map(str::to_owned)
                 };
                 if let (Some(control), Some(wayland)) = (field("control="), field("socket=")) {
+                    // Everything the compositor says after this goes somewhere,
+                    // because a pipe nobody reads fills up and then the
+                    // compositor blocks trying to write to it -- which looks
+                    // like a compositor that has stopped responding.
+                    drain(reader);
                     return Startup { control, wayland };
                 }
             }

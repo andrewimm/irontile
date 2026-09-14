@@ -64,6 +64,7 @@ irontilectl send-to-output right
 irontilectl frame        # where every window is
 irontilectl outputs      # displays and their arrangement
 irontilectl workspaces   # desktops, and what is on them
+irontilectl layers       # panels and overlays, and what they reserve
 irontilectl layout       # the whole engine state, as JSON
 irontilectl watch        # stream events
 ```
@@ -85,7 +86,24 @@ cd path/to/irontile
 
 That wrapper runs irontile under a timeout, so the machine comes back on its own
 whatever happens, and logs to `~/irontile-session.log` where it is readable from
-your other session afterwards. `Ctrl+Alt+F<n>` switches away at any point, and
+your other session afterwards.
+
+It also gives the session a D-Bus session bus of its own. A second graphical
+session for the same user otherwise shares the first one's, and a notification
+daemon can only own its name once: started without a bus of its own, swaync
+finds the name taken and exits, and `swaync-client` then reaches the instance
+belonging to the *other* session -- which draws its panel on the other VT, while
+the binding that asked for it appears to do nothing. Everything on the session
+bus behaves that way, media players found by playerctl included. A bus per
+session is what makes it a session rather than a program sharing somebody
+else's. `IRONTILE_SHARE_BUS=1` uses the outer one instead.
+
+The display goes into that environment before the bus starts, not just into the
+compositor's. A program started by D-Bus activation rather than by the
+compositor inherits the *bus daemon's* environment, and on a bare VT that has no
+`WAYLAND_DISPLAY` at all -- so a notification daemon that dies and is activated
+again has no compositor to draw on, and never appears anywhere. It works once,
+and then never again, which reads as a compositor bug and is not one. `Ctrl+Alt+F<n>` switches away at any point, and
 `pkill -x irontile` from there stops it.
 
 A compositor holding the VT in graphics mode is the only thing that can perform
@@ -263,6 +281,15 @@ be overwritten nor thrown away; making a new one per frame means the compositor
 holds every frame the bar has ever drawn. That is invisible while a bar redraws
 once a second and fatal when something makes it redraw three hundred times a
 second, which is how it was found.
+
+**A panel that hides itself must be told it may come back.** Layer-shell says an
+unmapped surface returns to its initial state and may not attach another buffer
+until it is configured afresh, so a commit with no buffer -- a surface's first,
+or one that has just hidden itself -- is answered with a configure whatever else
+is true. Leaving that to the "only when something changed" rule below sends
+nothing, because nothing about the configuration did change, and a notification
+centre that has been closed waits for ever to be allowed back: it opens once,
+closes, and never opens again.
 
 **Nothing tells a client that something changed unless it did.** The compositor
 republishes the display arrangement on anything that might have moved a work
@@ -503,6 +530,12 @@ rectangle and nothing else, so every `xdg-decoration` request is answered
 server-side whatever it asked for. Without the protocol advertised at all,
 toolkits fall back to drawing their own titlebars and shadows, which is worse
 than either choice made deliberately.
+
+**A panel can be asked about.** A layer surface is neither a window nor a
+display, so nothing else the socket reports describes one -- which leaves a bar,
+a notification or a lock screen that fails to appear with nothing to look at but
+the screen it is not on. `irontilectl layers` gives each one's namespace, its
+stratum, where it sits, what it reserves and whether it holds the keyboard.
 
 **The work area is what layer-shell leaves behind.** A bar reserving thirty
 pixels at the top of a display shrinks that display's work area, and the layout
