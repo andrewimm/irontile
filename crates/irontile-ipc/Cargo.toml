@@ -1,0 +1,18 @@
+[package]
+name = "irontile-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed control socket protocol for irontile"
+
+[dependencies]
+irontile-layout.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

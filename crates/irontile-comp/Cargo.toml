@@ -1,0 +1,19 @@
+[package]
+name = "irontile-comp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "irontile Wayland compositor"
+
+[[bin]]
+name = "irontile"
+path = "src/main.rs"
+
+[dependencies]
+irontile-layout.workspace = true
+irontile-ipc.workspace = true
+
+[lints]
+workspace = true

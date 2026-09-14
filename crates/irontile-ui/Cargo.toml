@@ -1,0 +1,14 @@
+[package]
+name = "irontile-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bar and launcher surfaces for irontile"
+
+[dependencies]
+irontile-ipc.workspace = true
+
+[lints]
+workspace = true
