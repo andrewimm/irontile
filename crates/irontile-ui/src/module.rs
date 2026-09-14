@@ -30,6 +30,17 @@ pub enum Level {
 pub enum Piece {
     Text(String),
     Icon(String),
+    /// A tray item's own artwork, which has no themed name to look up.
+    Pixels(Pixels),
+}
+
+/// Raw ARGB32 from a tray item, shared rather than copied: they arrive at up to
+/// 256 by 256 and a bar rebuilds its segments several times a second.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pixels {
+    pub width: u32,
+    pub height: u32,
+    pub argb: std::sync::Arc<[u8]>,
 }
 
 /// One clickable run of text.
@@ -114,7 +125,7 @@ impl Segment {
             .iter()
             .filter_map(|p| match p {
                 Piece::Text(text) => Some(text.as_str()),
-                Piece::Icon(_) => None,
+                Piece::Icon(_) | Piece::Pixels(_) => None,
             })
             .collect()
     }
@@ -160,6 +171,12 @@ pub fn pieces(text: &str) -> Vec<Piece> {
 pub enum Click {
     /// Swap the named module between its two formats.
     Toggle(String),
+    /// Press a tray item.
+    Tray {
+        service: String,
+        path: String,
+        press: crate::tray::Press,
+    },
     /// Show a desktop by number.
     Workspace(u32),
     /// Run a command.
@@ -203,6 +220,7 @@ pub fn render(config: &ModuleConfig, snapshot: &Snapshot, now: &dyn World) -> Ve
         Kind::Volume => volume(config, now.volume()),
         Kind::Backlight => backlight(config, now.backlight()),
         Kind::Network => network(config, &now.network()),
+        Kind::Tray => tray(config, &now.tray()),
         Kind::Command => command(config, now.command(config)),
     }
 }
@@ -407,6 +425,64 @@ fn network(config: &ModuleConfig, state: &Network) -> Vec<Segment> {
     )]
 }
 
+/// One segment per tray item.
+///
+/// Separate segments rather than one, so each is clickable on its own and the
+/// pointer resting on one names that item rather than the tray as a whole.
+fn tray(config: &ModuleConfig, items: &[crate::tray::Item]) -> Vec<Segment> {
+    use crate::tray::{Icon, Press};
+
+    items
+        .iter()
+        .map(|item| {
+            let piece = match &item.icon {
+                Icon::Named(name) => Piece::Icon(name.clone()),
+                Icon::Pixels {
+                    width,
+                    height,
+                    argb,
+                } => Piece::Pixels(Pixels {
+                    width: *width,
+                    height: *height,
+                    argb: argb.clone(),
+                }),
+                // Nothing to draw but something to click, so it is named.
+                Icon::None => Piece::Text(format!(" {} ", item.id)),
+            };
+            let target = |press| Click::Tray {
+                service: item.service.clone(),
+                path: item.path.clone(),
+                press,
+            };
+            let named = if item.title.is_empty() {
+                item.id.clone()
+            } else {
+                item.title.clone()
+            };
+            finish(
+                config,
+                Segment {
+                    pieces: vec![piece],
+                    // An item asking for attention is the one thing in a tray
+                    // that is worth colouring.
+                    level: match item.status {
+                        crate::tray::Status::NeedsAttention => Level::Warning,
+                        _ => Level::Normal,
+                    },
+                    focused: false,
+                    buttons: Buttons {
+                        left: Some(target(Press::Activate)),
+                        middle: Some(target(Press::Secondary)),
+                        right: Some(target(Press::Context)),
+                    },
+                    tooltip: config.tooltip.as_ref().map(|_| named),
+                    style: Style::default(),
+                },
+            )
+        })
+        .collect()
+}
+
 fn command(config: &ModuleConfig, output: Option<String>) -> Vec<Segment> {
     let Some(output) = output else {
         return Vec::new();
@@ -548,8 +624,19 @@ fn finish(config: &ModuleConfig, mut segment: Segment) -> Segment {
     {
         segment.buttons.left = Some(Click::Run(command.clone()));
     }
-    segment.buttons.right = config.on_click_right.clone().map(Click::Run);
-    segment.buttons.middle = config.on_click_middle.clone().map(Click::Run);
+    // Written down wins over implied, but silence does not: a module that gave
+    // a button a meaning of its own keeps it, which is what stops a tray item's
+    // buttons being cleared by a module that names no commands at all.
+    segment.buttons.right = config
+        .on_click_right
+        .clone()
+        .map(Click::Run)
+        .or(segment.buttons.right);
+    segment.buttons.middle = config
+        .on_click_middle
+        .clone()
+        .map(Click::Run)
+        .or(segment.buttons.middle);
     segment
 }
 
@@ -587,6 +674,11 @@ pub trait World {
     fn backlight(&self) -> Option<f64>;
     fn network(&self) -> Network;
     fn command(&self, config: &ModuleConfig) -> Option<String>;
+    /// What is in the tray. Defaulted, because most of what implements this
+    /// trait is a test fixture with no interest in one.
+    fn tray(&self) -> Vec<crate::tray::Item> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -908,6 +1000,82 @@ mod tests {
         assert_eq!(segment.buttons.left, Some(Click::Run("left".into())));
         assert_eq!(segment.buttons.right, Some(Click::Run("right".into())));
         assert_eq!(segment.buttons.middle, Some(Click::Run("middle".into())));
+    }
+
+    #[test]
+    fn a_tray_item_is_its_own_clickable_segment() {
+        use crate::tray::{Icon, Item, Press, Status};
+
+        let item = |id: &str, icon: Icon, status| Item {
+            service: format!(":1.{id}"),
+            path: "/StatusNotifierItem".into(),
+            id: id.into(),
+            title: String::new(),
+            status,
+            icon,
+        };
+        let items = vec![
+            item(
+                "named",
+                Icon::Named("mail-unread-symbolic".into()),
+                Status::Active,
+            ),
+            item(
+                "pixels",
+                Icon::Pixels {
+                    width: 2,
+                    height: 2,
+                    argb: vec![0u8; 16].into(),
+                },
+                Status::NeedsAttention,
+            ),
+        ];
+        let config = ModuleConfig {
+            kind: Kind::Tray,
+            ..Default::default()
+        };
+        let segments = tray(&config, &items);
+        assert_eq!(
+            segments.len(),
+            2,
+            "one each, so each is clickable on its own"
+        );
+
+        assert_eq!(
+            segments[0].pieces,
+            vec![Piece::Icon("mail-unread-symbolic".into())],
+            "a themed name is looked up like any other icon"
+        );
+        assert!(matches!(segments[1].pieces[0], Piece::Pixels(_)));
+        assert_eq!(
+            segments[1].level,
+            Level::Warning,
+            "an item asking for attention is the one worth colouring"
+        );
+
+        // Every button does something, and each a different thing.
+        let buttons = &segments[0].buttons;
+        assert!(matches!(
+            buttons.left,
+            Some(Click::Tray {
+                press: Press::Activate,
+                ..
+            })
+        ));
+        assert!(matches!(
+            buttons.middle,
+            Some(Click::Tray {
+                press: Press::Secondary,
+                ..
+            })
+        ));
+        assert!(matches!(
+            buttons.right,
+            Some(Click::Tray {
+                press: Press::Context,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -47,7 +47,14 @@ impl Audio {
     /// sound server that is absent or slow to appear is the thread's problem,
     /// not the caller's.
     pub fn start() -> Option<Audio> {
-        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC).ok()?;
+        let (read, write) = rustix::pipe::pipe_with(
+            // Never blocking: a drain happens when poll says one of these is
+            // readable, and with more than one of them the others are not. A
+            // blocking read on an empty pipe would stop the bar dead -- no
+            // redraws, no pointer, nothing, with the process still running.
+            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+        )
+        .ok()?;
         let latest = Arc::new(Mutex::new(None));
         let shared = Shared {
             latest: Arc::clone(&latest),

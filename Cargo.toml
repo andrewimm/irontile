@@ -19,6 +19,7 @@ repository = "https://github.com/andrew/irontile"
 irontile-layout = { path = "crates/irontile-layout", version = "0.1.0" }
 irontile-ipc = { path = "crates/irontile-ipc", version = "0.1.0" }
 libpulse-binding = "2.30"
+zbus = "5"
 serde = { version = "1", features = ["derive"] }
 smithay = { version = "0.7", default-features = false, features = [
     "backend_winit",

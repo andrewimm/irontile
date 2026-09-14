@@ -41,6 +41,7 @@ pub struct Config {
     /// Space either side of each module.
     pub padding: i32,
     pub tooltip: Tooltip,
+    pub menu: MenuStyle,
     /// Modules by region, naming entries in `modules`.
     pub left: Vec<String>,
     pub center: Vec<String>,
@@ -67,6 +68,7 @@ impl Default for Config {
             focus_indicator: color("#ffffff"),
             padding: 8,
             tooltip: Tooltip::default(),
+            menu: MenuStyle::default(),
             left: vec!["window".into()],
             center: vec!["workspaces".into()],
             right: vec!["battery".into(), "clock".into()],
@@ -101,6 +103,7 @@ struct ConfigFile {
     focus_indicator: Option<Color>,
     padding: Option<i32>,
     tooltip: Option<Tooltip>,
+    menu: Option<MenuStyle>,
     left: Option<Vec<String>>,
     center: Option<Vec<String>>,
     right: Option<Vec<String>>,
@@ -135,10 +138,48 @@ impl ConfigFile {
             focus_indicator: self.focus_indicator.unwrap_or(defaults.focus_indicator),
             padding: self.padding.unwrap_or(defaults.padding),
             tooltip: self.tooltip.unwrap_or(defaults.tooltip),
+            menu: self.menu.unwrap_or(defaults.menu),
             left: region(self.left, defaults.left),
             center: region(self.center, defaults.center),
             right: region(self.right, defaults.right),
             modules: self.modules.unwrap_or(defaults.modules),
+        }
+    }
+}
+
+/// How a tray item's menu looks.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct MenuStyle {
+    pub background: Color,
+    pub foreground: Color,
+    /// An entry that cannot be chosen.
+    pub disabled: Color,
+    /// Behind the entry the pointer is on.
+    pub highlight: Color,
+    pub highlight_foreground: Color,
+    pub border: Color,
+    pub border_width: i32,
+    /// Space around the text of each entry.
+    pub padding: i32,
+    /// Narrower than this and a menu of short words is uncomfortable to aim at.
+    pub min_width: i32,
+    pub font_size: Option<f32>,
+}
+
+impl Default for MenuStyle {
+    fn default() -> Self {
+        Self {
+            background: color("#1b1918"),
+            foreground: color("#d1c6b4"),
+            disabled: color("#695959"),
+            highlight: color("#413c3a"),
+            highlight_foreground: color("#ffffff"),
+            border: color("#413c3a"),
+            border_width: 1,
+            padding: 8,
+            min_width: 180,
+            font_size: None,
         }
     }
 }
@@ -302,6 +343,8 @@ pub enum Kind {
     Backlight,
     /// What the machine is connected by.
     Network,
+    /// Applications that have put an icon in the tray.
+    Tray,
     /// The output of a command, run on an interval.
     #[default]
     Command,

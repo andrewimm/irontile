@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::audio::{Audio, Volume};
 use crate::config::ModuleConfig;
 use crate::module::{Battery, Link, Network, World};
+use crate::tray::{self, Tray};
 
 /// The real outside world.
 ///
@@ -21,6 +22,8 @@ pub struct System {
     /// A live connection to the sound server, if one could be started. Volume
     /// is the one reading with no file behind it.
     audio: Option<Audio>,
+    /// The tray, which like the volume is a connection rather than a file.
+    tray: Option<Tray>,
 }
 
 /// A `System` that reads files but holds no connections, which is what a test
@@ -30,6 +33,7 @@ impl Default for System {
         System {
             ran: RefCell::default(),
             audio: None,
+            tray: None,
         }
     }
 }
@@ -40,18 +44,57 @@ impl System {
         System {
             ran: RefCell::default(),
             audio: Audio::start(),
+            tray: Tray::start(),
+        }
+    }
+
+    /// The menu a tray item asked to have drawn, once it has arrived.
+    pub fn take_tray_menu(&self) -> Option<tray::Menu> {
+        self.tray.as_ref()?.take_menu()
+    }
+
+    /// Tells a tray item which entry of its menu was chosen.
+    pub fn choose_tray(&self, menu: &tray::Menu, id: i32) {
+        if let Some(tray) = &self.tray {
+            tray.choose(menu, id);
+        }
+    }
+
+    /// Tells a tray item it was clicked.
+    pub fn press_tray(&self, service: &str, path: &str, press: tray::Press) {
+        let Some(tray) = &self.tray else {
+            return;
+        };
+        if let Some(item) = tray
+            .items()
+            .iter()
+            .find(|item| item.service == service && item.path == path)
+        {
+            tray.press(item, press);
         }
     }
 
     /// Readable whenever a reading changed under the bar rather than because
     /// the bar asked. Polled alongside the Wayland and control sockets.
-    pub fn wake(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
-        self.audio.as_ref().map(Audio::as_fd)
+    /// The descriptors that become readable when something changed under the
+    /// bar rather than because the bar asked.
+    pub fn wakes(&self) -> Vec<std::os::fd::BorrowedFd<'_>> {
+        let mut fds = Vec::new();
+        if let Some(audio) = &self.audio {
+            fds.push(audio.as_fd());
+        }
+        if let Some(tray) = &self.tray {
+            fds.push(tray.as_fd());
+        }
+        fds
     }
 
     pub fn drain_wake(&self) {
         if let Some(audio) = &self.audio {
             audio.drain();
+        }
+        if let Some(tray) = &self.tray {
+            tray.drain();
         }
     }
 
@@ -60,26 +103,43 @@ impl System {
     ///
     /// Only worth doing when there will be exactly one frame -- `--dump` --
     /// because a running bar redraws the moment a reading lands and would be
-    /// paying this at startup for a module that fills itself in a few
+    /// paying this at startup for modules that fill themselves in a few
     /// milliseconds later.
     pub fn settle(&self, timeout: Duration) {
-        let Some(audio) = &self.audio else {
-            return;
-        };
-        if audio.volume().is_some() {
-            return;
+        let deadline = std::time::Instant::now() + timeout;
+        // Every source gets a chance, not just the first to answer: a bar with
+        // both a volume and a tray on it would otherwise draw whichever spoke
+        // first and leave a hole where the other goes.
+        while std::time::Instant::now() < deadline {
+            let quiet = self
+                .audio
+                .as_ref()
+                .is_none_or(|audio| audio.volume().is_some())
+                && self
+                    .tray
+                    .as_ref()
+                    .is_none_or(|tray| !tray.items().is_empty());
+            if quiet {
+                break;
+            }
+            let fds = self.wakes();
+            if fds.is_empty() {
+                return;
+            }
+            let mut polled: Vec<_> = fds
+                .iter()
+                .map(|fd| rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN))
+                .collect();
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let spec = rustix::time::Timespec {
+                tv_sec: left.as_secs() as i64,
+                tv_nsec: left.subsec_nanos() as i64,
+            };
+            if rustix::event::poll(&mut polled, Some(&spec)).unwrap_or(0) == 0 {
+                break;
+            }
+            self.drain_wake();
         }
-        let fd = audio.as_fd();
-        let mut fds = [rustix::event::PollFd::new(
-            &fd,
-            rustix::event::PollFlags::IN,
-        )];
-        let spec = rustix::time::Timespec {
-            tv_sec: timeout.as_secs() as i64,
-            tv_nsec: timeout.subsec_nanos() as i64,
-        };
-        let _ = rustix::event::poll(&mut fds, Some(&spec));
-        audio.drain();
     }
 }
 
@@ -174,6 +234,10 @@ impl World for System {
             },
             None => Network::default(),
         }
+    }
+
+    fn tray(&self) -> Vec<tray::Item> {
+        self.tray.as_ref().map(Tray::items).unwrap_or_default()
     }
 
     fn command(&self, config: &ModuleConfig) -> Option<String> {

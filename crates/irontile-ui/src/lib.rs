@@ -15,6 +15,7 @@ pub mod draw;
 pub mod icon;
 pub mod module;
 pub mod theme;
+pub mod tray;
 pub mod wayland;
 pub mod world;
 

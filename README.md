@@ -252,7 +252,7 @@ command = "..."        # anything that prints a number
 ```
 
 Module types are `workspaces`, `window`, `clock`, `battery`, `volume`,
-`network`, `backlight` and `command`. Defining any module of your own replaces
+`network`, `backlight`, `tray` and `command`. Defining any module of your own replaces
 the built-in set, so a region naming something with no table is an error at load
 time rather than a silently missing part of the bar.
 
@@ -400,7 +400,53 @@ several lines; the clock's are strftime, like its format. `--dump PATH --tooltip
 TEXT` renders one without a compositor, the same way `--dump` alone renders a
 bar.
 
-Not yet implemented: a system tray (SNI over D-Bus).
+**The tray is StatusNotifierItem over D-Bus.** Three parties: an application
+publishes an item on its own connection, a *watcher* keeps the list, and a
+*host* shows them. The watcher is a well-known name, so whoever claims it first
+owns the list -- the bar claims it when nothing else has, which is what makes a
+tray work on a desktop with no panel from a full environment, and reads
+somebody else's list when they got there first.
+
+Items are polled rather than driven by their change signals. A tray holds a
+handful of items whose properties are a few hundred bytes, and those signals are
+the part of this protocol applications get wrong most often: an item that
+forgets to emit one is far more common than a slow tray.
+
+An item may name a themed icon, which costs nothing and follows the icon theme,
+or hand over raw ARGB32 pixels. Both work, because the Chromium-based ones --
+1Password, Slack -- only do the second. Pixels are scaled once per size and
+cached by where they live rather than by what they are called, and they are not
+recoloured: that is an application's own artwork, not a symbolic glyph. Left
+click activates an item, middle is its secondary action, right asks it for its
+menu.
+
+**Right click draws the item's own menu.** An item publishes one over
+`com.canonical.dbusmenu` for the host to draw, and the whole tree is fetched at
+once: asking level by level is what the protocol expects, but a tray menu is a
+handful of rows and a round trip per level costs more than the rows do. A
+submenu is descended into rather than opened beside, so there is one surface
+however deep it goes.
+
+Two surfaces, not one. The menu is the box; under it sits a transparent sheet
+over the whole display, which exists to be clicked on rather than looked at --
+a client hears about the pointer only over its own surfaces, so without it there
+is no way to know that a click meant "not that, then". The sheet is a single
+transparent pixel stretched by a viewport, because a buffer the size of the
+screen would cost megabytes to say nothing, and it holds the keyboard so that
+Escape closes the menu.
+
+```toml
+[menu]
+background = "#1b1918"
+foreground = "#d1c6b4"
+disabled = "#695959"
+highlight = "#413c3a"
+highlight_foreground = "#ffffff"
+border = "#413c3a"
+border_width = 1
+padding = 8
+min_width = 180
+```
 
 ## Protocols
 

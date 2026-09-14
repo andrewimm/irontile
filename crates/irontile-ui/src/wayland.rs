@@ -44,9 +44,12 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 /// nothing else is happening.
 const MAX_WAIT: Duration = Duration::from_secs(1);
 
-/// Marks the tooltip's layer surface apart from the bars', which are numbered
-/// by display. There is never more than one tooltip.
+/// Mark the surfaces that are not bars apart from the bars, which are numbered
+/// by display. There is never more than one of each of these.
 const TOOLTIP: usize = usize::MAX;
+const MENU: usize = usize::MAX - 1;
+/// The transparent sheet under a menu that catches clicks meant to dismiss it.
+const SHADE: usize = usize::MAX - 2;
 
 pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let connection = Connection::connect_to_env()
@@ -77,6 +80,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         hover: None,
         tip_stale: false,
         tip: None,
+        popup: None,
         scratch: Vec::new(),
         dirty: true,
         running: true,
@@ -110,6 +114,11 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             state.refresh_tip();
         }
         state.draw_tip(&handle);
+        // A menu that was asked for has arrived from the bus thread.
+        if let Some(menu) = state.world.take_tray_menu() {
+            state.show_menu(menu, &handle);
+        }
+        state.draw_menu(&handle);
 
         queue.flush()?;
         let read = queue
@@ -119,16 +128,17 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         // value and the descriptor is only borrowed from it.
         let wayland_fd = read.connection_fd().try_clone_to_owned()?;
         let control_fd = control.as_fd();
-        // A source that changes under the bar rather than because the bar
-        // asked -- the volume, so far. Without it a volume key would show up
-        // whenever the next tick happened to come round.
-        let wake_fd = state.world.wake();
+        // Sources that change under the bar rather than because the bar asked:
+        // the volume, and the tray. Without them a volume key or an application
+        // putting an icon up would show whenever the next tick came round.
+        let wake_fds = state.world.wakes();
+        let watched = wake_fds.len();
 
         let mut fds = vec![
             PollFd::new(&wayland_fd, PollFlags::IN),
             PollFd::new(&control_fd, PollFlags::IN),
         ];
-        if let Some(wake) = &wake_fd {
+        for wake in &wake_fds {
             fds.push(PollFd::new(wake, PollFlags::IN));
         }
         // Whichever comes first: the next clock tick, or a tooltip falling due.
@@ -139,13 +149,21 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             tv_sec: wait.as_secs() as i64,
             tv_nsec: wait.subsec_nanos() as i64,
         };
-        let _ = rustix::event::poll(&mut fds, Some(&timeout));
+        // An error here leaves every `revents` clear, which reads as "nothing
+        // happened" and skips the read: the events pile up in the socket and
+        // the bar goes quiet with the process still running.
+        if let Err(err) = rustix::event::poll(&mut fds, Some(&timeout)) {
+            if err != rustix::io::Errno::INTR {
+                return Err(format!("waiting on the compositor failed: {err}").into());
+            }
+            continue;
+        }
 
         let wayland_ready = fds[0].revents().contains(PollFlags::IN);
         let control_ready = fds[1].revents().contains(PollFlags::IN);
-        let woken = fds
-            .get(2)
-            .is_some_and(|fd| fd.revents().contains(PollFlags::IN));
+        let woken = (0..watched)
+            .filter_map(|n| fds.get(2 + n))
+            .any(|fd| fd.revents().contains(PollFlags::IN));
         if wayland_ready {
             let _ = read.read();
         } else {
@@ -188,6 +206,32 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// The keyboard, which exists so that Escape closes an open menu.
+impl Dispatch<wayland_client::protocol::wl_keyboard::WlKeyboard, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &wayland_client::protocol::wl_keyboard::WlKeyboard,
+        event: wayland_client::protocol::wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_keyboard::{Event, KeyState};
+        // The evdev code rather than a keysym: reading one would mean carrying
+        // a keymap around for a single key, and Escape is the same physical key
+        // on every layout there is.
+        const ESCAPE: u32 = 1;
+        if let Event::Key {
+            key, state: down, ..
+        } = event
+            && down == wayland_client::WEnum::Value(KeyState::Pressed)
+            && key == ESCAPE
+        {
+            state.hide_menu();
+        }
+    }
+}
+
 /// The three buttons a bar knows what to do with.
 ///
 /// Linux input codes rather than a protocol enum: `wl_pointer` reports the
@@ -199,6 +243,73 @@ fn which(button: u32) -> Option<Button> {
         0x112 => Some(Button::Middle),
         _ => None,
     }
+}
+
+/// What one of the menu's surfaces is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// The whole display, to catch a click meant to dismiss the menu.
+    Whole,
+    /// The menu itself.
+    Box,
+}
+
+/// One surface the bar puts up and takes down again.
+///
+/// The tooltip and the menu both need the same few things -- a layer surface, a
+/// viewport to say how large its buffer means to be, and somewhere to draw --
+/// so they share the bookkeeping rather than each keeping their own copy.
+struct Panel {
+    surface: WlSurface,
+    layer: ZwlrLayerSurfaceV1,
+    viewport: Option<WpViewport>,
+    pool: Option<Pool>,
+    /// The size the compositor has been asked for, so a repaint that changes
+    /// shape knows to ask again.
+    logical: (i32, i32),
+    configured: bool,
+}
+
+impl Panel {
+    fn destroy(self) {
+        // The pool first: its buffers are cut from it and the surface they were
+        // attached to is about to be gone.
+        drop(self.pool);
+        self.layer.destroy();
+        self.surface.destroy();
+    }
+}
+
+/// A tray item's menu, and the two surfaces showing it.
+struct Popup {
+    menu: crate::tray::Menu,
+    /// The level on screen, and the levels it was reached through.
+    shown: Vec<crate::tray::Entry>,
+    trail: Vec<Vec<crate::tray::Entry>>,
+    hovered: Option<i32>,
+    /// A transparent sheet over the whole display, under the menu. Without it
+    /// there is no way to hear about a click meant to dismiss the menu: a
+    /// client is told about the pointer only over its own surfaces.
+    shade: Panel,
+    box_: Panel,
+    frame: Option<Frame>,
+    rows: Vec<bar::MenuRow>,
+    /// Which bar it belongs to, and where under it the menu sits.
+    bar: usize,
+    at: f32,
+    /// Set when what it should show has changed.
+    stale: bool,
+}
+
+/// Which of the bar's surfaces the pointer is on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum On {
+    /// A bar, by its index.
+    Bar(usize),
+    /// A tray item's open menu.
+    Menu,
+    /// The sheet under it, which means "anywhere else".
+    Shade,
 }
 
 /// A module the pointer is sitting on, waiting to see whether it stays.
@@ -253,6 +364,10 @@ struct Globals {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    /// Held for as long as the bar runs. A seat proxy that goes out of scope
+    /// takes its pointer and keyboard with it, and then nothing the pointer
+    /// does is ever heard about again.
+    seat: Option<WlSeat>,
     /// The pair that makes a fraction expressible: one says what the scale
     /// actually is, the other says how large the result should end up. Without
     /// the second there is no way to say that a 1.3333x buffer is one bar tall.
@@ -388,8 +503,8 @@ struct State {
     bars: Vec<Bar>,
     snapshot: Snapshot,
     pointer_at: (f64, f64),
-    /// Which bar the pointer is over, if any.
-    pointer_on: Option<usize>,
+    /// What the pointer is over, if anything of ours.
+    pointer_on: Option<On>,
     /// Modules showing their second format, by name. A set rather than a flag
     /// per module because most modules have no second format at all.
     alt: std::collections::BTreeSet<String>,
@@ -399,6 +514,8 @@ struct State {
     tip_stale: bool,
     /// The tooltip currently on screen, if any.
     tip: Option<Tip>,
+    /// A tray item's menu, while one is open.
+    popup: Option<Popup>,
     /// Reused between frames: at a few hundred kilobytes a bar, allocating this
     /// per redraw is the largest thing the bar would do per frame.
     scratch: Vec<u8>,
@@ -531,7 +648,7 @@ impl State {
     /// a tooltip survive the pointer moving a few pixels within one module,
     /// and stops one appearing while the pointer is merely crossing the bar.
     fn hovered(&mut self) {
-        let found = self.pointer_on.and_then(|index| {
+        let found = self.pointer_bar().and_then(|index| {
             let bar = self.bars.get(index)?;
             let frame = bar.frame.as_ref()?;
             let x = self.pointer_at.0 as f32 * bar.scale;
@@ -604,6 +721,153 @@ impl State {
         }
         let delay = Duration::from_millis(self.config.tooltip.delay_ms);
         Some(delay.saturating_sub(hover.since.elapsed()))
+    }
+
+    /// Puts up a tray item's menu under the icon it belongs to.
+    fn show_menu(&mut self, menu: crate::tray::Menu, handle: &QueueHandle<State>) {
+        self.hide_menu();
+        self.hide_tip();
+        if menu.items.is_empty() {
+            return;
+        }
+        // Under the icon that was clicked, which is wherever the pointer was.
+        let Some(bar) = self.pointer_bar() else {
+            return;
+        };
+        let at = self.pointer_at.0 as f32;
+        let scale = self.bars.get(bar).map_or(1.0, |b| b.scale);
+        let width = self.bars.get(bar).map_or(0, |b| b.width);
+
+        // Drawn before the surface is made, because the surface has to say how
+        // large it is before its first commit.
+        let Some(drawn) = bar::menu(&self.config, &mut self.text, &menu.items, None, scale) else {
+            return;
+        };
+        let logical = (
+            (drawn.pixmap.width() as f32 / scale).round().max(1.0) as i32,
+            (drawn.pixmap.height() as f32 / scale).round().max(1.0) as i32,
+        );
+        // Centred under the icon, and pushed back inside the display rather
+        // than hanging off the edge -- which is where the tray's own menu would
+        // always be, since the tray sits at the end of the bar.
+        let left = (at / scale - logical.0 as f32 / 2.0)
+            .round()
+            .clamp(0.0, (width as i32 - logical.0).max(0) as f32) as i32;
+
+        let Some(shade) = self.panel(handle, SHADE, bar, Shape::Whole, (0, 0), 0) else {
+            return;
+        };
+        let Some(box_) = self.panel(handle, MENU, bar, Shape::Box, logical, left) else {
+            shade.destroy();
+            return;
+        };
+        self.popup = Some(Popup {
+            shown: menu.items.clone(),
+            menu,
+            trail: Vec::new(),
+            hovered: None,
+            shade,
+            box_,
+            rows: drawn.rows,
+            frame: Some(Frame {
+                pixmap: drawn.pixmap,
+                hits: Vec::new(),
+            }),
+            bar,
+            at,
+            stale: false,
+        });
+    }
+
+    fn hide_menu(&mut self) {
+        if let Some(popup) = self.popup.take() {
+            popup.box_.destroy();
+            popup.shade.destroy();
+            // The menu had the keyboard; the window under it should have it
+            // back, and only a commit tells the compositor that.
+            self.dirty = true;
+        }
+    }
+
+    /// Creates one of the menu's two surfaces.
+    fn panel(
+        &self,
+        handle: &QueueHandle<State>,
+        index: usize,
+        bar: usize,
+        shape: Shape,
+        logical: (i32, i32),
+        left: i32,
+    ) -> Option<Panel> {
+        let compositor = self.globals.compositor.clone()?;
+        let shell = self.globals.layer_shell.clone()?;
+        let output = self
+            .globals
+            .outputs
+            .get(self.bars.get(bar)?.output)?
+            .0
+            .clone();
+
+        let surface = compositor.create_surface(handle, ());
+        let layer = shell.get_layer_surface(
+            &surface,
+            Some(&output),
+            zwlr_layer_shell_v1::Layer::Overlay,
+            match shape {
+                Shape::Whole => "irontile-menu-shade".to_owned(),
+                Shape::Box => "irontile-menu".to_owned(),
+            },
+            handle,
+            index,
+        );
+        match shape {
+            Shape::Whole => {
+                // Every edge, so it covers the display whatever size that is,
+                // and the keyboard so that Escape closes the menu.
+                layer.set_anchor(
+                    zwlr_layer_surface_v1::Anchor::Top
+                        | zwlr_layer_surface_v1::Anchor::Bottom
+                        | zwlr_layer_surface_v1::Anchor::Left
+                        | zwlr_layer_surface_v1::Anchor::Right,
+                );
+                layer.set_keyboard_interactivity(
+                    zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive,
+                );
+            }
+            Shape::Box => {
+                let edge = match self.config.position {
+                    Position::Top => zwlr_layer_surface_v1::Anchor::Top,
+                    Position::Bottom => zwlr_layer_surface_v1::Anchor::Bottom,
+                };
+                layer.set_anchor(edge | zwlr_layer_surface_v1::Anchor::Left);
+                // A surface anchored to two edges has to say how large it is
+                // before its first commit: asking for nothing is a protocol
+                // error, and the connection goes with it.
+                layer.set_size(logical.0.max(1) as u32, logical.1.max(1) as u32);
+                let gap = self.config.height + self.config.tooltip.gap;
+                match self.config.position {
+                    Position::Top => layer.set_margin(gap, 0, 0, left),
+                    Position::Bottom => layer.set_margin(0, 0, gap, left),
+                }
+            }
+        }
+        // Reserving nothing and ignoring what others reserve: a menu is placed
+        // against the screen, and the bar's own zone is in its margin already.
+        layer.set_exclusive_zone(-1);
+        let viewport = self
+            .globals
+            .viewporter
+            .as_ref()
+            .map(|viewporter| viewporter.get_viewport(&surface, handle, ()));
+        surface.commit();
+        Some(Panel {
+            surface,
+            layer,
+            viewport,
+            pool: None,
+            logical,
+            configured: false,
+        })
     }
 
     /// Takes down the tooltip, if one is up.
@@ -765,9 +1029,226 @@ impl State {
         tip.frame = None;
     }
 
+    /// Which of our surfaces a pointer event is about.
+    fn what_is(&self, surface: &WlSurface) -> Option<On> {
+        if let Some(popup) = &self.popup {
+            if popup.box_.surface == *surface {
+                return Some(On::Menu);
+            }
+            if popup.shade.surface == *surface {
+                return Some(On::Shade);
+            }
+        }
+        self.bars
+            .iter()
+            .position(|bar| bar.surface == *surface)
+            .map(On::Bar)
+    }
+
+    /// Picks out the menu entry the pointer is on.
+    fn hovered_row(&mut self) {
+        let on_menu = self.pointer_on == Some(On::Menu);
+        let Some(popup) = &mut self.popup else {
+            return;
+        };
+        let scale = self.bars.get(popup.bar).map_or(1.0, |bar| bar.scale);
+        let next = if on_menu {
+            bar::menu_at(&popup.rows, self.pointer_at.1 as f32 * scale).map(|row| row.id)
+        } else {
+            None
+        };
+        if popup.hovered != next {
+            popup.hovered = next;
+            popup.stale = true;
+        }
+    }
+
+    /// Acts on a click inside an open menu, or outside it.
+    ///
+    /// Returns whether the click belonged to the menu at all.
+    fn menu_click(&mut self, button: Button) -> bool {
+        match self.pointer_on {
+            // Anywhere that is not the menu dismisses it, which is the whole
+            // reason the sheet underneath exists.
+            Some(On::Shade) => {
+                self.hide_menu();
+                true
+            }
+            Some(On::Menu) => {
+                if button != Button::Left {
+                    return true;
+                }
+                let Some(popup) = &self.popup else {
+                    return true;
+                };
+                let scale = self.bars.get(popup.bar).map_or(1.0, |bar| bar.scale);
+                let Some(row) =
+                    bar::menu_at(&popup.rows, self.pointer_at.1 as f32 * scale).copied()
+                else {
+                    return true;
+                };
+                if !row.enabled {
+                    return true;
+                }
+                let entry = popup.shown.iter().find(|entry| entry.id == row.id).cloned();
+                match entry {
+                    // A submenu is descended into rather than opened beside:
+                    // one surface, and the way back is the way you came.
+                    Some(entry) if !entry.children.is_empty() => {
+                        if let Some(popup) = &mut self.popup {
+                            let above = std::mem::replace(&mut popup.shown, entry.children);
+                            popup.trail.push(above);
+                            popup.hovered = None;
+                            popup.stale = true;
+                        }
+                    }
+                    Some(entry) => {
+                        let menu = popup.menu.clone();
+                        self.world.choose_tray(&menu, entry.id);
+                        self.hide_menu();
+                    }
+                    None => {}
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Which bar the pointer is on, if it is on one at all.
+    fn pointer_bar(&self) -> Option<usize> {
+        match self.pointer_on {
+            Some(On::Bar(index)) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Draws the menu, and the sheet under it.
+    fn draw_menu(&mut self, handle: &QueueHandle<State>) {
+        let Some(popup) = &mut self.popup else {
+            return;
+        };
+        let scale = self.bars.get(popup.bar).map_or(1.0, |bar| bar.scale);
+        let width = self.bars.get(popup.bar).map_or(0, |bar| bar.width);
+
+        if popup.stale {
+            popup.stale = false;
+            if let Some(drawn) = bar::menu(
+                &self.config,
+                &mut self.text,
+                &popup.shown,
+                popup.hovered,
+                scale,
+            ) {
+                popup.rows = drawn.rows;
+                let logical = (
+                    (drawn.pixmap.width() as f32 / scale).round().max(1.0) as i32,
+                    (drawn.pixmap.height() as f32 / scale).round().max(1.0) as i32,
+                );
+                // Under the icon, and pushed back inside the display rather
+                // than hanging off the edge -- which is where the tray's own
+                // menu would always be, since the tray sits at the end.
+                let left = (popup.at / scale - logical.0 as f32 / 2.0)
+                    .round()
+                    .clamp(0.0, (width as i32 - logical.0).max(0) as f32)
+                    as i32;
+                let gap = self.config.height + self.config.tooltip.gap;
+                if popup.box_.logical != logical {
+                    popup.box_.logical = logical;
+                    popup
+                        .box_
+                        .layer
+                        .set_size(logical.0.max(1) as u32, logical.1.max(1) as u32);
+                }
+                match self.config.position {
+                    Position::Top => popup.box_.layer.set_margin(gap, 0, 0, left),
+                    Position::Bottom => popup.box_.layer.set_margin(0, 0, gap, left),
+                }
+                popup.box_.surface.commit();
+                popup.frame = Some(Frame {
+                    pixmap: drawn.pixmap,
+                    hits: Vec::new(),
+                });
+            }
+        }
+
+        // The sheet is one transparent pixel stretched over the display: it
+        // exists to be clicked on, not to be looked at, and a buffer the size
+        // of the screen would cost megabytes to say nothing.
+        let shm = self.globals.shm.clone();
+        if popup.shade.configured
+            && popup.shade.pool.is_none()
+            && let Some(shm) = &shm
+            && let Some(pool) = Pool::new(shm, handle, (1, 1))
+            && let Some(slot) = pool.free()
+        {
+            use std::os::unix::fs::FileExt;
+            let _ = pool.file.write_all_at(&[0, 0, 0, 0], slot.offset);
+            slot.busy.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(viewport) = &popup.shade.viewport {
+                let (w, h) = popup.shade.logical;
+                viewport.set_destination(w.max(1), h.max(1));
+            }
+            popup.shade.surface.attach(Some(&slot.buffer), 0, 0);
+            popup.shade.surface.damage_buffer(0, 0, 1, 1);
+            popup.shade.surface.commit();
+            popup.shade.pool = Some(pool);
+        }
+
+        let Some(frame) = &popup.frame else {
+            return;
+        };
+        if !popup.box_.configured {
+            return;
+        }
+        let size = (frame.pixmap.width() as i32, frame.pixmap.height() as i32);
+        let Some(shm) = &shm else {
+            return;
+        };
+        if popup
+            .box_
+            .pool
+            .as_ref()
+            .is_none_or(|pool| pool.size != size)
+        {
+            popup.box_.pool = None;
+            popup.box_.pool = Pool::new(shm, handle, size);
+        }
+        let Some(pool) = &popup.box_.pool else {
+            return;
+        };
+        let Some(slot) = pool.free() else {
+            return;
+        };
+        use std::os::unix::fs::FileExt;
+        self.scratch.clear();
+        for pixel in frame.pixmap.pixels() {
+            self.scratch.extend_from_slice(&[
+                pixel.blue(),
+                pixel.green(),
+                pixel.red(),
+                pixel.alpha(),
+            ]);
+        }
+        if pool.file.write_all_at(&self.scratch, slot.offset).is_err() {
+            return;
+        }
+        slot.busy.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(viewport) = &popup.box_.viewport {
+            let (w, h) = popup.box_.logical;
+            viewport.set_destination(w.max(1), h.max(1));
+        }
+        popup.box_.surface.attach(Some(&slot.buffer), 0, 0);
+        popup.box_.surface.damage_buffer(0, 0, size.0, size.1);
+        popup.box_.surface.commit();
+    }
+
     /// Acts on a click at the pointer's last position.
     fn click(&mut self, button: Button) {
-        let Some(bar) = self.pointer_on.and_then(|index| self.bars.get(index)) else {
+        if self.menu_click(button) {
+            return;
+        }
+        let Some(bar) = self.pointer_bar().and_then(|index| self.bars.get(index)) else {
             return;
         };
         let Some(frame) = &bar.frame else {
@@ -781,6 +1262,21 @@ impl State {
                 }
             }
             Some(Click::Run(command)) => spawn(&command),
+            Some(Click::Tray {
+                service,
+                path,
+                press,
+            }) => {
+                // A menu the item wants drawn for it is fetched first and shown
+                // when it arrives; everything else goes straight to the item.
+                // Delivered by the thread holding the bus, since this one is
+                // holding the compositor.
+                let press = match press {
+                    crate::tray::Press::Context => crate::tray::Press::Menu,
+                    other => other,
+                };
+                self.world.press_tray(&service, &path, press);
+            }
             Some(Click::Toggle(module)) => {
                 // Whatever it said before is no longer what it says.
                 self.hide_tip();
@@ -888,6 +1384,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             "wl_seat" => {
                 let seat: WlSeat = registry.bind(name, version.min(7), handle, ());
                 seat.get_pointer(handle, ());
+                // Only an open menu takes the keyboard, and only to hear
+                // Escape -- but it has to be bound, or the keystrokes of
+                // someone who opened a menu and changed their mind go nowhere
+                // at all.
+                seat.get_keyboard(handle, ());
+                state.globals.seat = Some(seat);
             }
             "wl_output" => {
                 let index = state.globals.outputs.len();
@@ -926,11 +1428,31 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            zwlr_layer_surface_v1::Event::Configure { serial, width, .. } => {
+            zwlr_layer_surface_v1::Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
                 layer.ack_configure(serial);
                 if *index == TOOLTIP {
                     if let Some(tip) = &mut state.tip {
                         tip.configured = true;
+                    }
+                    return;
+                }
+                if *index == MENU || *index == SHADE {
+                    if let Some(popup) = &mut state.popup {
+                        let panel = if *index == MENU {
+                            &mut popup.box_
+                        } else {
+                            &mut popup.shade
+                        };
+                        panel.configured = true;
+                        // The sheet is sized by the compositor rather than by
+                        // us: it asked for every edge, so this is the display.
+                        if *index == SHADE {
+                            panel.logical = (width as i32, height as i32);
+                        }
                     }
                     return;
                 }
@@ -943,6 +1465,10 @@ impl Dispatch<ZwlrLayerSurfaceV1, usize> for State {
             zwlr_layer_surface_v1::Event::Closed => {
                 if *index == TOOLTIP {
                     state.hide_tip();
+                    return;
+                }
+                if *index == MENU || *index == SHADE {
+                    state.hide_menu();
                     return;
                 }
                 state.bars.retain(|b| b.output != *index);
@@ -1043,12 +1569,17 @@ impl Dispatch<WlPointer, ()> for State {
                 surface_y,
                 ..
             } => {
-                state.pointer_on = state.bars.iter().position(|bar| bar.surface == surface);
+                state.pointer_on = state.what_is(&surface);
                 state.pointer_at = (surface_x, surface_y);
                 state.hovered();
+                state.hovered_row();
             }
             wl_pointer::Event::Leave { surface, .. } => {
-                if state.pointer_on.is_some_and(|index| {
+                if state.pointer_on == Some(On::Menu) && state.what_is(&surface) == Some(On::Menu) {
+                    state.pointer_on = None;
+                    state.hovered_row();
+                }
+                if state.pointer_bar().is_some_and(|index| {
                     state.bars.get(index).is_some_and(|b| b.surface == surface)
                 }) {
                     state.pointer_on = None;
@@ -1067,6 +1598,7 @@ impl Dispatch<WlPointer, ()> for State {
                 // to the next redraw would mean a tooltip arriving up to a
                 // second late, or not at all if the pointer moved on.
                 state.hovered();
+                state.hovered_row();
             }
             wl_pointer::Event::Button {
                 button,

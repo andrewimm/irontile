@@ -31,6 +31,10 @@ pub struct IconSet {
     /// Rasterised masks, by name and pixel size. Colour is applied afterwards,
     /// so a themed bar does not re-rasterise when a value crosses a threshold.
     cache: HashMap<(String, u32), Option<Pixmap>>,
+    /// Scaled tray icons, kept apart because they come as pixels rather than a
+    /// name and are keyed by where those pixels live rather than by what they
+    /// are called.
+    pixmaps: HashMap<(usize, u32), Option<Pixmap>>,
 }
 
 impl std::fmt::Debug for IconSet {
@@ -52,6 +56,7 @@ impl IconSet {
             themes: theme_search_path(theme),
             index: None,
             cache: HashMap::new(),
+            pixmaps: HashMap::new(),
         }
     }
 
@@ -79,6 +84,54 @@ impl IconSet {
             None,
         );
         true
+    }
+
+    /// Draws a tray item's own pixels, scaled to `size`, with its top-left at
+    /// `x`, `y`.
+    ///
+    /// Not tinted: these are an application's own artwork rather than a
+    /// symbolic glyph, and recolouring 1Password's key to the bar's foreground
+    /// would leave a smudge rather than an icon.
+    pub fn draw_pixels(
+        &mut self,
+        canvas: &mut PixmapMut<'_>,
+        pixels: &crate::module::Pixels,
+        x: f32,
+        y: f32,
+        size: u32,
+    ) -> bool {
+        let Some(scaled) = self.scaled(pixels, size) else {
+            return false;
+        };
+        canvas.draw_pixmap(
+            x.round() as i32,
+            y.round() as i32,
+            scaled.as_ref(),
+            &PixmapPaint::default(),
+            Transform::identity(),
+            None,
+        );
+        true
+    }
+
+    fn scaled(&mut self, pixels: &crate::module::Pixels, size: u32) -> Option<&Pixmap> {
+        let size = size.max(1);
+        // Keyed by where the pixels live: the bytes are shared rather than
+        // copied, so an item whose icon has not changed keeps the same address
+        // and an item whose icon has changed gets a different one.
+        let key = (
+            std::sync::Arc::as_ptr(&pixels.argb) as *const u8 as usize,
+            size,
+        );
+        if !self.pixmaps.contains_key(&key) {
+            // Bounded: an item that changes its icon constantly would otherwise
+            // grow this without limit, and nothing older is worth keeping.
+            if self.pixmaps.len() > 64 {
+                self.pixmaps.clear();
+            }
+            self.pixmaps.insert(key, rescale(pixels, size));
+        }
+        self.pixmaps.get(&key).and_then(Option::as_ref)
     }
 
     /// Whether a name resolves, so a caller can lay out around a missing icon
@@ -239,8 +292,87 @@ fn tint(mask: &Pixmap, color: Color) -> Pixmap {
     out
 }
 
+/// Turns a tray item's ARGB32 into a square pixmap of the size asked for.
+///
+/// The specification says most significant byte first, which is A, R, G, B in
+/// memory; tiny-skia wants premultiplied RGBA. Applications do send
+/// unpremultiplied colour here, so it is multiplied on the way in.
+fn rescale(pixels: &crate::module::Pixels, size: u32) -> Option<Pixmap> {
+    let (w, h) = (pixels.width, pixels.height);
+    if w == 0 || h == 0 || pixels.argb.len() < (w as usize) * (h as usize) * 4 {
+        return None;
+    }
+    let mut source = Pixmap::new(w, h)?;
+    for (out, chunk) in source
+        .pixels_mut()
+        .iter_mut()
+        .zip(pixels.argb.chunks_exact(4))
+    {
+        let (a, r, g, b) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+        *out = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+    }
+
+    let mut out = Pixmap::new(size, size)?;
+    let scale = size as f32 / w.max(h) as f32;
+    // Centred, so an icon that is not square keeps its proportions rather than
+    // being stretched to fill the square the bar lays out for it.
+    let left = (size as f32 - w as f32 * scale) / 2.0;
+    let top = (size as f32 - h as f32 * scale) / 2.0;
+    out.draw_pixmap(
+        0,
+        0,
+        source.as_ref(),
+        &PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bilinear,
+            ..Default::default()
+        },
+        Transform::from_translate(left, top).pre_scale(scale, scale),
+        None,
+    );
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_tray_pixmap_is_squared_off_and_premultiplied() {
+        // The specification says ARGB32, most significant byte first, and does
+        // not say premultiplied -- so it arrives straight and tiny-skia wants
+        // it multiplied. A half-transparent red that came out full strength
+        // would look like a different colour rather than a lighter one.
+        let pixels = crate::module::Pixels {
+            width: 2,
+            height: 1,
+            argb: vec![
+                0x80, 0xff, 0x00, 0x00, // half-transparent red
+                0xff, 0x00, 0x00, 0xff, // opaque blue
+            ]
+            .into(),
+        };
+        let scaled = super::rescale(&pixels, 8).expect("a pixmap");
+        assert_eq!(scaled.width(), 8);
+        assert_eq!(scaled.height(), 8, "square, whatever shape it arrived in");
+
+        // Somewhere in the left half, which is the red one.
+        let left = scaled.pixel(1, 4).expect("a pixel");
+        assert!(
+            left.red() <= left.alpha(),
+            "premultiplied: no channel may exceed the alpha ({left:?})"
+        );
+    }
+
+    #[test]
+    fn a_pixmap_shorter_than_it_claims_is_refused() {
+        // An application that lies about its size would otherwise read past the
+        // end of what it sent.
+        let pixels = crate::module::Pixels {
+            width: 64,
+            height: 64,
+            argb: vec![0u8; 16].into(),
+        };
+        assert!(super::rescale(&pixels, 8).is_none());
+    }
+
     use super::*;
 
     #[test]

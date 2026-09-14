@@ -25,6 +25,7 @@ wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 rustix.workspace = true
 libpulse-binding.workspace = true
+zbus.workspace = true
 
 [lints]
 workspace = true

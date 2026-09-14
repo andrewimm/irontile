@@ -148,6 +148,12 @@ pub fn draw(
                             cursor += icon_size as f32;
                         }
                     }
+                    Piece::Pixels(pixels) => {
+                        let top = (height - icon_size as f32) / 2.0;
+                        if icons.draw_pixels(&mut canvas, pixels, cursor, top, icon_size) {
+                            cursor += icon_size as f32;
+                        }
+                    }
                 }
             }
             // Recorded for anything the pointer can do something with, which
@@ -197,6 +203,9 @@ fn measure(text: &mut TextRenderer, icons: &mut IconSet, segment: &Segment, icon
             Piece::Text(run) => text.width(run),
             // A name that resolves to nothing takes no room, so the line closes
             // up rather than leaving a gap where an icon would have been.
+            // An item's own artwork always takes its square: unlike a name,
+            // there is nothing to fail to resolve.
+            Piece::Pixels(_) => icon_size as f32,
             Piece::Icon(name) => {
                 if icons.has(name, icon_size) {
                     icon_size as f32
@@ -328,6 +337,155 @@ pub fn tooltip(config: &Config, text: &mut TextRenderer, body: &str, scale: f32)
         pixmap,
         hits: Vec::new(),
     })
+}
+
+/// A drawn menu: its pixels, and where each entry ended up.
+pub struct MenuFrame {
+    pub pixmap: Pixmap,
+    pub rows: Vec<MenuRow>,
+}
+
+impl std::fmt::Debug for MenuFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MenuFrame")
+            .field("size", &(self.pixmap.width(), self.pixmap.height()))
+            .field("rows", &self.rows.len())
+            .finish()
+    }
+}
+
+/// One entry, and the band of the menu it occupies.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MenuRow {
+    pub id: i32,
+    pub top: f32,
+    pub height: f32,
+    pub enabled: bool,
+}
+
+/// Draws a tray item's menu, with `hovered` picked out.
+///
+/// Entries that cannot be chosen are drawn but not offered: a menu that hides
+/// what is unavailable changes shape as you use it, and a menu that lies about
+/// what it can do is worse than one that says "not now".
+pub fn menu(
+    config: &Config,
+    text: &mut TextRenderer,
+    entries: &[crate::tray::Entry],
+    hovered: Option<i32>,
+    scale: f32,
+) -> Option<MenuFrame> {
+    let style = &config.menu;
+    if entries.is_empty() {
+        return None;
+    }
+
+    let size = style.font_size.unwrap_or(config.font_size) * scale;
+    text.set_size(size);
+    let padding = style.padding as f32 * scale;
+    let border = (style.border_width as f32 * scale).max(0.0);
+    let row = (size * 1.6).ceil();
+    let rule = (size * 0.6).ceil();
+
+    let widest = entries
+        .iter()
+        .filter(|entry| !entry.separator)
+        .map(|entry| text.width(&label_of(entry)))
+        .fold(0.0_f32, f32::max);
+    let w = (widest + (padding + border) * 2.0)
+        .max(style.min_width as f32 * scale)
+        .ceil();
+    let h = (entries
+        .iter()
+        .map(|entry| if entry.separator { rule } else { row })
+        .sum::<f32>()
+        + (padding + border) * 2.0)
+        .ceil()
+        .max(1.0);
+
+    let mut pixmap = Pixmap::new(w as u32, h as u32)?;
+    let mut canvas = pixmap.as_mut();
+    fill(&mut canvas, 0.0, 0.0, w, h, style.border);
+    fill(
+        &mut canvas,
+        border,
+        border,
+        w - border * 2.0,
+        h - border * 2.0,
+        style.background,
+    );
+
+    let mut rows = Vec::new();
+    let mut y = border + padding;
+    for entry in entries {
+        if entry.separator {
+            // Centred in its band, which is what makes it read as a division
+            // rather than as an underline of the entry above.
+            let line = (scale.round()).max(1.0);
+            fill(
+                &mut canvas,
+                border + padding,
+                (y + rule / 2.0).round(),
+                w - (border + padding) * 2.0,
+                line,
+                style.border,
+            );
+            y += rule;
+            continue;
+        }
+
+        let picked = hovered == Some(entry.id) && entry.enabled;
+        if picked {
+            fill(
+                &mut canvas,
+                border,
+                y,
+                w - border * 2.0,
+                row,
+                style.highlight,
+            );
+        }
+        let colour = match (entry.enabled, picked) {
+            (false, _) => style.disabled,
+            (true, true) => style.highlight_foreground,
+            (true, false) => style.foreground,
+        };
+        text.draw(
+            &mut canvas,
+            &label_of(entry),
+            border + padding,
+            // Centred within its own row: `draw` centres in the height it is
+            // given, so it is given the row rather than the whole menu.
+            y * 2.0 + row,
+            colour,
+        );
+        rows.push(MenuRow {
+            id: entry.id,
+            top: y,
+            height: row,
+            enabled: entry.enabled,
+        });
+        y += row;
+    }
+
+    Some(MenuFrame { pixmap, rows })
+}
+
+/// What an entry reads as, including its tick and its submenu arrow.
+fn label_of(entry: &crate::tray::Entry) -> String {
+    let tick = match entry.toggle {
+        Some(true) => "* ",
+        Some(false) => "  ",
+        None => "",
+    };
+    let arrow = if entry.children.is_empty() { "" } else { "  >" };
+    format!("{tick}{}{arrow}", entry.label)
+}
+
+/// The entry at `y` in a drawn menu, if the pointer is on one.
+pub fn menu_at(rows: &[MenuRow], y: f32) -> Option<&MenuRow> {
+    rows.iter()
+        .find(|row| y >= row.top && y < row.top + row.height)
 }
 
 /// A background colour that is not quite the bar's, for a subtle fill.
@@ -534,6 +692,85 @@ mod tests {
             (ratio - 2.0).abs() < 0.15,
             "at twice the scale it should take about twice the pixels, not {ratio}x"
         );
+    }
+
+    #[test]
+    fn a_menu_is_as_wide_as_its_widest_entry_and_lists_what_can_be_chosen() {
+        use crate::tray::Entry;
+
+        let entry = |id, label: &str, enabled, separator| Entry {
+            id,
+            label: label.into(),
+            enabled,
+            separator,
+            toggle: None,
+            children: Vec::new(),
+        };
+        let entries = vec![
+            entry(1, "Open", true, false),
+            entry(2, "", true, true),
+            entry(3, "A considerably longer entry", true, false),
+            entry(4, "Not now", false, false),
+        ];
+        let config = Config::default();
+        let mut text = TextRenderer::new(&config.font, config.font_size);
+        let drawn = menu(&config, &mut text, &entries, None, 1.0).expect("a menu");
+
+        // A separator is drawn but cannot be aimed at: it is a division, not a
+        // thing to choose.
+        assert_eq!(drawn.rows.len(), 3, "three choosable, one divider");
+        assert!(drawn.rows.iter().all(|row| row.id != 2));
+        assert!(
+            !drawn.rows.iter().find(|row| row.id == 4).unwrap().enabled,
+            "an entry that cannot be chosen is still listed, and says so"
+        );
+
+        // The rows are in order, and do not overlap.
+        for pair in drawn.rows.windows(2) {
+            assert!(pair[0].top + pair[0].height <= pair[1].top);
+        }
+
+        let narrow = vec![entry(1, "Ok", true, false)];
+        let small = menu(&config, &mut text, &narrow, None, 1.0).expect("a menu");
+        assert!(
+            drawn.pixmap.width() > small.pixmap.width(),
+            "the longest entry sets the width"
+        );
+        assert!(
+            small.pixmap.width() >= config.menu.min_width as u32,
+            "and a menu of short words is still wide enough to aim at"
+        );
+
+        // An empty menu is no menu rather than an empty box.
+        assert!(menu(&config, &mut text, &[], None, 1.0).is_none());
+    }
+
+    #[test]
+    fn a_click_in_a_menu_lands_on_the_entry_it_is_over() {
+        let rows = vec![
+            MenuRow {
+                id: 7,
+                top: 10.0,
+                height: 20.0,
+                enabled: true,
+            },
+            MenuRow {
+                id: 8,
+                top: 30.0,
+                height: 20.0,
+                enabled: false,
+            },
+        ];
+        assert_eq!(menu_at(&rows, 15.0).map(|row| row.id), Some(7));
+        assert_eq!(
+            menu_at(&rows, 30.0).map(|row| row.id),
+            Some(8),
+            "boundaries belong to the row below"
+        );
+        // Above the first row and below the last is the menu's own padding,
+        // which is part of the menu but not part of any entry.
+        assert!(menu_at(&rows, 5.0).is_none());
+        assert!(menu_at(&rows, 60.0).is_none());
     }
 
     #[test]

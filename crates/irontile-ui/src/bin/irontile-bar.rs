@@ -92,7 +92,7 @@ fn render_to_png(
     // readings that arrive on their own rather than drawing a bar with a hole
     // in it where the volume goes.
     let world = System::new();
-    world.settle(std::time::Duration::from_millis(500));
+    world.settle(std::time::Duration::from_millis(1500));
     // Nothing has been clicked, so every module shows its first format.
     let frame = bar::draw(
         config,
