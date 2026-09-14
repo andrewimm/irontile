@@ -24,6 +24,10 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 irontile-ipc.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+rustix.workspace = true
 
 [lints]
 workspace = true

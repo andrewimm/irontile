@@ -21,12 +21,18 @@ use smithay::reexports::wayland_server::{Client, DisplayHandle};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size as SmithaySize};
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{CompositorClientState, CompositorHandler, CompositorState};
+use smithay::wayland::cursor_shape::CursorShapeManagerState;
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
+use smithay::wayland::selection::primary_selection::{
+    PrimarySelectionHandler, PrimarySelectionState,
+};
+use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
+use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
@@ -61,6 +67,25 @@ impl OutputSpec {
     }
 }
 
+/// A pointer drag the compositor is handling itself.
+///
+/// Implemented as state consulted by the input handler rather than as a
+/// `PointerGrab`, because a grab's purpose is to intercept events *and still
+/// route them*, and here the client deliberately sees nothing for the duration.
+/// Pointer focus is cleared when one starts, so no client is left believing the
+/// pointer is still inside it. A formal grab would be the right shape if a
+/// future gesture needed the client to see the drag.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResizeDrag {
+    pub window: WindowId,
+    /// Which edges follow the pointer, chosen from where in the window the
+    /// drag started.
+    pub horizontal: Direction,
+    pub vertical: Direction,
+    /// Where the pointer was at the last motion, so each step is a delta.
+    pub last: Point<f64, Logical>,
+}
+
 /// A connected display and the protocol object advertising it.
 #[derive(Debug)]
 pub struct OutputEntry {
@@ -79,6 +104,11 @@ pub struct Irontile {
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
+    pub layer_shell_state: WlrLayerShellState,
+    /// Held for its global; clients ask through it and are always told
+    /// server-side.
+    #[allow(dead_code)]
+    pub xdg_decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
     /// Held for its protocol globals; dropping it would withdraw `wl_output`
     /// and `xdg_output` from clients.
@@ -86,6 +116,13 @@ pub struct Irontile {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
+    /// Middle-click paste. Held for its global.
+    #[allow(dead_code)]
+    pub primary_selection_state: PrimarySelectionState,
+    /// Lets clients name a cursor instead of supplying a buffer for it. Held
+    /// for its global.
+    #[allow(dead_code)]
+    pub cursor_shape_state: CursorShapeManagerState,
     pub popups: PopupManager,
     pub seat: Seat<Self>,
     /// Connected displays, paired with the protocol object each is advertised
@@ -98,10 +135,30 @@ pub struct Irontile {
     pub windows: Registry,
     /// The most recent frame, kept so rendering and hit-testing agree with what
     /// clients were last configured for.
+    /// The displays as the backend described them, before work areas.
+    arrangement: Vec<OutputSpec>,
     pub placements: Frame,
     pub config: Config,
     /// Where the configuration came from, so a reload reads the same file.
     pub config_path: std::path::PathBuf,
+    /// Set while the pointer is resizing a window.
+    pub drag: Option<ResizeDrag>,
+}
+
+/// Hand-written because much of the protocol state smithay holds is not
+/// `Debug`, and because the useful summary of a compositor is what it is
+/// managing, not every delegate it owns.
+impl std::fmt::Debug for Irontile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Irontile")
+            .field("socket", &self.socket_name)
+            .field("outputs", &self.outputs.len())
+            .field("workspaces", &self.layout.workspaces().count())
+            .field("placements", &self.placements.placements.len())
+            .field("focused", &self.layout.focused_window())
+            .field("running", &self.running)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Irontile {
@@ -124,19 +181,25 @@ impl Irontile {
             dirty: true,
             compositor_state: CompositorState::new::<Self>(dh),
             xdg_shell_state: XdgShellState::new::<Self>(dh),
+            layer_shell_state: WlrLayerShellState::new::<Self>(dh),
+            xdg_decoration_state: XdgDecorationState::new::<Self>(dh),
             shm_state: ShmState::new::<Self>(dh, Vec::new()),
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(dh),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
+            primary_selection_state: PrimarySelectionState::new::<Self>(dh),
+            cursor_shape_state: CursorShapeManagerState::new::<Self>(dh),
             popups: PopupManager::default(),
             seat,
             outputs: Vec::new(),
             peers: crate::ipc::Peers::default(),
             layout: Layout::new(layout_config),
             windows: Registry::default(),
+            arrangement: Vec::new(),
             placements: Frame::default(),
             config,
             config_path,
+            drag: None,
         }
     }
 
@@ -208,17 +271,45 @@ impl Irontile {
             entry.output.set_preferred(mode);
         }
 
-        let layout_outputs: Vec<LayoutOutput> = specs
+        self.arrangement = specs.to_vec();
+        let events = self.publish_outputs();
+        self.number_unnamed_workspaces();
+        events
+    }
+
+    /// Hands the layout engine the current displays and their work areas.
+    ///
+    /// The work area is a display minus whatever layer-shell surfaces have
+    /// reserved on it, which is why this is separate from `configure_outputs`:
+    /// a bar appearing changes the work area without changing the arrangement.
+    pub fn publish_outputs(&mut self) -> Vec<Event> {
+        let layout_outputs: Vec<LayoutOutput> = self
+            .arrangement
             .iter()
             .map(|spec| {
-                // The nested and headless backends have no exclusive zones, so
-                // the work area is the whole display. A session backend
-                // subtracts layer-shell reservations here.
-                LayoutOutput::new(spec.id, spec.name.clone(), spec.logical)
+                let mut output = LayoutOutput::new(spec.id, spec.name.clone(), spec.logical);
+                if let Some(entry) = self.outputs.iter().find(|e| e.id == spec.id) {
+                    let mut map = smithay::desktop::layer_map_for_output(&entry.output);
+                    // The zone is only recomputed when the map is arranged, and
+                    // it is derived from the display's size. Reading it without
+                    // arranging returns the zone for whatever size the display
+                    // was when the map was first built, which is wrong the
+                    // moment a display is resized.
+                    map.arrange();
+                    let zone = map.non_exclusive_zone();
+                    // The zone is relative to its display; the layout engine
+                    // works in one global coordinate space.
+                    output.work_area = Rect::new(
+                        spec.logical.x + zone.loc.x,
+                        spec.logical.y + zone.loc.y,
+                        zone.size.w,
+                        zone.size.h,
+                    );
+                }
+                output
             })
             .collect();
         let events = self.layout.reconfigure_outputs(layout_outputs);
-        self.number_unnamed_workspaces();
         self.dirty = true;
         self.peers.broadcast(&events);
         events
@@ -227,6 +318,14 @@ impl Irontile {
     /// The protocol object for a display.
     pub fn smithay_output(&self, id: OutputId) -> Option<&Output> {
         self.outputs.iter().find(|e| e.id == id).map(|e| &e.output)
+    }
+
+    /// The protocol object for the focused display.
+    pub fn focused_smithay_output(&self) -> Option<&Output> {
+        self.layout
+            .focused_output()
+            .and_then(|id| self.smithay_output(id))
+            .or_else(|| self.outputs.first().map(|e| &e.output))
     }
 
     /// Gives every unnamed desktop the lowest free number.
@@ -389,12 +488,17 @@ impl Irontile {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
+        // A popup grab owns the keyboard for as long as it lasts; stealing it
+        // back on the next reflow would dismiss the menu the user just opened.
+        if keyboard.is_grabbed() {
+            return;
+        }
         let target = self
             .placements
             .focused
             .and_then(|id| self.windows.window(id))
-            .and_then(|w| w.toplevel())
-            .map(|t| t.wl_surface().clone());
+            .cloned()
+            .map(crate::focus::KeyboardFocus::Window);
         if keyboard.current_focus() == target {
             return;
         }
@@ -447,6 +551,15 @@ impl Irontile {
             }
         }
         None
+    }
+
+    /// The cell a window currently occupies.
+    pub fn cell_of(&self, window: WindowId) -> Option<Rect> {
+        self.placements
+            .placements
+            .iter()
+            .find(|p| p.window == window)
+            .map(|p| p.rect)
     }
 
     pub fn window_at(&self, point: Point<f64, Logical>) -> Option<WindowId> {
@@ -564,6 +677,15 @@ impl CompositorHandler for Irontile {
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
         self.popups.commit(surface);
 
+        if let Some(layer) = self.layer_for_surface(surface) {
+            // A layer surface must be configured before it may attach a buffer,
+            // and re-arranged after, since its size or exclusive zone may have
+            // changed what is left for everything else.
+            layer.layer_surface().send_configure();
+            self.refresh_layers();
+            return;
+        }
+
         let Some((id, window)) = self.windows.find(surface) else {
             return;
         };
@@ -596,7 +718,7 @@ impl ShmHandler for Irontile {
 }
 
 impl SeatHandler for Irontile {
-    type KeyboardFocus = WlSurface;
+    type KeyboardFocus = crate::focus::KeyboardFocus;
     type PointerFocus = WlSurface;
     type TouchFocus = WlSurface;
 
@@ -604,7 +726,7 @@ impl SeatHandler for Irontile {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&Self::KeyboardFocus>) {}
 
     fn cursor_image(
         &mut self,
@@ -626,6 +748,16 @@ impl DataDeviceHandler for Irontile {
     }
 }
 
+/// The cursor-shape protocol covers tablet tools as well as pointers, so it
+/// requires this even on a compositor with no tablet support of its own.
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Irontile {}
+
+impl PrimarySelectionHandler for Irontile {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
 impl ClientDndGrabHandler for Irontile {}
 
 impl ServerDndGrabHandler for Irontile {
@@ -633,6 +765,8 @@ impl ServerDndGrabHandler for Irontile {
 }
 
 delegate_compositor!(Irontile);
+smithay::delegate_primary_selection!(Irontile);
+smithay::delegate_cursor_shape!(Irontile);
 delegate_shm!(Irontile);
 delegate_seat!(Irontile);
 delegate_data_device!(Irontile);

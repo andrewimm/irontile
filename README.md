@@ -126,6 +126,22 @@ All bindings are behind Super. Directions are `h`/`j`/`k`/`l` or the arrow keys.
 | `Super` + `T` | Flip the container's axis |
 | `Super` + `O` | Equalize the container |
 | `Super` `Shift` + `E` | Quit |
+| `Super` + right-drag | Resize; the edges nearest where the drag started follow the pointer |
+
+## Protocols
+
+| Protocol | Notes |
+| --- | --- |
+| `wl_compositor`, `wl_shm`, `wl_seat`, `wl_output`, `xdg_output` | |
+| `xdg_shell` | Toplevels and popups, with grabs, so menus dismiss |
+| `xdg-decoration` | Every request is answered server-side; clients never draw their own titlebars |
+| `wlr-layer-shell` | Bars and panels; exclusive zones shrink the work area windows tile into |
+| `wl_data_device`, `primary-selection` | Clipboard and middle-click paste |
+| `cursor-shape` | Clients name a cursor rather than supplying a buffer |
+
+Not yet implemented: `linux-dmabuf`, so clients render into shared memory
+rather than handing over GPU buffers; XWayland; `viewporter` and
+`fractional-scale`; `pointer-constraints` and `relative-pointer`.
 
 ## Design notes
 
@@ -167,3 +183,14 @@ returns the entire engine state, which deserializes into a real `Layout`, so a
 test can assert on the tree or call `validate()` on it without the compositor
 growing a reporting API of its own. Combined with the headless backend, that is
 how display arrangement and hotplug are covered end to end.
+
+**Decoration is not the client's decision.** The compositor draws a border
+rectangle and nothing else, so every `xdg-decoration` request is answered
+server-side whatever it asked for. Without the protocol advertised at all,
+toolkits fall back to drawing their own titlebars and shadows, which is worse
+than either choice made deliberately.
+
+**The work area is what layer-shell leaves behind.** A bar reserving thirty
+pixels at the top of a display shrinks that display's work area, and the layout
+engine tiles into what is left. The engine never learns that layer-shell exists;
+it is handed a rectangle.

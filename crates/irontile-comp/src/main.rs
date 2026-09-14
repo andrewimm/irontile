@@ -7,9 +7,11 @@
 mod action;
 mod backend;
 mod config;
+mod focus;
 mod input;
 mod ipc;
 mod keymap;
+mod layer;
 mod registry;
 mod render;
 mod shell;

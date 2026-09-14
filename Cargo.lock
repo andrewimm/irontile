@@ -531,12 +531,16 @@ dependencies = [
  "anyhow",
  "irontile-ipc",
  "irontile-layout",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "smithay",
  "toml",
  "tracing",
  "tracing-subscriber",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]

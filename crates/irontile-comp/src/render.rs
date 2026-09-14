@@ -10,8 +10,10 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{ImportAll, Renderer};
+use smithay::desktop::layer_map_for_output;
 use smithay::render_elements;
 use smithay::utils::{Physical, Point, Rectangle, Scale, Transform};
+use smithay::wayland::shell::wlr_layer::Layer;
 
 use crate::state::Irontile;
 
@@ -36,6 +38,15 @@ where
 
     let scale = Scale::from(scale);
     let mut out = Vec::new();
+
+    // Overlay and top layers go above every window; background and bottom go
+    // below. The list is built topmost first, so these bracket the windows.
+    out.extend(layer_elements(
+        state,
+        renderer,
+        scale,
+        &[Layer::Overlay, Layer::Top],
+    ));
 
     for placement in ordered {
         let Some(entry) = state.windows.get(placement.window) else {
@@ -69,6 +80,57 @@ where
         )));
     }
 
+    out.extend(layer_elements(
+        state,
+        renderer,
+        scale,
+        &[Layer::Bottom, Layer::Background],
+    ));
+    out
+}
+
+/// Render elements for the layer-shell surfaces in the given layers, on every
+/// display, topmost first.
+fn layer_elements<R>(
+    state: &Irontile,
+    renderer: &mut R,
+    scale: Scale<f64>,
+    layers: &[Layer],
+) -> Vec<IrontileElement<R>>
+where
+    R: Renderer + ImportAll,
+    R::TextureId: Clone + 'static,
+{
+    let mut out = Vec::new();
+    for entry in &state.outputs {
+        let map = layer_map_for_output(&entry.output);
+        let origin = state
+            .layout
+            .output(entry.id)
+            .map(|o| o.logical.origin())
+            .unwrap_or_default();
+        for layer in map.layers().rev() {
+            if !layers.contains(&layer.layer()) {
+                continue;
+            }
+            let Some(geometry) = map.layer_geometry(layer) else {
+                continue;
+            };
+            // Layer geometry is relative to its display; everything rendered is
+            // in the global coordinate space.
+            let at = Rect::new(
+                origin.x + geometry.loc.x,
+                origin.y + geometry.loc.y,
+                geometry.size.w,
+                geometry.size.h,
+            );
+            out.extend(
+                smithay::backend::renderer::element::AsRenderElements::<R>::render_elements::<
+                    IrontileElement<R>,
+                >(layer, renderer, to_physical(at, scale), scale, 1.0),
+            );
+        }
+    }
     out
 }
 

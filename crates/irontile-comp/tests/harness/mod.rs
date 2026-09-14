@@ -13,6 +13,9 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+pub mod client;
+
+pub use client::TestClient;
 use irontile_ipc::Client;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
@@ -20,6 +23,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct Compositor {
     child: Child,
     pub client: Client,
+    wayland_socket: String,
+    runtime: std::path::PathBuf,
 }
 
 impl Compositor {
@@ -52,8 +57,10 @@ impl Compositor {
             }
         }
 
+        let runtime = runtime_dir();
         let mut child = command.spawn().expect("failed to start irontile");
-        let socket = read_control_socket(&mut child);
+        let Startup { control, wayland } = read_startup(&mut child);
+        let socket = control;
 
         // The socket file appears a moment after the line reporting it.
         let deadline = Instant::now() + STARTUP_TIMEOUT;
@@ -70,12 +77,61 @@ impl Compositor {
             }
         };
 
-        let mut compositor = Compositor { child, client };
+        let mut compositor = Compositor {
+            child,
+            client,
+            wayland_socket: wayland,
+            runtime,
+        };
         compositor
             .client
             .set_timeout(Some(Duration::from_secs(10)))
             .expect("failed to set a timeout");
         compositor
+    }
+}
+
+impl Compositor {
+    /// Connects a real Wayland client to this compositor.
+    pub fn connect_client(&self) -> TestClient {
+        TestClient::connect(&self.wayland_socket, &self.runtime)
+    }
+
+    /// Blocks until a condition holds, or fails the test.
+    pub fn wait_for(&mut self, mut done: impl FnMut(&mut Compositor) -> bool) {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            if done(self) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("timed out waiting on the compositor");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Blocks until the compositor reports exactly `count` placed windows.
+    ///
+    /// Mapping is asynchronous: the client commits a buffer, the compositor
+    /// notices on its next dispatch. Polling the frame is what makes a test
+    /// deterministic without sleeping for a guessed interval.
+    pub fn wait_for_windows(&mut self, count: usize) -> irontile_ipc::Frame {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        loop {
+            let frame = self.client.frame().expect("failed to query the frame");
+            if frame.placements.len() == count {
+                return frame;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "expected {count} windows, saw {}: {:?}",
+                    frame.placements.len(),
+                    frame.placements
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }
 
@@ -108,8 +164,13 @@ fn runtime_dir() -> std::path::PathBuf {
     path
 }
 
-/// Reads the startup line and pulls the control socket path out of it.
-fn read_control_socket(child: &mut Child) -> String {
+struct Startup {
+    control: String,
+    wayland: String,
+}
+
+/// Reads the startup line and pulls both socket names out of it.
+fn read_startup(child: &mut Child) -> Startup {
     let stdout = child.stdout.take().expect("stdout was piped");
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
@@ -120,18 +181,22 @@ fn read_control_socket(child: &mut Child) -> String {
         match reader.read_line(&mut line) {
             Ok(0) => break,
             Ok(_) => {
-                if let Some(rest) = line.split("control=").nth(1) {
-                    let path = rest.split_whitespace().next().unwrap_or_default();
-                    if !path.is_empty() {
-                        return path.to_owned();
-                    }
+                let field = |key: &str| {
+                    line.split(key)
+                        .nth(1)
+                        .and_then(|rest| rest.split_whitespace().next())
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                };
+                if let (Some(control), Some(wayland)) = (field("control="), field("socket=")) {
+                    return Startup { control, wayland };
                 }
             }
             Err(err) => panic!("failed to read compositor output: {err}"),
         }
     }
     let _ = child.kill();
-    panic!("compositor did not report a control socket");
+    panic!("compositor did not report its sockets");
 }
 
 /// A configuration file that cleans itself up.

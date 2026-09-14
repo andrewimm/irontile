@@ -1,6 +1,7 @@
 //! Input handling: turning device events into layout commands.
 
 use irontile_ipc::Action;
+use irontile_layout::{Command, Direction};
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis as InputAxis, AxisSource, ButtonState, Event, InputBackend,
     InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
@@ -10,7 +11,10 @@ use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 
 use crate::action;
-use crate::state::Irontile;
+use crate::state::{Irontile, ResizeDrag};
+
+/// Linux input event code for the right mouse button.
+const BTN_RIGHT: u32 = 0x111;
 
 /// Dispatches one input event.
 ///
@@ -80,8 +84,26 @@ fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
-    let focus = state.surface_under(location);
     let serial = SERIAL_COUNTER.next_serial();
+
+    if let Some(drag) = state.drag {
+        // The pointer still has to move, or the next delta would be measured
+        // from a stale position, but the client sees nothing while it lasts.
+        pointer.motion(
+            state,
+            None,
+            &MotionEvent {
+                location,
+                serial,
+                time,
+            },
+        );
+        pointer.frame(state);
+        apply_drag(state, drag, location);
+        return;
+    }
+
+    let focus = state.surface_under(location);
     pointer.motion(
         state,
         focus,
@@ -94,6 +116,63 @@ fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32
     pointer.frame(state);
 }
 
+/// Turns one step of a drag into resize commands.
+fn apply_drag(state: &mut Irontile, drag: ResizeDrag, location: Point<f64, Logical>) {
+    let dx = (location.x - drag.last.x) as i32;
+    let dy = (location.y - drag.last.y) as i32;
+    // Below a whole pixel there is nothing to do, and the anchor stays put so
+    // the remainder is not lost to rounding.
+    if dx == 0 && dy == 0 {
+        return;
+    }
+
+    let window = Some(drag.window);
+    if dx != 0 {
+        // Growing a left edge means moving the pointer left, so the sign flips
+        // for the edges that run backwards.
+        let delta_px = if drag.horizontal.is_forward() {
+            dx
+        } else {
+            -dx
+        };
+        state.apply(Command::Resize {
+            window,
+            dir: drag.horizontal,
+            delta_px,
+        });
+    }
+    if dy != 0 {
+        let delta_px = if drag.vertical.is_forward() { dy } else { -dy };
+        state.apply(Command::Resize {
+            window,
+            dir: drag.vertical,
+            delta_px,
+        });
+    }
+
+    state.drag = Some(ResizeDrag {
+        last: location,
+        ..drag
+    });
+    state.reflow();
+}
+
+/// Which edges a drag moves, decided by where in the window it started.
+fn drag_edges(cell: irontile_layout::Rect, at: Point<f64, Logical>) -> (Direction, Direction) {
+    let centre = cell.center();
+    let horizontal = if (at.x as i32) < centre.x {
+        Direction::Left
+    } else {
+        Direction::Right
+    };
+    let vertical = if (at.y as i32) < centre.y {
+        Direction::Up
+    } else {
+        Direction::Down
+    };
+    (horizontal, vertical)
+}
+
 fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButtonEvent) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
@@ -102,13 +181,57 @@ fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButto
     let button = event.button_code();
     let button_state = event.state();
 
+    let location = pointer.current_location();
+
+    // A release always ends a drag, whichever button caused it.
+    if button_state == ButtonState::Released && state.drag.take().is_some() {
+        pointer.frame(state);
+        return;
+    }
+
+    // Super plus the right button resizes, standing in for the titlebar drag
+    // that a compositor drawing no titlebars cannot offer.
+    let logo = state
+        .seat
+        .get_keyboard()
+        .is_some_and(|k| k.modifier_state().logo);
+    if button_state == ButtonState::Pressed
+        && button == BTN_RIGHT
+        && logo
+        && !pointer.is_grabbed()
+        && let Some(window) = state.window_at(location)
+        && let Some(cell) = state.cell_of(window)
+    {
+        let (horizontal, vertical) = drag_edges(cell, location);
+        state.drag = Some(ResizeDrag {
+            window,
+            horizontal,
+            vertical,
+            last: location,
+        });
+        // Tell the client the pointer left, so it stops drawing hover states
+        // for a pointer it will not hear from again until the drag ends.
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.motion(
+            state,
+            None,
+            &MotionEvent {
+                location,
+                serial,
+                time: event.time_msec(),
+            },
+        );
+        pointer.frame(state);
+        return;
+    }
+
     // Click to focus, before the button reaches the client, so the window that
     // receives the press is already the focused one.
     if button_state == ButtonState::Pressed
-        && let Some(window) = state.window_at(pointer.current_location())
+        && let Some(window) = state.window_at(location)
         && state.layout.focused_window() != Some(window)
     {
-        state.apply(irontile_layout::Command::FocusWindow { window });
+        state.apply(Command::FocusWindow { window });
         state.reflow();
     }
 
