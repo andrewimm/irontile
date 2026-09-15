@@ -1,0 +1,56 @@
+# Maintainer: Andrew Imm <aimm22@gmail.com>
+pkgname=irontile
+pkgver=0.1.1
+pkgrel=1
+pkgdesc="A Wayland tiling compositor with a split-container tree as its native model"
+arch=('x86_64')
+url="https://github.com/andrewimm/irontile"
+license=('MIT')
+# Resolved from the sonames the binaries actually carry, rather than from what
+# the compositor happens to use: mesa for gbm, libglvnd for the EGL that is
+# opened by name at runtime, wayland for the two wayland client libraries that
+# are opened the same way.
+depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse'
+         'libglvnd' 'wayland')
+makedepends=('cargo')
+# Only the nested backend reaches for X, and that is for development rather than
+# for running a session.
+optdepends=('libxcb: running nested inside another compositor'
+            'libx11: running nested inside another compositor'
+            'libxcursor: running nested inside another compositor')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('129985adc50a89f11cc74cf80e999f5affe2e5dfc0f6b00d3d77760878b3cbda')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    # RUSTUP_TOOLCHAIN is not boilerplate here: the repo carries a
+    # rust-toolchain.toml, which outranks whichever toolchain is default and
+    # would otherwise decide the build on its own.
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --all-features
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 target/release/irontile "$pkgdir/usr/bin/irontile"
+    install -Dm755 target/release/irontile-bar "$pkgdir/usr/bin/irontile-bar"
+    install -Dm755 target/release/irontilectl "$pkgdir/usr/bin/irontilectl"
+    install -Dm755 target/release/start-irontile "$pkgdir/usr/bin/start-irontile"
+    # What makes irontile appear in a login manager's session list.
+    install -Dm644 assets/irontile.desktop \
+        "$pkgdir/usr/share/wayland-sessions/irontile.desktop"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

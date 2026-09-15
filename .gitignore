@@ -2,3 +2,8 @@
 **/*.rs.bk
 *.pdb
 .direnv/
+# makepkg builds in place
+/packaging/src/
+/packaging/pkg/
+/packaging/*.tar.gz
+/packaging/*.pkg.tar.zst

@@ -92,6 +92,34 @@ jobs:
           name: rpm
           path: target/generate-rpm/*.rpm
 
+  # Arch has no stable ABI to target, so this is a convenience rather than a
+  # substitute for a source package: a binary built today keeps working until
+  # one of the libraries it links bumps a soname, and then it needs rebuilding.
+  # The recipe is the same one an AUR package would use, so neither can drift
+  # from the other.
+  arch:
+    name: build arch package
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - run: |
+          pacman -Syu --noconfirm --needed rust git \
+            mesa libinput seatd systemd-libs libxkbcommon libpulse libglvnd wayland
+      - run: cargo xtask release-check "${{ inputs.tag || github.ref_name }}"
+      # makepkg refuses to run as root, and every dependency is installed above,
+      # so it is told not to go looking for them again.
+      - run: |
+          useradd -m builder
+          chown -R builder .
+          su builder -c 'cd packaging && makepkg --noconfirm --nodeps'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: packaging/*.pkg.tar.zst
+
   # Installing the package is the only thing that actually tests the dependency
   # list, and it has to happen somewhere the build never touched: the container
   # that built it has every -dev package installed, so it satisfies everything
@@ -129,9 +157,26 @@ jobs:
           irontilectl --version
           start-irontile --version
 
+  verify-arch:
+    name: install arch package
+    needs: arch
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch
+      - run: |
+          pacman -Syu --noconfirm
+          pacman -U --noconfirm ./irontile-*.pkg.tar.zst
+          irontile --version
+          irontile-bar --version
+          irontilectl --version
+          start-irontile --version
+
   publish:
     name: attach to the release
-    needs: [verify-deb, verify-rpm]
+    needs: [verify-deb, verify-rpm, verify-arch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

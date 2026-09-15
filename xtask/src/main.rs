@@ -90,8 +90,44 @@ fn cmd_release_check(args: &[String]) -> Result<(), String> {
              {expected}; set one to match the other"
         ));
     }
+
+    // The Arch recipe carries the version a second time, and it is fetched from
+    // a release tarball rather than from the tree, so a stale one here builds
+    // the previous release under the new tag's name without anything failing.
+    if let Some(pkgver) = pkgbuild_version()?
+        && pkgver != version
+    {
+        return Err(format!(
+            "packaging/PKGBUILD still says pkgver={pkgver}, but this release is \
+             {version}; run `updpkgsums` there after changing it"
+        ));
+    }
+
     println!("{tag} matches the workspace version");
     Ok(())
+}
+
+/// The `pkgver` from the Arch recipe, if the repository carries one.
+fn pkgbuild_version() -> Result<Option<String>, String> {
+    let path = repo_root()?.join("packaging").join("PKGBUILD");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("failed to read {}: {err}", path.display())),
+    };
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("pkgver=") {
+            return Ok(Some(rest.trim().to_string()));
+        }
+    }
+    Err("no pkgver in packaging/PKGBUILD".to_string())
+}
+
+fn repo_root() -> Result<std::path::PathBuf, String> {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| "xtask is not inside a workspace".to_string())
 }
 
 /// The `version` under `[workspace.package]`.
@@ -100,10 +136,7 @@ fn cmd_release_check(args: &[String]) -> Result<(), String> {
 /// with nothing behind it. The shape it needs is two lines of a file that lives
 /// next door and changes about once a release.
 fn workspace_version() -> Result<String, String> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .ok_or("xtask is not inside a workspace")?
-        .join("Cargo.toml");
+    let path = repo_root()?.join("Cargo.toml");
     let text = std::fs::read_to_string(&path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
 
