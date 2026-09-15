@@ -3,8 +3,9 @@
 use irontile_ipc::Action;
 use irontile_layout::{Command, Direction};
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis as InputAxis, AxisSource, ButtonState, Event, InputBackend,
-    InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Axis as InputAxis, AxisSource, ButtonState, Event, GestureBeginEvent,
+    GestureEndEvent, GestureSwipeUpdateEvent, InputBackend, InputEvent, KeyboardKeyEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::input::keyboard::{FilterResult, Keycode, xkb};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorIcon, MotionEvent};
@@ -59,8 +60,52 @@ pub fn handle<B: InputBackend>(
         }
         InputEvent::PointerButton { event } => pointer_button::<B>(state, &event),
         InputEvent::PointerAxis { event } => pointer_axis::<B>(state, &event),
+        InputEvent::GestureSwipeBegin { event } => {
+            state.swipe = (event.fingers() == SWIPE_FINGERS).then_some((0.0, 0.0));
+        }
+        InputEvent::GestureSwipeUpdate { event } => {
+            if let Some((x, y)) = &mut state.swipe {
+                *x += event.delta_x();
+                *y += event.delta_y();
+            }
+        }
+        InputEvent::GestureSwipeEnd { event } => {
+            // Taken either way: a cancelled gesture is over, and leaving the
+            // total behind would add the next swipe to this one.
+            let swipe = state.swipe.take();
+            if let Some((x, y)) = swipe
+                && !event.cancelled()
+                && let Some(step) = swipe_step(x, y)
+            {
+                action::perform(state, &Action::WorkspaceStep(step));
+            }
+        }
         _ => {}
     }
+}
+
+/// How many fingers a desktop swipe takes.
+const SWIPE_FINGERS: u32 = 3;
+
+/// How far a swipe has to travel before it counts, in logical pixels.
+///
+/// Low enough that a deliberate flick registers, high enough that resting three
+/// fingers on the pad and shifting slightly does not move the desktop out from
+/// under you.
+const SWIPE_THRESHOLD: f64 = 100.0;
+
+/// Which way a finished swipe went, if it went anywhere.
+///
+/// Measured from the total travel rather than the last movement, so a swipe
+/// that wanders and comes back is correctly no swipe at all.
+fn swipe_step(x: f64, y: f64) -> Option<i32> {
+    // Mostly sideways, or it was a scroll that drifted.
+    if x.abs() < SWIPE_THRESHOLD || x.abs() < y.abs() {
+        return None;
+    }
+    // Swiping left moves the desktops left, which brings the next one in from
+    // the right -- the direction the content moves, as on a touchscreen.
+    Some(if x < 0.0 { 1 } else { -1 })
 }
 
 fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
@@ -620,6 +665,24 @@ mod tests {
             }),
             Some(CursorIcon::EwResize)
         );
+    }
+
+    #[test]
+    fn a_swipe_counts_only_when_it_went_far_enough_and_sideways() {
+        use super::{SWIPE_THRESHOLD, swipe_step};
+
+        let far = SWIPE_THRESHOLD + 1.0;
+        // Left brings the next desktop in from the right, the way content
+        // follows the fingers on a touchscreen.
+        assert_eq!(swipe_step(-far, 0.0), Some(1));
+        assert_eq!(swipe_step(far, 0.0), Some(-1));
+
+        // A nudge is not a swipe.
+        assert_eq!(swipe_step(SWIPE_THRESHOLD - 1.0, 0.0), None);
+        // Nor is a scroll that drifted sideways.
+        assert_eq!(swipe_step(far, far * 2.0), None);
+        // Nor is wandering out and back, because the total is what is measured.
+        assert_eq!(swipe_step(0.0, 0.0), None);
     }
 
     #[test]

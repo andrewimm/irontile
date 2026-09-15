@@ -31,6 +31,10 @@ pub enum Action {
     ToggleFullscreen,
     Close,
     Workspace(u32),
+    /// The desktop this many places along, by number. Desktops are numbered
+    /// without limit, so stepping past the last one makes the next rather than
+    /// stopping -- the same as asking for that number outright.
+    WorkspaceStep(i32),
     MoveToWorkspace(u32),
     /// Program and arguments.
     Spawn(Vec<String>),
@@ -155,7 +159,17 @@ fn parse(input: &str) -> Result<Action, ParseError> {
         "float" => Action::ToggleFloating,
         "fullscreen" => Action::ToggleFullscreen,
         "close" => Action::Close,
-        "workspace" => Action::Workspace(need_number(&mut argument, input)?),
+        "workspace" => match argument() {
+            // `next` and `prev` rather than `+1`/`-1`: a swipe or a scroll is
+            // the usual way to ask for this, and neither has a number in it.
+            Some("next") => Action::WorkspaceStep(1),
+            Some("prev") | Some("previous") => Action::WorkspaceStep(-1),
+            Some(word) => Action::Workspace(
+                word.parse()
+                    .map_err(|_| fail(Reason::BadNumber(word.to_owned())))?,
+            ),
+            None => return Err(fail(Reason::MissingArgument("a desktop number"))),
+        },
         "move-to-workspace" => Action::MoveToWorkspace(need_number(&mut argument, input)?),
         "vt" => {
             let word =
@@ -339,6 +353,9 @@ impl fmt::Display for Action {
             Action::ToggleFullscreen => write!(f, "fullscreen"),
             Action::Close => write!(f, "close"),
             Action::Workspace(n) => write!(f, "workspace {n}"),
+            Action::WorkspaceStep(1) => write!(f, "workspace next"),
+            Action::WorkspaceStep(-1) => write!(f, "workspace prev"),
+            Action::WorkspaceStep(n) => write!(f, "workspace {n:+}"),
             Action::MoveToWorkspace(n) => write!(f, "move-to-workspace {n}"),
             Action::Spawn(argv) => write!(f, "spawn {}", argv.join(" ")),
             Action::SwitchVt(n) => write!(f, "vt {n}"),
@@ -365,6 +382,7 @@ pub const VERBS: &[&str] = &[
     "fullscreen",
     "close",
     "workspace <n>",
+    "workspace next|prev",
     "move-to-workspace <n>",
     "spawn <program> [args...]",
     "vt <n>",
@@ -498,6 +516,7 @@ mod tests {
             let sample = verb
                 .replace("<direction>", "left")
                 .replace("horizontal|vertical|toggle", "vertical")
+                .replace("next|prev", "next")
                 .replace("<n>", "1")
                 .replace("<x> <y>", "100 200")
                 .replace("[1|2|3]", "1")
@@ -514,6 +533,8 @@ mod tests {
             Action::Split(None),
             Action::Split(Some(Axis::Vertical)),
             Action::Workspace(7),
+            Action::WorkspaceStep(1),
+            Action::WorkspaceStep(-1),
             Action::MoveToWorkspace(2),
             Action::Spawn(vec!["foot".into(), "-e".into(), "htop".into()]),
             Action::SwitchVt(2),

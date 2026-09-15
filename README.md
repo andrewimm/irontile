@@ -294,6 +294,7 @@ arrow keys.
 | `Super` + `T` | Flip the container's axis |
 | `Super` + `O` | Equalize the container |
 | `Super` `Shift` + `E` | Quit |
+| three-finger swipe | The desktop left or right of this one. Content follows the fingers |
 | `Super` + left-drag | Move a floating window. A tiled one stays where the layout put it |
 | `Super` + right-drag | Resize; the edges nearest where the drag started follow the pointer |
 | drag a window's edge | Resize; along an edge moves one axis, a corner moves both. The pointer shows the arrow for the edge it is on |

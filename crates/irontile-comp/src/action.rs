@@ -50,6 +50,13 @@ pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
                 output: None,
             })
         }
+        Action::WorkspaceStep(step) => {
+            let workspace = state.workspace_step(*step);
+            state.apply(Command::ShowWorkspace {
+                workspace,
+                output: None,
+            })
+        }
         Action::MoveToWorkspace(number) => {
             let workspace = state.workspace_by_number(*number);
             state.apply(Command::MoveWindowToWorkspace {

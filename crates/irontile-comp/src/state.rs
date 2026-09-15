@@ -238,6 +238,9 @@ pub struct Irontile {
     pub config_path: std::path::PathBuf,
     /// Set while the pointer is resizing a window.
     pub drag: Option<Drag>,
+    /// Total travel of a swipe in progress, if it has the right number of
+    /// fingers. `None` means no swipe is being followed.
+    pub swipe: Option<(f64, f64)>,
     /// The binding currently repeating, if a key is being held down.
     pub repeat: Option<KeyRepeat>,
     /// Children started and not yet waited for. See [`Irontile::spawn`].
@@ -341,6 +344,7 @@ impl Irontile {
             config,
             config_path,
             drag: None,
+            swipe: None,
             repeat: None,
             children: std::cell::RefCell::new(Vec::new()),
             loop_handle,
@@ -669,6 +673,24 @@ impl Irontile {
         self.peers
             .broadcast(&[Event::WorkspaceCreated { workspace }]);
         workspace
+    }
+
+    /// The desktop `step` places along from the one on screen.
+    ///
+    /// Counted by number rather than by walking the desktops that exist, so a
+    /// swipe past the last one makes the next -- the same as pressing its
+    /// number would. Desktops are numbered from one, so stepping back from the
+    /// first stays there rather than wrapping round to somewhere unexpected.
+    pub fn workspace_step(&mut self, step: i32) -> WorkspaceId {
+        let current = self
+            .layout
+            .focused_output()
+            .and_then(|output| self.layout.active_workspace(output))
+            .and_then(|id| self.layout.workspaces().find(|ws| ws.id == id))
+            .and_then(|ws| ws.name.as_deref())
+            .and_then(|name| name.parse::<i32>().ok())
+            .unwrap_or(1);
+        self.workspace_by_number(current.saturating_add(step).max(1) as u32)
     }
 
     /// Applies a command, reporting the resulting events.

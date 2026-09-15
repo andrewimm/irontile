@@ -293,3 +293,24 @@ fn zombies_of(parent: u32) -> usize {
         })
         .count()
 }
+
+#[test]
+fn stepping_between_desktops_walks_the_numbers() {
+    // What a three-finger swipe asks for. Counted by number rather than by
+    // walking the desktops that exist, so a step past the last one makes the
+    // next -- the same as pressing its number.
+    let mut compositor = Compositor::start("1920x1080");
+
+    compositor.client.action(Action::Workspace(3)).unwrap();
+    compositor.client.action(Action::WorkspaceStep(1)).unwrap();
+    assert_eq!(on_output(&mut compositor, 1).as_deref(), Some("4"));
+
+    compositor.client.action(Action::WorkspaceStep(-1)).unwrap();
+    assert_eq!(on_output(&mut compositor, 1).as_deref(), Some("3"));
+
+    // Desktops are numbered from one, so stepping back from the first stays
+    // there rather than wrapping round to somewhere unexpected.
+    compositor.client.action(Action::Workspace(1)).unwrap();
+    compositor.client.action(Action::WorkspaceStep(-1)).unwrap();
+    assert_eq!(on_output(&mut compositor, 1).as_deref(), Some("1"));
+}
