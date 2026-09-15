@@ -417,18 +417,40 @@ mod tests {
 mod font_tests {
     use super::Text;
 
+    /// A monospaced family this machine actually has, whatever it turns out to
+    /// be.
+    ///
+    /// Naming one would make this a test of what is installed rather than of
+    /// what the code does: the developer has the lock screen's own font, a CI
+    /// runner has whatever the image ships, and a packaging container starts
+    /// with no fonts at all until check() pulls one in.
+    fn a_monospaced_family() -> Option<String> {
+        let fonts = cosmic_text::FontSystem::new();
+        fonts
+            .db()
+            .faces()
+            .filter(|face| face.monospaced)
+            .find_map(|face| face.families.first().map(|(name, _)| name.clone()))
+    }
+
     #[test]
     fn the_named_font_is_the_one_that_gets_used() {
-        // cosmic-text falls back silently when a family is missing, so a
-        // lock screen can end up in whatever the system had lying about and
-        // nothing says so. Monospace is the tell: every glyph the same width.
-        let mut named = Text::new(&["Anonymous Pro".to_string()]);
+        // cosmic-text falls back silently when a family is missing, so a lock
+        // screen can end up in whatever the system had lying about and nothing
+        // says so. Monospace is the tell: ask for a face where every glyph is
+        // the same width, and measure whether it is.
+        let Some(family) = a_monospaced_family() else {
+            // Nothing to ask for. A machine with no monospaced font cannot
+            // show the difference either way.
+            return;
+        };
+        let mut named = Text::new(std::slice::from_ref(&family));
         let narrow = named.width("iiiiiiiiii", 32.0);
         let wide = named.width("mmmmmmmmmm", 32.0);
         assert!(
             (narrow - wide).abs() < 1.0,
-            "expected a monospace face, got i={narrow} m={wide} -- \
-             Anonymous Pro is probably not installed and something else was used"
+            "asked for {family}, which is monospaced, and got i={narrow} \
+             m={wide} -- something else was substituted without saying so"
         );
     }
 }
