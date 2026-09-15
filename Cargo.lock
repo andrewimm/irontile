@@ -1148,6 +1148,7 @@ version = "0.2.4"
 dependencies = [
  "chrono",
  "cosmic-text",
+ "libc",
  "pam",
  "rustix 1.1.4",
  "tiny-skia",

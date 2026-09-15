@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 pam.workspace = true
+libc.workspace = true
 rustix = { workspace = true, features = ["termios"] }
 tiny-skia.workspace = true
 cosmic-text.workspace = true

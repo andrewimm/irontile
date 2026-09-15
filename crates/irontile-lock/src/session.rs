@@ -251,10 +251,18 @@ struct State {
     /// The writing end of the pipe the loop below waits on. A channel alone
     /// cannot wake it: the loop is asleep on file descriptors.
     waker: OwnedFd,
+    /// Told once, when the displays are covered, so that a parent waiting to
+    /// report the screen locked can stop waiting. Nothing to tell when the
+    /// locker was not asked to fork.
+    ready: Option<OwnedFd>,
 }
 
 /// Locks every display and does not return until the session is unlocked.
-pub fn run(service: &str, user: &str) -> Result<(), String> {
+///
+/// `ready` is written one byte the moment the compositor reports the session
+/// locked, and closed when this process stops. It is how `--daemonize` tells
+/// the half that already exited whether the screens were ever covered.
+pub fn run(service: &str, user: &str, ready: Option<OwnedFd>) -> Result<(), String> {
     let connection =
         Connection::connect_to_env().map_err(|err| format!("no compositor to lock: {err}"))?;
     let mut queue: EventQueue<State> = connection.new_event_queue();
@@ -290,6 +298,7 @@ pub fn run(service: &str, user: &str) -> Result<(), String> {
         verdicts,
         answers,
         waker,
+        ready,
     };
 
     queue
@@ -700,7 +709,14 @@ impl Dispatch<ExtSessionLockV1, ()> for State {
     ) {
         match event {
             // Every display is covered and the desktop is no longer visible.
-            ext_session_lock_v1::Event::Locked => {}
+            // The one moment anything waiting on this locker may go ahead: a
+            // machine told to suspend before this has arrived would go to
+            // sleep with the desktop still on screen.
+            ext_session_lock_v1::Event::Locked => {
+                if let Some(ready) = state.ready.take() {
+                    let _ = rustix::io::write(&ready, b"1");
+                }
+            }
             // The compositor refused the lock, or took it away. Stopping
             // without unlocking is deliberate: the screens stay blank.
             ext_session_lock_v1::Event::Finished => {

@@ -647,6 +647,17 @@ that appears to have crashed at exactly the moment somebody is anxious about it.
 The answer comes back over a channel, and a pipe wakes the loop that is asleep
 on file descriptors.
 
+**`--daemonize` forks once the screens are actually covered**, and not a
+moment before. An idle daemon told to lock before suspending waits for its lock
+command to finish -- that wait is the whole guarantee -- so a locker that stays
+in the foreground until somebody unlocks it would hold it open forever and the
+machine would sit awake on a lock screen with the lid shut. The two halves share
+nothing but a pipe, made before anything is connected: the half that carries on
+writes one byte to it when the compositor reports the session locked, and the
+half that waits exits on that byte, or non-zero if the pipe closes without one.
+Forking a live Wayland connection instead would leave two processes holding one
+socket and one sequence of object ids.
+
 **The field shows a fixed number of pips, and never grows.** A track that grew
 with the entry would shift as it was typed and would tell anyone watching how
 long the password is. One pip brighter than the rest, walking round as keys

@@ -24,6 +24,10 @@ OPTIONS:
     --service NAME  The file in /etc/pam.d to authenticate against.
                     Default: irontile-lock.
     --user NAME     Who to authenticate as. Default: $USER.
+    -f, --daemonize Fork once the screen is actually locked, so that whatever
+                    started this can carry on. An idle daemon told to lock
+                    before suspending waits for its lock command to finish,
+                    and without this it would wait until somebody unlocked.
     --verify        Ask for a password on the terminal instead of locking
                     anything, and say how long PAM took to answer.
     --dump PATH     Render one lock screen to a PNG and exit, without locking
@@ -55,6 +59,7 @@ fn run() -> Result<(), String> {
     let mut user = std::env::var("USER").unwrap_or_default();
     let mut dump: Option<std::path::PathBuf> = None;
     let mut verify = false;
+    let mut daemonize = false;
     let mut size = (1692u32, 1128u32);
     let mut scale = 1.0f32;
 
@@ -75,6 +80,7 @@ fn run() -> Result<(), String> {
             }
             "--user" => user = iter.next().ok_or("--user needs a name")?.clone(),
             "--verify" => verify = true,
+            "--daemonize" | "-f" => daemonize = true,
             "--dump" => dump = Some(iter.next().ok_or("--dump needs a path")?.into()),
             "--size" => {
                 let spec = iter.next().ok_or("--size needs WxH")?;
@@ -102,7 +108,8 @@ fn run() -> Result<(), String> {
         return render_to_png(&path, size, scale, &user);
     }
     if !verify {
-        return session::run(&service, &user);
+        let ready = if daemonize { fork_once_locked()? } else { None };
+        return session::run(&service, &user, ready);
     }
 
     println!("service: {service}\nuser:    {user}");
@@ -183,6 +190,75 @@ fn render_to_png(
         h * count as u32
     );
     Ok(())
+}
+
+/// Splits in two, and lets the first half go as soon as the screen is covered.
+///
+/// swayidle and anything like it waits for its lock command to finish before
+/// letting the machine sleep, which is the whole point of doing it before
+/// sleep: a locker that stays in the foreground until somebody unlocks it holds
+/// that wait open forever, and the machine sits awake on a lock screen with the
+/// lid shut. Reporting "locked" and leaving is what makes the wait end at the
+/// right moment rather than never.
+///
+/// The split happens before anything is connected or any thread is started, so
+/// the two halves share nothing but a pipe. Forking a live Wayland connection
+/// would give two processes one socket and one sequence of object ids between
+/// them.
+///
+/// Returns the writing end for the half that carries on. The other half does
+/// not return at all.
+fn fork_once_locked() -> Result<Option<std::os::fd::OwnedFd>, String> {
+    let (reader, writer) =
+        rustix::pipe::pipe().map_err(|err| format!("could not make a pipe: {err}"))?;
+
+    // SAFETY: nothing has been connected and no thread has been started, so
+    // there is no lock, buffer or connection for a fork to leave half-owned.
+    #[allow(unsafe_code)]
+    let child = unsafe { libc::fork() };
+
+    match child {
+        -1 => Err(format!(
+            "could not fork: {}",
+            std::io::Error::last_os_error()
+        )),
+        0 => {
+            drop(reader);
+            // A session of its own, so that whatever started the half that is
+            // about to exit cannot take the lock screen down with it.
+            //
+            // SAFETY: a just-forked child is never a process group leader,
+            // which is the one thing this call asks for.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::setsid();
+            }
+            Ok(Some(writer))
+        }
+        _ => {
+            drop(writer);
+            let mut byte = [0u8; 1];
+            loop {
+                match rustix::io::read(&reader, &mut byte) {
+                    // The screens are covered. Whatever was waiting may go.
+                    Ok(1) => std::process::exit(0),
+                    // End of file: the other half stopped without ever getting
+                    // there. Saying so is the difference between a machine that
+                    // suspends locked and one that suspends showing the
+                    // desktop, so this must not be reported as success.
+                    Ok(_) => {
+                        eprintln!("irontile-lock: the session was never locked");
+                        std::process::exit(1);
+                    }
+                    Err(rustix::io::Errno::INTR) => continue,
+                    Err(err) => {
+                        eprintln!("irontile-lock: lost the locking half: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn hostname() -> String {
