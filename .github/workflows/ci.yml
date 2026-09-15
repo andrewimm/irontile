@@ -78,8 +78,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # No `targets:` here: the target belongs to the toolchain, and which
+      # toolchain that is comes from rust-toolchain.toml. Naming it here would
+      # add it to whichever one this action installs, which is not the one that
+      # ends up compiling.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --package irontile-layout --target wasm32-unknown-unknown
