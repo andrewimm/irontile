@@ -7,16 +7,26 @@ use smithay::backend::input::{
     InputEvent, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::input::keyboard::{FilterResult, Keycode, xkb};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorIcon, MotionEvent};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::utils::{Logical, Point, SERIAL_COUNTER, Size};
 use std::time::Duration;
 
 use crate::action;
-use crate::state::{Irontile, KeyRepeat, REPEAT_DELAY_MS, REPEAT_RATE_HZ, ResizeDrag};
+use crate::state::{Drag, DragKind, Irontile, KeyRepeat, REPEAT_DELAY_MS, REPEAT_RATE_HZ};
 
 /// Linux input event code for the right mouse button.
 const BTN_RIGHT: u32 = 0x111;
+/// ...and the left one.
+const BTN_LEFT: u32 = 0x110;
+
+/// How far from a window's edge a press still counts as grabbing that edge.
+///
+/// The strip this covers is the window's border and the gap beside it, which is
+/// the one part of the screen no client is drawing on. Reaching further, into
+/// the window itself, would be an easier target and a worse trade: the last few
+/// pixels of a window are where scrollbars live.
+const EDGE_GRIP: i32 = 8;
 
 /// Dispatches one input event.
 ///
@@ -177,29 +187,25 @@ pub fn warp(state: &mut Irontile, x: f64, y: f64) {
 
 /// Presses and releases a button where the pointer is.
 pub fn click(state: &mut Irontile, button: u32) {
+    press(state, button, true);
+    press(state, button, false);
+}
+
+/// Holds a button down, or lets it go.
+pub fn press(state: &mut Irontile, button: u32, down: bool) {
     // The numbering people use for mouse buttons, mapped onto the kernel's.
     let code = match button {
         2 => 0x112,
         3 => BTN_RIGHT,
-        _ => 0x110,
-    };
-    let Some(pointer) = state.seat.get_pointer() else {
-        return;
+        _ => BTN_LEFT,
     };
     let time = state.start_time.elapsed().as_millis() as u32;
-    for pressed in [ButtonState::Pressed, ButtonState::Released] {
-        let serial = SERIAL_COUNTER.next_serial();
-        pointer.button(
-            state,
-            &ButtonEvent {
-                button: code,
-                state: pressed,
-                serial,
-                time,
-            },
-        );
-        pointer.frame(state);
-    }
+    let button_state = if down {
+        ButtonState::Pressed
+    } else {
+        ButtonState::Released
+    };
+    button_event(state, code, button_state, time);
 }
 
 /// Whether a keypress may be written to the log.
@@ -232,6 +238,9 @@ fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32
     let serial = SERIAL_COUNTER.next_serial();
 
     if let Some(drag) = state.drag {
+        // The arrow stays as it was when the drag began, so it does not flicker
+        // as what is under the pointer changes.
+        state.cursor_hint = drag_cursor(drag.kind);
         // The pointer still has to move, or the next delta would be measured
         // from a stale position, but the client sees nothing while it lasts.
         pointer.motion(
@@ -249,6 +258,16 @@ fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32
     }
 
     let focus = state.surface_under(location);
+    // Only where no client would have received the press, which is the same
+    // test the press itself makes: an arrow promising a resize that would not
+    // happen is worse than no arrow at all.
+    state.cursor_hint = match &focus {
+        Some(_) => None,
+        None => state
+            .edges_near(location, EDGE_GRIP)
+            .and_then(|(_, horizontal, vertical)| edge_cursor(horizontal, vertical)),
+    };
+
     pointer.motion(
         state,
         focus,
@@ -262,7 +281,7 @@ fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32
 }
 
 /// Turns one step of a drag into resize commands.
-fn apply_drag(state: &mut Irontile, drag: ResizeDrag, location: Point<f64, Logical>) {
+fn apply_drag(state: &mut Irontile, drag: Drag, location: Point<f64, Logical>) {
     let dx = (location.x - drag.last.x) as i32;
     let dy = (location.y - drag.last.y) as i32;
     // Below a whole pixel there is nothing to do, and the anchor stays put so
@@ -272,38 +291,86 @@ fn apply_drag(state: &mut Irontile, drag: ResizeDrag, location: Point<f64, Logic
     }
 
     let window = Some(drag.window);
-    if dx != 0 {
-        // Growing a left edge means moving the pointer left, so the sign flips
-        // for the edges that run backwards.
-        let delta_px = if drag.horizontal.is_forward() {
-            dx
-        } else {
-            -dx
-        };
-        state.apply(Command::Resize {
-            window,
-            dir: drag.horizontal,
-            delta_px,
-        });
-    }
-    if dy != 0 {
-        let delta_px = if drag.vertical.is_forward() { dy } else { -dy };
-        state.apply(Command::Resize {
-            window,
-            dir: drag.vertical,
-            delta_px,
-        });
+    match drag.kind {
+        DragKind::Resize {
+            horizontal,
+            vertical,
+        } => {
+            if let Some(dir) = horizontal
+                && dx != 0
+            {
+                // Growing a left edge means moving the pointer left, so the
+                // sign flips for the edges that run backwards.
+                let delta_px = if dir.is_forward() { dx } else { -dx };
+                state.apply(Command::Resize {
+                    window,
+                    dir,
+                    delta_px,
+                });
+            }
+            if let Some(dir) = vertical
+                && dy != 0
+            {
+                let delta_px = if dir.is_forward() { dy } else { -dy };
+                state.apply(Command::Resize {
+                    window,
+                    dir,
+                    delta_px,
+                });
+            }
+        }
+        // A whole-rectangle move, because the floating position is stored
+        // outright rather than as an offset from anything.
+        DragKind::Move => {
+            if let Some(rect) = state.cell_of(drag.window) {
+                state.apply(Command::MoveFloating {
+                    window,
+                    rect: irontile_layout::Rect::new(rect.x + dx, rect.y + dy, rect.w, rect.h),
+                });
+            }
+        }
     }
 
-    state.drag = Some(ResizeDrag {
+    state.drag = Some(Drag {
         last: location,
         ..drag
     });
     state.reflow();
 }
 
+/// The pointer image for a drag in progress.
+fn drag_cursor(kind: DragKind) -> Option<CursorIcon> {
+    match kind {
+        DragKind::Resize {
+            horizontal,
+            vertical,
+        } => edge_cursor(horizontal, vertical),
+        DragKind::Move => Some(CursorIcon::Grabbing),
+    }
+}
+
+/// The arrow for an edge, pointing the way that edge will move.
+fn edge_cursor(horizontal: Option<Direction>, vertical: Option<Direction>) -> Option<CursorIcon> {
+    match (horizontal, vertical) {
+        (Some(_), None) => Some(CursorIcon::EwResize),
+        (None, Some(_)) => Some(CursorIcon::NsResize),
+        // Corners, named for the diagonal they lie on rather than for the
+        // corner itself: top-left and bottom-right share one arrow.
+        (Some(Direction::Left), Some(Direction::Up))
+        | (Some(Direction::Right), Some(Direction::Down)) => Some(CursorIcon::NwseResize),
+        (Some(Direction::Right), Some(Direction::Up))
+        | (Some(Direction::Left), Some(Direction::Down)) => Some(CursorIcon::NeswResize),
+        // Nothing hands a vertical direction to the horizontal axis, and the
+        // cursor is the wrong place to find out that something did.
+        _ => None,
+    }
+}
+
 /// Which edges a drag moves, decided by where in the window it started.
-fn drag_edges(cell: irontile_layout::Rect, at: Point<f64, Logical>) -> (Direction, Direction) {
+fn drag_edges(
+    cell: irontile_layout::Rect,
+    at: Point<f64, Logical>,
+) -> (Option<Direction>, Option<Direction>) {
     let centre = cell.center();
     let horizontal = if (at.x as i32) < centre.x {
         Direction::Left
@@ -315,16 +382,24 @@ fn drag_edges(cell: irontile_layout::Rect, at: Point<f64, Logical>) -> (Directio
     } else {
         Direction::Down
     };
-    (horizontal, vertical)
+    (Some(horizontal), Some(vertical))
 }
 
 fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButtonEvent) {
+    button_event(state, event.button_code(), event.state(), event.time_msec());
+}
+
+/// One button press or release, wherever it came from.
+///
+/// Real hardware and the control socket both arrive here, so a synthetic press
+/// does everything a real one does -- focuses the window under it, starts a
+/// drag, reaches the client -- rather than only the last of those. Anything
+/// that skipped this would be testing a path nobody uses.
+pub fn button_event(state: &mut Irontile, button: u32, button_state: ButtonState, time: u32) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
     let serial = SERIAL_COUNTER.next_serial();
-    let button = event.button_code();
-    let button_state = event.state();
 
     let location = pointer.current_location();
 
@@ -348,11 +423,13 @@ fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButto
         && let Some(cell) = state.cell_of(window)
     {
         let (horizontal, vertical) = drag_edges(cell, location);
-        state.drag = Some(ResizeDrag {
+        state.drag = Some(Drag {
             window,
-            horizontal,
-            vertical,
             last: location,
+            kind: DragKind::Resize {
+                horizontal,
+                vertical,
+            },
         });
         // Tell the client the pointer left, so it stops drawing hover states
         // for a pointer it will not hear from again until the drag ends.
@@ -363,10 +440,62 @@ fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButto
             &MotionEvent {
                 location,
                 serial,
-                time: event.time_msec(),
+                time,
             },
         );
         pointer.frame(state);
+        return;
+    }
+
+    // Super and the left button moves a floating window, the mirror of Super
+    // and the right button resizing one. A tiled window is deliberately not
+    // draggable: where it sits is the layout's to decide, and the next reflow
+    // would undo the move anyway.
+    if button_state == ButtonState::Pressed
+        && button == BTN_LEFT
+        && logo
+        && !pointer.is_grabbed()
+        && let Some(window) = state.floating_at(location)
+    {
+        state.drag = Some(Drag {
+            window,
+            last: location,
+            kind: DragKind::Move,
+        });
+        // Tell the client the pointer left, so it stops drawing hover states
+        // for a pointer it will not hear from again until the drag ends.
+        let serial = SERIAL_COUNTER.next_serial();
+        pointer.motion(
+            state,
+            None,
+            &MotionEvent {
+                location,
+                serial,
+                time,
+            },
+        );
+        pointer.frame(state);
+        return;
+    }
+
+    // Dragging an edge resizes, the way a floating compositor's window frame
+    // does. The press has to land somewhere no client would have received it
+    // anyway -- checked here rather than assumed from the geometry -- so this
+    // can never swallow a click meant for a window.
+    if button_state == ButtonState::Pressed
+        && button == BTN_LEFT
+        && !pointer.is_grabbed()
+        && state.surface_under(location).is_none()
+        && let Some((window, horizontal, vertical)) = state.edges_near(location, EDGE_GRIP)
+    {
+        state.drag = Some(Drag {
+            window,
+            last: location,
+            kind: DragKind::Resize {
+                horizontal,
+                vertical,
+            },
+        });
         return;
     }
 
@@ -386,24 +515,10 @@ fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButto
             button,
             state: button_state,
             serial,
-            time: event.time_msec(),
+            time,
         },
     );
     pointer.frame(state);
-}
-
-/// Whether scrolling from this source should be turned around.
-///
-/// libinput sets natural scrolling per device. The compositor is handed the
-/// axis source instead, which draws the same line in the only place it matters
-/// here: a touchpad's two-finger scroll arrives as `Finger`, and a wheel -- or
-/// a trackpoint scrolled with a button held -- does not. A device that reports
-/// something else is treated as the pointer it is.
-fn inverted(config: &crate::config::InputConfig, source: AxisSource) -> bool {
-    match source {
-        AxisSource::Finger => config.touchpad.natural_scroll,
-        _ => config.natural_scroll,
-    }
 }
 
 fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEvent) {
@@ -411,23 +526,19 @@ fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEve
         return;
     };
     let source = event.source();
-    // Applied to both axes, because a device scrolled the other way round is
-    // the other way round in both directions.
-    let sign = if inverted(&state.config.input, source) {
-        -1.0
-    } else {
-        1.0
-    };
+    // Scroll direction is not reversed here. libinput applies it per device,
+    // which is the only place that can tell a touchpad from a trackpoint from a
+    // wheel; inferring it from the axis source would guess, and guessing again
+    // on top of a device that has already been configured would undo it.
     let mut frame = AxisFrame::new(event.time_msec()).source(source);
 
     for axis in [InputAxis::Horizontal, InputAxis::Vertical] {
         if let Some(discrete) = event.amount_v120(axis) {
-            frame = frame.v120(axis, (discrete * sign) as i32);
+            frame = frame.v120(axis, discrete as i32);
         }
         match event.amount(axis) {
             Some(amount) => {
-                frame = frame.value(axis, amount * sign);
-                // Still the end of a gesture whichever way it was going.
+                frame = frame.value(axis, amount);
                 if amount == 0.0 && source == AxisSource::Finger {
                     frame = frame.stop(axis);
                 }
@@ -436,7 +547,7 @@ fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEve
                 // Some backends report only discrete steps; synthesize a
                 // continuous value so clients that ignore v120 still scroll.
                 if let Some(discrete) = event.amount_v120(axis) {
-                    frame = frame.value(axis, discrete * sign / 120.0 * 15.0);
+                    frame = frame.value(axis, discrete / 120.0 * 15.0);
                 }
             }
         }
@@ -448,50 +559,8 @@ fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEve
 
 #[cfg(test)]
 mod tests {
-    use super::{inverted, should_log};
-    use crate::config::InputConfig;
-    use smithay::backend::input::AxisSource;
+    use super::should_log;
     use smithay::input::keyboard::ModifiersState;
-
-    /// The arrangement people actually write: the touchpad pushes the page
-    /// around, and the mouse wheel is left alone.
-    #[test]
-    fn a_touchpad_can_be_inverted_while_the_wheel_is_not() {
-        let config = InputConfig {
-            natural_scroll: false,
-            touchpad: crate::config::TouchpadConfig {
-                natural_scroll: true,
-            },
-        };
-        assert!(inverted(&config, AxisSource::Finger));
-        assert!(!inverted(&config, AxisSource::Wheel));
-    }
-
-    #[test]
-    fn the_wheel_setting_is_its_own() {
-        let config = InputConfig {
-            natural_scroll: true,
-            touchpad: crate::config::TouchpadConfig {
-                natural_scroll: false,
-            },
-        };
-        assert!(inverted(&config, AxisSource::Wheel));
-        assert!(inverted(&config, AxisSource::WheelTilt));
-        assert!(!inverted(&config, AxisSource::Finger));
-    }
-
-    #[test]
-    fn nothing_is_inverted_by_default() {
-        let config = InputConfig::default();
-        for source in [
-            AxisSource::Wheel,
-            AxisSource::Finger,
-            AxisSource::Continuous,
-            AxisSource::WheelTilt,
-        ] {
-            assert!(!inverted(&config, source), "{source:?} should be untouched");
-        }
-    }
 
     fn mods(logo: bool, shift: bool, ctrl: bool, alt: bool) -> ModifiersState {
         ModifiersState {
@@ -501,6 +570,56 @@ mod tests {
             alt,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn an_edge_points_along_the_axis_it_moves() {
+        use super::edge_cursor;
+        use irontile_layout::Direction;
+        use smithay::input::pointer::CursorIcon;
+
+        assert_eq!(
+            edge_cursor(Some(Direction::Left), None),
+            Some(CursorIcon::EwResize)
+        );
+        assert_eq!(
+            edge_cursor(None, Some(Direction::Down)),
+            Some(CursorIcon::NsResize)
+        );
+        // Opposite corners of a rectangle lie on the same diagonal, so they
+        // share an arrow.
+        assert_eq!(
+            edge_cursor(Some(Direction::Left), Some(Direction::Up)),
+            edge_cursor(Some(Direction::Right), Some(Direction::Down)),
+        );
+        assert_eq!(
+            edge_cursor(Some(Direction::Right), Some(Direction::Up)),
+            edge_cursor(Some(Direction::Left), Some(Direction::Down)),
+        );
+        assert_ne!(
+            edge_cursor(Some(Direction::Left), Some(Direction::Up)),
+            edge_cursor(Some(Direction::Right), Some(Direction::Up)),
+            "the two diagonals are not the same arrow"
+        );
+        assert_eq!(edge_cursor(None, None), None, "nothing to grab, no arrow");
+    }
+
+    #[test]
+    fn a_move_grabs_rather_than_pointing_anywhere() {
+        use super::drag_cursor;
+        use crate::state::DragKind;
+        use smithay::input::pointer::CursorIcon;
+
+        // A move has no edge and no axis, so none of the resize arrows would
+        // say anything true about it.
+        assert_eq!(drag_cursor(DragKind::Move), Some(CursorIcon::Grabbing));
+        assert_eq!(
+            drag_cursor(DragKind::Resize {
+                horizontal: Some(irontile_layout::Direction::Left),
+                vertical: None,
+            }),
+            Some(CursorIcon::EwResize)
+        );
     }
 
     #[test]

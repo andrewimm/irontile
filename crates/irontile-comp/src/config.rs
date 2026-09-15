@@ -174,6 +174,11 @@ impl Config {
 }
 
 /// How pointing devices behave.
+///
+/// Every setting is optional in the strong sense: absent means libinput's own
+/// default for that device is left alone, which is different from naming the
+/// value that default happens to have. A compositor that writes every setting
+/// on startup overrides choices it was never asked about.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct InputConfig {
@@ -182,11 +187,11 @@ pub struct InputConfig {
     /// Named for what every other desktop calls it rather than for what it
     /// does: "natural" is the touchscreen convention, where the content follows
     /// the fingers rather than the scrollbar following them.
-    pub natural_scroll: bool,
+    pub natural_scroll: Option<bool>,
     pub touchpad: TouchpadConfig,
 }
 
-/// Touchpads, kept separate from the setting above.
+/// Touchpads, kept separate from the settings above.
 ///
 /// One pointing device wanting inverted scrolling says nothing about another. A
 /// touchpad that pushes the page around while a wheel is left alone is the
@@ -194,7 +199,27 @@ pub struct InputConfig {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct TouchpadConfig {
-    pub natural_scroll: bool,
+    pub natural_scroll: Option<bool>,
+    /// How a press on a pad with no separate buttons decides which button it
+    /// was.
+    pub click_method: Option<ClickMethod>,
+    /// Whether a tap counts as a click, as distinct from pressing the pad.
+    pub tap_to_click: Option<bool>,
+    /// Whether the left and right buttons pressed together mean the middle one.
+    pub middle_button_emulation: Option<bool>,
+}
+
+/// Which button a click on a buttonless touchpad produces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ClickMethod {
+    /// The number of fingers decides: one is left, two right, three middle.
+    Clickfinger,
+    /// Where the finger is decides, from zones along the bottom edge. This is
+    /// libinput's default for a pad with no separate buttons, and it is why a
+    /// press low and central on the pad arrives as a middle click -- which, in
+    /// a browser, closes the tab under the pointer.
+    ButtonAreas,
 }
 
 /// Which pointer images to use.
@@ -759,10 +784,15 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_is_left_alone_unless_a_file_says_otherwise() {
+    fn devices_are_left_alone_unless_a_file_says_otherwise() {
+        // Absent is not the same as false: a device nobody configured keeps
+        // whatever libinput chose for it.
         let config = Config::parse("").unwrap();
-        assert!(!config.input.natural_scroll);
-        assert!(!config.input.touchpad.natural_scroll);
+        assert_eq!(config.input.natural_scroll, None);
+        assert_eq!(config.input.touchpad.natural_scroll, None);
+        assert_eq!(config.input.touchpad.click_method, None);
+        assert_eq!(config.input.touchpad.tap_to_click, None);
+        assert_eq!(config.input.touchpad.middle_button_emulation, None);
     }
 
     #[test]
@@ -774,11 +804,32 @@ mod tests {
 
             [input.touchpad]
             natural_scroll = true
+            click_method = "clickfinger"
+            tap_to_click = false
+            middle_button_emulation = false
             "#,
         )
         .unwrap();
-        assert!(!config.input.natural_scroll);
-        assert!(config.input.touchpad.natural_scroll);
+        assert_eq!(config.input.natural_scroll, Some(false));
+        assert_eq!(config.input.touchpad.natural_scroll, Some(true));
+        assert_eq!(
+            config.input.touchpad.click_method,
+            Some(ClickMethod::Clickfinger)
+        );
+        assert_eq!(config.input.touchpad.tap_to_click, Some(false));
+    }
+
+    #[test]
+    fn the_other_click_method_is_spelled_the_way_libinput_spells_it() {
+        let config = Config::parse("[input.touchpad]\nclick_method = \"button-areas\"\n").unwrap();
+        assert_eq!(
+            config.input.touchpad.click_method,
+            Some(ClickMethod::ButtonAreas)
+        );
+        assert!(
+            Config::parse("[input.touchpad]\nclick_method = \"clickfingers\"\n").is_err(),
+            "a method that does not exist should be refused, not ignored"
+        );
     }
 
     #[test]

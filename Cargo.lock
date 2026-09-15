@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-comp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "irontile-ipc",
@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-ipc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "irontile-layout",
  "serde",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-layout"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "proptest",
  "serde",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-session"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rustix 1.1.4",
  "signal-hook",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "cosmic-text",

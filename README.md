@@ -189,10 +189,10 @@ resize_step = 40
 theme = "Adwaita"        # an XCursor theme; defaults to $XCURSOR_THEME
 size = 24                # logical pixels; a scaled display gets a larger image
 
-# Scrolling direction, named the way the rest of the desktop names it: natural
-# is the touchscreen convention, where the content follows your fingers rather
-# than the scrollbar following them. Both are off unless set, so nothing changes
-# for anyone who does not ask.
+# Input devices. Every setting here is handed to libinput, which applies it to
+# the device it names -- so a setting left out is not set to false, it is left
+# exactly as libinput chose. Running nested these do nothing: the compositor
+# underneath has already applied its own.
 [input]
 natural_scroll = false   # mice, and anything else with a wheel
 
@@ -201,6 +201,14 @@ natural_scroll = false   # mice, and anything else with a wheel
 # the usual arrangement.
 [input.touchpad]
 natural_scroll = true
+# How a press on a pad with no separate buttons decides which button it was.
+# "button-areas" is libinput's default, and reads the answer from where your
+# finger is along the bottom edge -- which is why a press low and central can
+# arrive as a middle click, closing the browser tab under the pointer.
+# "clickfinger" counts fingers instead: one is left, two right, three middle.
+click_method = "clickfinger"
+tap_to_click = false
+middle_button_emulation = false
 
 # One per display, matched on the connector name the hardware reports. A "*"
 # entry applies to any display without one of its own.
@@ -276,7 +284,12 @@ arrow keys.
 | `Super` + `T` | Flip the container's axis |
 | `Super` + `O` | Equalize the container |
 | `Super` `Shift` + `E` | Quit |
+| `Super` + left-drag | Move a floating window. A tiled one stays where the layout put it |
 | `Super` + right-drag | Resize; the edges nearest where the drag started follow the pointer |
+| drag a window's edge | Resize; along an edge moves one axis, a corner moves both. The pointer shows the arrow for the edge it is on |
+
+A window escapes tiling with `Super` `Shift` + `Space`, and floats until it is
+told otherwise.
 
 **There is no binding for a terminal, deliberately.** The compositor has no
 opinion about which one you use, and guessing at a list of names it happens to
@@ -288,7 +301,8 @@ know only works until you use one it does not. Bind it like anything else:
 ```
 
 `irontilectl warp <x> <y>` puts the pointer somewhere and `irontilectl click
-[1|2|3]` presses a button where it is. The compositor draws the pointer, so it
+[1|2|3]` presses a button where it is; `press` and `release` are the same thing
+held open, which is the only way to express a drag. The compositor draws the pointer, so it
 is the only thing that can move it -- which also means nothing else could drive
 one in a test. Everything a pointer reaches is otherwise reachable only by hand,
 which is how a bar that received no pointer events at all went unnoticed.

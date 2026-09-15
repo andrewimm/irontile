@@ -82,6 +82,14 @@ pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
             crate::input::click(state, *button);
             Vec::new()
         }
+        Action::PressPointer(button) => {
+            crate::input::press(state, *button, true);
+            Vec::new()
+        }
+        Action::ReleasePointer(button) => {
+            crate::input::press(state, *button, false);
+            Vec::new()
+        }
         // The vocabulary is `#[non_exhaustive]`; an action added to the
         // protocol that this compositor does not know is a no-op rather than a
         // crash.

@@ -210,11 +210,30 @@ where
             _ => cell.inset(scene.theme.border_width),
         };
 
+        // The cell is where the *window* goes, and a window is not the whole
+        // buffer it arrives in. A client drawing its own decorations puts its
+        // shadows outside the region it named with `set_window_geometry`, so
+        // its buffer starts above and to the left of anything visible. Drawing
+        // the buffer at the cell's corner therefore pushes the window itself
+        // down and right by however wide those shadows are -- ten or twenty
+        // pixels for a GTK application, and nothing at all for one that draws
+        // no shadows, which is why it looks like only some programs are wrong.
+        //
+        // The size sent in the configure is a window geometry size too, so the
+        // client is already sized correctly; only the origin needs moving back.
+        let inset = entry.window.geometry().loc;
+        let buffer = Rect::new(
+            content.x - inset.x,
+            content.y - inset.y,
+            content.w,
+            content.h,
+        );
+
         out.extend(
             AsRenderElements::<R>::render_elements::<IrontileElement<R>>(
                 &entry.window,
                 renderer,
-                to_physical(content, scale),
+                to_physical(buffer, scale),
                 scale,
                 1.0,
             ),

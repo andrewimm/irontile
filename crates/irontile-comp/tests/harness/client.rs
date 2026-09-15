@@ -568,6 +568,16 @@ impl TestClient {
         id
     }
 
+    /// Declares the part of the buffer that is the window, the way a client
+    /// drawing its own shadows does: everything outside this rectangle is
+    /// decoration the compositor is meant to place *outside* the cell.
+    pub fn set_window_geometry(&mut self, id: WindowId, x: i32, y: i32, w: i32, h: i32) {
+        let window = &self.state.windows[id.0];
+        window.xdg_surface.set_window_geometry(x, y, w, h);
+        window.surface.commit();
+        self.roundtrip();
+    }
+
     /// Creates the toplevel and commits it, without a buffer.
     fn begin_window(&mut self, title: &str) -> usize {
         let handle = self.queue.handle();

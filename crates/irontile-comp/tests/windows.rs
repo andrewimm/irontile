@@ -7,7 +7,7 @@
 mod harness;
 
 use harness::Compositor;
-use irontile_ipc::PlacementKind;
+use irontile_ipc::{Action, PlacementKind};
 
 #[test]
 fn a_mapped_window_fills_the_work_area() {
@@ -399,4 +399,107 @@ fn fractional_scale_divides_the_logical_size() {
     client.map_window("solo");
     let frame = compositor.wait_for_windows(1);
     assert_eq!(frame.placements[0].rect.w, 1504 - 8);
+}
+
+#[test]
+fn a_window_with_shadows_is_placed_by_its_geometry_and_not_its_buffer() {
+    // The bug this exists for: KiCad, and anything else that draws its own
+    // shadows, appeared ten or twenty pixels down and right of where it
+    // belonged. A client puts its shadows outside the rectangle it names with
+    // set_window_geometry, so its buffer begins above and to the left of the
+    // window itself. Placing the buffer at the cell's corner therefore puts the
+    // window at the corner plus the shadow. Applications drawing no shadows
+    // looked right, which is what made it read as those programs being at
+    // fault rather than the compositor.
+    const SHADOW: i32 = 16;
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    let window = client.map_window("shadowed");
+    // Not merely configured: placed. A window that has been told its size but
+    // has not drawn yet is deliberately absent from the frame, and therefore
+    // absent from what the pointer can be over.
+    compositor.wait_for_windows(1);
+
+    // Only the pointer can say where a surface really landed: warping to a
+    // known point on screen and asking the client where it thinks the pointer
+    // is measures the placement from the far end. The test client's buffer is
+    // 64x64, so this stays close to the corner to land on it at all.
+    let warp = |compositor: &mut Compositor, x, y| {
+        compositor
+            .client
+            .action(Action::WarpPointer(x, y))
+            .expect("the compositor refused to move the pointer");
+    };
+
+    warp(&mut compositor, 10, 10);
+    client.wait_for(|client| client.pointer_on().is_some());
+    let (_, before) = client.pointer_on().expect("the pointer is on the window");
+
+    client.set_window_geometry(window, SHADOW, SHADOW, 100, 100);
+    // A pixel further along, because a pointer that has not moved generates no
+    // motion and the client would keep reporting where it last was.
+    warp(&mut compositor, 11, 11);
+    client.wait_for(|client| {
+        client
+            .pointer_on()
+            .is_some_and(|(_, at)| at.0 > before.0 + 1.0)
+    });
+    let (_, after) = client.pointer_on().expect("the pointer is on the window");
+
+    // One pixel of the move is the warp; the rest is the shadow the compositor
+    // now knows to hang outside the cell rather than inside it.
+    assert_eq!(
+        (after.0 - before.0, after.1 - before.1),
+        (f64::from(SHADOW) + 1.0, f64::from(SHADOW) + 1.0),
+        "surface-local coordinates should shift by the geometry offset: \
+         before {before:?}, after {after:?}"
+    );
+}
+
+#[test]
+fn dragging_the_seam_between_two_windows_resizes_both() {
+    // Resizing by grabbing an edge, the way a floating compositor's window
+    // frame does. The grab lands in the border and gap between the two cells,
+    // which is the one part of the screen no client is drawing on, so it takes
+    // no click away from either window.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    client.map_window("left");
+    client.map_window("right");
+    let before = compositor.wait_for_windows(2);
+
+    let mut rects: Vec<_> = before.placements.iter().map(|p| p.rect).collect();
+    rects.sort_by_key(|r| r.x);
+    let (left, right) = (rects[0], rects[1]);
+    assert_eq!(left.w, right.w, "they start even");
+
+    // On the seam, vertically centred so this grabs the edge and not a corner.
+    let seam = left.x + left.w;
+    let middle = left.y + left.h / 2;
+    const PULL: i32 = 60;
+    for action in [
+        Action::WarpPointer(seam, middle),
+        Action::PressPointer(1),
+        Action::WarpPointer(seam + PULL, middle),
+        Action::ReleasePointer(1),
+    ] {
+        compositor
+            .client
+            .action(action)
+            .expect("the compositor refused a pointer action");
+    }
+
+    let after = compositor.wait_for_windows(2);
+    let mut rects: Vec<_> = after.placements.iter().map(|p| p.rect).collect();
+    rects.sort_by_key(|r| r.x);
+    assert_eq!(
+        (rects[0].w, rects[1].w),
+        (left.w + PULL, right.w - PULL),
+        "the left window should have taken exactly what the right one gave up"
+    );
+    assert_eq!(
+        (rects[0].h, rects[1].h),
+        (left.h, right.h),
+        "grabbing along a vertical edge should not resize vertically"
+    );
 }

@@ -252,7 +252,14 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     handle
         .insert_source(
             LibinputInputBackend::new(libinput.clone()),
-            move |event, _, state: &mut Irontile| {
+            move |mut event, _, state: &mut Irontile| {
+                // Settings are applied as devices appear rather than once at
+                // startup: a touchpad plugged in later, or one that comes back
+                // when the seat is handed over after a VT switch, arrives here
+                // the same way the first one did.
+                if let smithay::backend::input::InputEvent::DeviceAdded { device } = &mut event {
+                    crate::device::apply(device, &state.config.input);
+                }
                 // Every display is in one coordinate space, so absolute input
                 // is placed against the whole arrangement rather than a screen.
                 let bounds = state.arrangement_size();

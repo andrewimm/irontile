@@ -457,3 +457,48 @@ fn a_work_area_that_actually_moves_is_announced() {
     let events = layout.reconfigure_outputs(vec![left()]);
     assert!(events.contains(&Event::OutputsChanged), "{events:?}");
 }
+
+#[test]
+fn a_floating_window_moves_to_where_it_is_put() {
+    // What a Super-drag on a floating window comes down to: the rectangle is
+    // stored outright, so moving one is setting it, and nothing else shifts.
+    let mut layout = two_displays();
+    add_on(&mut layout, LEFT, 1);
+    add_on(&mut layout, LEFT, 2);
+    layout.set_floating(WindowId(1), true).unwrap();
+    let before = frame(&layout).placement(WindowId(1)).unwrap().rect;
+    let tiled_before = frame(&layout).placement(WindowId(2)).unwrap().rect;
+
+    let moved = Rect::new(before.x + 120, before.y + 45, before.w, before.h);
+    layout.move_floating(WindowId(1), moved).unwrap();
+    layout.validate().unwrap();
+
+    let after = frame(&layout).placement(WindowId(1)).unwrap().rect;
+    assert_eq!(after, moved, "the window is where it was put");
+    assert_eq!(
+        frame(&layout).placement(WindowId(2)).unwrap().rect,
+        tiled_before,
+        "moving a floating window disturbs no tiled one"
+    );
+}
+
+#[test]
+fn moving_a_tiled_window_as_though_it_floated_does_nothing() {
+    // The compositor only starts a move drag on a floating window, but the
+    // engine is the thing that has to hold the line: a tiled window's position
+    // belongs to the tree, and a stray rectangle must not become one.
+    let mut layout = two_displays();
+    add_on(&mut layout, LEFT, 1);
+    let before = frame(&layout).placement(WindowId(1)).unwrap().rect;
+
+    layout
+        .move_floating(WindowId(1), Rect::new(17, 23, 300, 200))
+        .unwrap();
+    layout.validate().unwrap();
+
+    assert_eq!(
+        frame(&layout).placement(WindowId(1)).unwrap().rect,
+        before,
+        "a tiled window keeps the cell the tree gave it"
+    );
+}

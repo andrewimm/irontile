@@ -143,14 +143,28 @@ pub struct KeyRepeat {
 /// pointer is still inside it. A formal grab would be the right shape if a
 /// future gesture needed the client to see the drag.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ResizeDrag {
+pub struct Drag {
     pub window: WindowId,
-    /// Which edges follow the pointer, chosen from where in the window the
-    /// drag started.
-    pub horizontal: Direction,
-    pub vertical: Direction,
     /// Where the pointer was at the last motion, so each step is a delta.
     pub last: Point<f64, Logical>,
+    pub kind: DragKind,
+}
+
+/// What a drag is doing to the window it holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DragKind {
+    Resize {
+        /// Which edges follow the pointer. Either may be absent: grabbing along
+        /// one edge resizes in that axis alone, and only a corner moves both.
+        horizontal: Option<Direction>,
+        vertical: Option<Direction>,
+    },
+    /// The whole window follows the pointer.
+    ///
+    /// Only a floating window can be moved this way. Where a tiled one sits is
+    /// the layout's to decide, and dragging it somewhere would be overruled by
+    /// the next reflow.
+    Move,
 }
 
 /// A connected display and the protocol object advertising it.
@@ -223,7 +237,7 @@ pub struct Irontile {
     /// Where the configuration came from, so a reload reads the same file.
     pub config_path: std::path::PathBuf,
     /// Set while the pointer is resizing a window.
-    pub drag: Option<ResizeDrag>,
+    pub drag: Option<Drag>,
     /// The binding currently repeating, if a key is being held down.
     pub repeat: Option<KeyRepeat>,
     /// Children started and not yet waited for. See [`Irontile::spawn`].
@@ -245,6 +259,14 @@ pub struct Irontile {
     pub cursor: crate::cursor::CursorSource,
     /// What the focused client last asked the pointer to look like.
     pub cursor_status: smithay::input::pointer::CursorImageStatus,
+    /// A pointer image the compositor is imposing, whatever the client asked
+    /// for.
+    ///
+    /// Resizing is the compositor's gesture, not the window's, so the window
+    /// has no way to know it should be showing a resize arrow -- and over the
+    /// gap between two windows there is no client to ask. Set while the pointer
+    /// is on an edge it could grab, and for as long as a drag lasts.
+    pub cursor_hint: Option<smithay::input::pointer::CursorIcon>,
 }
 
 /// Hand-written because much of the protocol state smithay holds is not
@@ -327,6 +349,7 @@ impl Irontile {
             dmabuf_global: None,
             cursor: crate::cursor::CursorSource::new(&config_cursor.theme, config_cursor.size),
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
+            cursor_hint: None,
         }
     }
 
@@ -380,6 +403,10 @@ impl Irontile {
     /// itself through a surface, which the renderer handles separately.
     pub fn cursor_image(&mut self, scale: f64) -> Option<crate::cursor::CursorImage> {
         use smithay::input::pointer::CursorImageStatus;
+        // What the compositor is doing outranks what the window last asked for.
+        if let Some(icon) = self.cursor_hint {
+            return Some(self.cursor.image(icon, scale));
+        }
         match self.cursor_status.clone() {
             CursorImageStatus::Hidden => None,
             CursorImageStatus::Named(icon) => Some(self.cursor.image(icon, scale)),
@@ -391,6 +418,11 @@ impl Irontile {
     /// The surface a client is drawing the pointer with, and its hotspot.
     pub fn cursor_surface(&self) -> Option<(WlSurface, (i32, i32))> {
         use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
+        // A client drawing its own pointer still does not get to draw one for a
+        // gesture that is not its own.
+        if self.cursor_hint.is_some() {
+            return None;
+        }
         let CursorImageStatus::Surface(surface) = &self.cursor_status else {
             return None;
         };
@@ -1210,7 +1242,14 @@ impl Irontile {
                 continue;
             };
             let content = self.content_rect(placement.rect, placement.kind);
-            let origin = Point::<i32, Logical>::from((content.x, content.y));
+            // The same shift the renderer applies, for the same reason: what is
+            // drawn at the cell's corner is the window, not the buffer, and the
+            // pointer has to be told about a surface in the coordinates that
+            // surface was actually put on screen in. Hit testing the buffer
+            // instead would miss along one edge and overshoot along the other,
+            // by exactly the width of the client's shadows.
+            let inset = window.geometry().loc;
+            let origin = Point::<i32, Logical>::from((content.x - inset.x, content.y - inset.y));
             let local = point - origin.to_f64();
             if let Some((surface, offset)) =
                 window.surface_under(local, smithay::desktop::WindowSurfaceType::ALL)
@@ -1277,6 +1316,76 @@ impl Irontile {
                 p.rect
                     .contains(irontile_layout::Point::new(point.x as i32, point.y as i32))
             })
+            .map(|p| p.window)
+    }
+
+    /// The window edges near a point, for a drag that resizes by grabbing one.
+    ///
+    /// Only the strip a window's own border and the gap beside it occupy counts,
+    /// which is the part of the screen no client has a surface on. Reaching
+    /// inside the window instead would be a wider target and a worse trade: the
+    /// last few pixels of a window are where scrollbars live, and a compositor
+    /// that swallows clicks there breaks every application that has one.
+    ///
+    /// Either direction may be `None`. Grabbing along an edge resizes in one
+    /// axis; grabbing a corner resizes in both.
+    pub fn edges_near(
+        &self,
+        point: Point<f64, Logical>,
+        grip: i32,
+    ) -> Option<(WindowId, Option<Direction>, Option<Direction>)> {
+        let (x, y) = (point.x as i32, point.y as i32);
+        let mut ordered: Vec<_> = self.placements.placements.iter().collect();
+        ordered.sort_by_key(|p| std::cmp::Reverse(p.z));
+
+        for placement in ordered {
+            // A fullscreen window has no edge to grab: there is nothing beside
+            // it to give the space to.
+            if placement.kind == PlacementKind::Fullscreen {
+                continue;
+            }
+            let cell = placement.rect;
+            let near = |a: i32, b: i32| (a - b).abs() <= grip;
+            let within = x >= cell.x - grip
+                && x <= cell.x + cell.w + grip
+                && y >= cell.y - grip
+                && y <= cell.y + cell.h + grip;
+            if !within {
+                continue;
+            }
+
+            let horizontal = if near(x, cell.x) {
+                Some(Direction::Left)
+            } else if near(x, cell.x + cell.w) {
+                Some(Direction::Right)
+            } else {
+                None
+            };
+            let vertical = if near(y, cell.y) {
+                Some(Direction::Up)
+            } else if near(y, cell.y + cell.h) {
+                Some(Direction::Down)
+            } else {
+                None
+            };
+            if horizontal.is_some() || vertical.is_some() {
+                return Some((placement.window, horizontal, vertical));
+            }
+        }
+        None
+    }
+
+    /// The topmost floating window under a point.
+    ///
+    /// Tiled windows are deliberately not returned: a drag would move one and
+    /// the next reflow would put it straight back.
+    pub fn floating_at(&self, point: Point<f64, Logical>) -> Option<WindowId> {
+        let at = LayoutPoint::new(point.x as i32, point.y as i32);
+        let mut ordered: Vec<_> = self.placements.placements.iter().collect();
+        ordered.sort_by_key(|p| std::cmp::Reverse(p.z));
+        ordered
+            .into_iter()
+            .find(|p| p.kind == PlacementKind::Floating && p.rect.contains(at))
             .map(|p| p.window)
     }
 

@@ -52,6 +52,12 @@ pub enum Action {
     /// Press and release a button where the pointer is. 1 is left, 2 middle,
     /// 3 right, as in every other numbering of mouse buttons.
     ClickPointer(u32),
+    /// Hold a button down, and let it go again. A click is both at once, which
+    /// is everything except a drag: what happens between the press and the
+    /// release is the whole of a drag's behaviour, and nothing could express
+    /// that until these existed.
+    PressPointer(u32),
+    ReleasePointer(u32),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -164,17 +170,12 @@ fn parse(input: &str) -> Result<Action, ParseError> {
             let y = need_number_arg(&mut argument, input, "a y coordinate")?;
             Action::WarpPointer(x, y)
         }
-        "click" => {
-            // Left unless told otherwise, which is what a bare `click` means
-            // everywhere else.
-            match argument() {
-                None => Action::ClickPointer(1),
-                Some(word) => Action::ClickPointer(
-                    word.parse()
-                        .map_err(|_| fail(Reason::BadNumber(word.to_owned())))?,
-                ),
-            }
-        }
+        // Left unless told otherwise, which is what a bare `click` means
+        // everywhere else.
+        "click" => Action::ClickPointer(optional_button(&mut argument, input)?),
+        // Left unless told otherwise, matching `click`.
+        "press" => Action::PressPointer(optional_button(&mut argument, input)?),
+        "release" => Action::ReleasePointer(optional_button(&mut argument, input)?),
         "reload" => Action::Reload,
         "quit" => Action::Quit,
         other => return Err(fail(Reason::UnknownVerb(other.to_owned()))),
@@ -233,6 +234,23 @@ fn split_argv(line: &str) -> Vec<String> {
         argv.push(current);
     }
     argv
+}
+
+/// A mouse button number, defaulting to the left one.
+///
+/// `click`, `press` and `release` all take the same optional argument, and a
+/// bare one means the left button everywhere else too.
+fn optional_button<'a>(
+    next: &mut impl FnMut() -> Option<&'a str>,
+    input: &str,
+) -> Result<u32, ParseError> {
+    match next() {
+        None => Ok(1),
+        Some(word) => word.parse().map_err(|_| ParseError {
+            input: input.to_owned(),
+            reason: Reason::BadNumber(word.to_owned()),
+        }),
+    }
 }
 
 fn need_number_arg<'a>(
@@ -328,6 +346,8 @@ impl fmt::Display for Action {
             Action::Quit => write!(f, "quit"),
             Action::WarpPointer(x, y) => write!(f, "warp {x} {y}"),
             Action::ClickPointer(button) => write!(f, "click {button}"),
+            Action::PressPointer(button) => write!(f, "press {button}"),
+            Action::ReleasePointer(button) => write!(f, "release {button}"),
         }
     }
 }
@@ -350,6 +370,8 @@ pub const VERBS: &[&str] = &[
     "vt <n>",
     "warp <x> <y>",
     "click [1|2|3]",
+    "press [1|2|3]",
+    "release [1|2|3]",
     "reload",
     "quit",
 ];
@@ -498,6 +520,8 @@ mod tests {
             Action::SendToOutput(Direction::Left),
             Action::WarpPointer(100, 200),
             Action::ClickPointer(3),
+            Action::PressPointer(1),
+            Action::ReleasePointer(1),
             Action::Close,
             Action::Reload,
             Action::Quit,
