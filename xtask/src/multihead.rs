@@ -64,10 +64,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
     report.invariants(&layout(&mut client)?);
 
     report.section("open a window on each display");
-    act(&mut client, Action::Terminal)?;
+    let terminal = terminal()?;
+    act(&mut client, terminal.clone())?;
     std::thread::sleep(Duration::from_secs(2));
     act(&mut client, Action::FocusOutput(Direction::Right))?;
-    act(&mut client, Action::Terminal)?;
+    act(&mut client, terminal)?;
     std::thread::sleep(Duration::from_secs(2));
     report.windows(&mut client)?;
 
@@ -119,6 +120,18 @@ fn watch_hotplug(client: &mut Client, report: &mut Report) -> Result<(), String>
         std::thread::sleep(Duration::from_secs(1));
     }
     Ok(())
+}
+
+/// Opening a window means launching something, and the something is named by
+/// whoever started the session.
+///
+/// The compositor holds no opinion about terminals, so neither does the probe:
+/// try-multihead.sh works one out and passes it in.
+fn terminal() -> Result<Action, String> {
+    match std::env::var("IRONTILE_TERMINAL") {
+        Ok(name) if !name.is_empty() => Ok(Action::Spawn(vec![name])),
+        _ => Err("IRONTILE_TERMINAL is not set; try-multihead.sh sets it".to_string()),
+    }
 }
 
 fn act(client: &mut Client, action: Action) -> Result<(), String> {

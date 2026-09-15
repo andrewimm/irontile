@@ -54,10 +54,12 @@ elif [ -f "$REAL" ]; then
     CONFIG="$REAL"
     echo "irontile: using $CONFIG"
     if ! grep -q '^\[startup\]' "$CONFIG"; then
-        echo "irontile: NOTE - no [startup] section, so no window will open on its own."
-        echo "irontile:        Press Super+Return once it is up, or add:"
+        echo "irontile: NOTE - no [startup] section, so no window will open on its own,"
+        echo "irontile:        and no terminal is bound by default. Add both:"
         echo "irontile:            [startup]"
         echo "irontile:            exec = [\"$TERMINAL\"]"
+        echo "irontile:            [binds]"
+        echo "irontile:            \"Super+Return\" = \"spawn $TERMINAL\""
     fi
 else
     CONFIG="$(mktemp -t irontile-XXXXXX.toml)"
@@ -99,7 +101,7 @@ if [ -z "${IRONTILE_SHARE_BUS:-}" ] && command -v dbus-run-session >/dev/null 2>
 fi
 
 echo "irontile: starting $TERMINAL, logging to $LOG"
-echo "irontile: Ctrl+Alt+F<n> switches VT, Super+Shift+E quits, Super+Return opens a terminal"
+echo "irontile: Ctrl+Alt+F<n> switches VT, Super+Shift+E quits"
 echo "irontile: the ${LIMIT}s timeout is the backstop if none of those work"
 sleep 2
 

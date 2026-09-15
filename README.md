@@ -184,11 +184,23 @@ background = "#121217"
 inner_gap = 4
 outer_gap = 4
 resize_step = 40
-terminal = "foot"        # omit to use the first one found on PATH
 
 [cursor]
 theme = "Adwaita"        # an XCursor theme; defaults to $XCURSOR_THEME
 size = 24                # logical pixels; a scaled display gets a larger image
+
+# Scrolling direction, named the way the rest of the desktop names it: natural
+# is the touchscreen convention, where the content follows your fingers rather
+# than the scrollbar following them. Both are off unless set, so nothing changes
+# for anyone who does not ask.
+[input]
+natural_scroll = false   # mice, and anything else with a wheel
+
+# Touchpads separately, because wanting one turned around says nothing about
+# the other. A touchpad that pushes the page while the wheel is left alone is
+# the usual arrangement.
+[input.touchpad]
+natural_scroll = true
 
 # One per display, matched on the connector name the hardware reports. A "*"
 # entry applies to any display without one of its own.
@@ -215,7 +227,7 @@ focus_follows_move = true
 # top level starts from nothing instead.
 [binds]
 "Super+h" = "focus left"
-"Super+Return" = "terminal"
+"Super+Return" = "spawn kitty"
 "Super+f" = false        # take away a built-in binding
 
 # A table says what holding the key down does. Ramps -- volume, brightness, a
@@ -256,7 +268,6 @@ arrow keys.
 | `Super` `Shift` `Alt` + direction | Send this desktop to another display |
 | `Super` + `1`–`9`, `0` | Show desktop 1–10, creating it on first use |
 | `Super` `Shift` + `1`–`9`, `0` | Send the window to that desktop |
-| `Super` + `Return` | Spawn a terminal |
 | `Super` `Shift` + `C` | Reload the configuration |
 | `Super` + `Q` | Close the window |
 | `Super` + `F` | Toggle fullscreen |
@@ -266,6 +277,15 @@ arrow keys.
 | `Super` + `O` | Equalize the container |
 | `Super` `Shift` + `E` | Quit |
 | `Super` + right-drag | Resize; the edges nearest where the drag started follow the pointer |
+
+**There is no binding for a terminal, deliberately.** The compositor has no
+opinion about which one you use, and guessing at a list of names it happens to
+know only works until you use one it does not. Bind it like anything else:
+
+```toml
+[binds]
+"Super+Return" = "spawn kitty"
+```
 
 `irontilectl warp <x> <y>` puts the pointer somewhere and `irontilectl click
 [1|2|3]` presses a button where it is. The compositor draws the pointer, so it

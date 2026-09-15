@@ -392,20 +392,42 @@ fn pointer_button<B: InputBackend>(state: &mut Irontile, event: &B::PointerButto
     pointer.frame(state);
 }
 
+/// Whether scrolling from this source should be turned around.
+///
+/// libinput sets natural scrolling per device. The compositor is handed the
+/// axis source instead, which draws the same line in the only place it matters
+/// here: a touchpad's two-finger scroll arrives as `Finger`, and a wheel -- or
+/// a trackpoint scrolled with a button held -- does not. A device that reports
+/// something else is treated as the pointer it is.
+fn inverted(config: &crate::config::InputConfig, source: AxisSource) -> bool {
+    match source {
+        AxisSource::Finger => config.touchpad.natural_scroll,
+        _ => config.natural_scroll,
+    }
+}
+
 fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEvent) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
     let source = event.source();
+    // Applied to both axes, because a device scrolled the other way round is
+    // the other way round in both directions.
+    let sign = if inverted(&state.config.input, source) {
+        -1.0
+    } else {
+        1.0
+    };
     let mut frame = AxisFrame::new(event.time_msec()).source(source);
 
     for axis in [InputAxis::Horizontal, InputAxis::Vertical] {
         if let Some(discrete) = event.amount_v120(axis) {
-            frame = frame.v120(axis, discrete as i32);
+            frame = frame.v120(axis, (discrete * sign) as i32);
         }
         match event.amount(axis) {
             Some(amount) => {
-                frame = frame.value(axis, amount);
+                frame = frame.value(axis, amount * sign);
+                // Still the end of a gesture whichever way it was going.
                 if amount == 0.0 && source == AxisSource::Finger {
                     frame = frame.stop(axis);
                 }
@@ -414,7 +436,7 @@ fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEve
                 // Some backends report only discrete steps; synthesize a
                 // continuous value so clients that ignore v120 still scroll.
                 if let Some(discrete) = event.amount_v120(axis) {
-                    frame = frame.value(axis, discrete / 120.0 * 15.0);
+                    frame = frame.value(axis, discrete * sign / 120.0 * 15.0);
                 }
             }
         }
@@ -426,8 +448,50 @@ fn pointer_axis<B: InputBackend>(state: &mut Irontile, event: &B::PointerAxisEve
 
 #[cfg(test)]
 mod tests {
-    use super::should_log;
+    use super::{inverted, should_log};
+    use crate::config::InputConfig;
+    use smithay::backend::input::AxisSource;
     use smithay::input::keyboard::ModifiersState;
+
+    /// The arrangement people actually write: the touchpad pushes the page
+    /// around, and the mouse wheel is left alone.
+    #[test]
+    fn a_touchpad_can_be_inverted_while_the_wheel_is_not() {
+        let config = InputConfig {
+            natural_scroll: false,
+            touchpad: crate::config::TouchpadConfig {
+                natural_scroll: true,
+            },
+        };
+        assert!(inverted(&config, AxisSource::Finger));
+        assert!(!inverted(&config, AxisSource::Wheel));
+    }
+
+    #[test]
+    fn the_wheel_setting_is_its_own() {
+        let config = InputConfig {
+            natural_scroll: true,
+            touchpad: crate::config::TouchpadConfig {
+                natural_scroll: false,
+            },
+        };
+        assert!(inverted(&config, AxisSource::Wheel));
+        assert!(inverted(&config, AxisSource::WheelTilt));
+        assert!(!inverted(&config, AxisSource::Finger));
+    }
+
+    #[test]
+    fn nothing_is_inverted_by_default() {
+        let config = InputConfig::default();
+        for source in [
+            AxisSource::Wheel,
+            AxisSource::Finger,
+            AxisSource::Continuous,
+            AxisSource::WheelTilt,
+        ] {
+            assert!(!inverted(&config, source), "{source:?} should be untouched");
+        }
+    }
 
     fn mods(logo: bool, shift: bool, ctrl: bool, alt: bool) -> ModifiersState {
         ModifiersState {

@@ -19,8 +19,6 @@ pub struct Theme {
     pub min_window: Size,
     /// Pixels per keypress for a directional resize.
     pub resize_step: i32,
-    /// Launched by a `spawn` binding with no program of its own.
-    pub terminal: Option<String>,
 }
 
 impl Default for Theme {
@@ -34,7 +32,6 @@ impl Default for Theme {
             outer_gap: 4,
             min_window: Size::new(48, 48),
             resize_step: 40,
-            terminal: detect_terminal(),
         }
     }
 }
@@ -155,28 +152,6 @@ impl Paint {
         let origin_y = if dy < 0.0 { h } else { 0.0 };
         (((x - origin_x) * dx + (y - origin_y) * dy) / span).clamp(0.0, 1.0)
     }
-}
-
-/// Picks the terminal a bare spawn binding launches.
-///
-/// `IRONTILE_TERMINAL` wins if it is set. Otherwise the first of a few common
-/// emulators that is actually on `PATH`, so the binding does something useful
-/// before any configuration exists.
-fn detect_terminal() -> Option<String> {
-    if let Ok(explicit) = std::env::var("IRONTILE_TERMINAL")
-        && !explicit.is_empty()
-    {
-        return Some(explicit);
-    }
-    ["foot", "alacritty", "kitty", "ghostty", "wezterm", "xterm"]
-        .into_iter()
-        .find(|program| on_path(program))
-        .map(str::to_owned)
-}
-
-fn on_path(program: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(program).is_file()))
 }
 
 #[cfg(test)]

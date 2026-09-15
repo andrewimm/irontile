@@ -62,15 +62,6 @@ pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
             state.spawn(argv);
             Vec::new()
         }
-        Action::Terminal => {
-            match state.config.theme.terminal.clone() {
-                Some(terminal) => state.spawn(&[terminal]),
-                None => {
-                    tracing::warn!("no terminal found; set IRONTILE_TERMINAL or theme.terminal")
-                }
-            }
-            Vec::new()
-        }
         Action::SwitchVt(vt) => {
             state.backend.change_vt(*vt);
             Vec::new()

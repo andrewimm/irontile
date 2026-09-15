@@ -24,6 +24,8 @@ pub struct Config {
     pub layout: irontile_layout::Config,
     pub keymap: Keymap,
     pub cursor: CursorConfig,
+    /// How pointing devices behave.
+    pub input: InputConfig,
     /// Per-display settings, matched by connector name.
     pub outputs: Vec<OutputConfig>,
     /// Commands run once the compositor is up.
@@ -48,6 +50,7 @@ impl Default for Config {
             theme,
             keymap: Keymap::defaults(),
             cursor: CursorConfig::default(),
+            input: InputConfig::default(),
             outputs: Vec::new(),
             startup: Vec::new(),
             session: SessionConfig::default(),
@@ -162,11 +165,36 @@ impl Config {
             theme,
             keymap,
             cursor: file.cursor,
+            input: file.input,
             outputs,
             startup,
             session: file.session,
         })
     }
+}
+
+/// How pointing devices behave.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct InputConfig {
+    /// Invert the scroll direction for mice and anything else with a wheel.
+    ///
+    /// Named for what every other desktop calls it rather than for what it
+    /// does: "natural" is the touchscreen convention, where the content follows
+    /// the fingers rather than the scrollbar following them.
+    pub natural_scroll: bool,
+    pub touchpad: TouchpadConfig,
+}
+
+/// Touchpads, kept separate from the setting above.
+///
+/// One pointing device wanting inverted scrolling says nothing about another. A
+/// touchpad that pushes the page around while a wheel is left alone is the
+/// common arrangement, and a single flag for both cannot express it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct TouchpadConfig {
+    pub natural_scroll: bool,
 }
 
 /// Which pointer images to use.
@@ -333,6 +361,7 @@ struct ConfigFile {
     startup: StartupConfig,
     session: SessionConfig,
     cursor: CursorConfig,
+    input: InputConfig,
     #[serde(rename = "output")]
     outputs: Vec<OutputFile>,
 }
@@ -348,6 +377,7 @@ impl Default for ConfigFile {
             startup: StartupConfig::default(),
             session: SessionConfig::default(),
             cursor: CursorConfig::default(),
+            input: InputConfig::default(),
             outputs: Vec::new(),
         }
     }
@@ -465,7 +495,6 @@ struct ThemeConfig {
     min_window_width: i32,
     min_window_height: i32,
     resize_step: i32,
-    terminal: Option<String>,
 }
 
 impl Default for ThemeConfig {
@@ -481,7 +510,6 @@ impl Default for ThemeConfig {
             min_window_width: theme.min_window.w,
             min_window_height: theme.min_window.h,
             resize_step: theme.resize_step,
-            terminal: theme.terminal,
         }
     }
 }
@@ -494,7 +522,6 @@ impl ThemeConfig {
                 message: format!("{text:?} is not a colour like \"#5c99d6\""),
             })
         };
-        let default = Theme::default();
         Ok(Theme {
             border_width: self.border_width.max(0),
             border_focused: parse_paint("border_focused", &self.border_focused)?,
@@ -504,9 +531,6 @@ impl ThemeConfig {
             outer_gap: self.outer_gap.max(0),
             min_window: Size::new(self.min_window_width.max(0), self.min_window_height.max(0)),
             resize_step: self.resize_step.max(1),
-            // An explicit empty string means "no terminal", which is different
-            // from an absent key meaning "find one".
-            terminal: self.terminal.filter(|t| !t.is_empty()).or(default.terminal),
         })
     }
 }
@@ -699,7 +723,14 @@ fn to_hex(color: [f32; 4]) -> String {
 
 /// Every default binding, as the text a user would write.
 pub fn default_config_text() -> String {
-    let mut out = String::from("# irontile configuration\n\n[binds]\n");
+    // The one binding worth naming here is the one that is absent: nothing opens
+    // a terminal until a file says which terminal that is.
+    let mut out = String::new();
+    out.push_str("# irontile configuration\n\n");
+    out.push_str("# No terminal is bound by default, because the compositor has no\n");
+    out.push_str("# opinion about which one you use. Bind yours:\n");
+    out.push_str("#     \"Super+Return\" = \"spawn kitty\"\n\n");
+    out.push_str("[binds]\n");
     for (combo, bind) in Keymap::defaults().binds() {
         let action = bind.action.to_string();
         // Written back in whichever form says the whole truth about it, so the
@@ -725,6 +756,38 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.theme.border_width, Theme::default().border_width);
         assert!(config.keymap.binds().count() > 0);
+    }
+
+    #[test]
+    fn scrolling_is_left_alone_unless_a_file_says_otherwise() {
+        let config = Config::parse("").unwrap();
+        assert!(!config.input.natural_scroll);
+        assert!(!config.input.touchpad.natural_scroll);
+    }
+
+    #[test]
+    fn the_touchpad_and_the_wheel_are_configured_separately() {
+        let config = Config::parse(
+            r#"
+            [input]
+            natural_scroll = false
+
+            [input.touchpad]
+            natural_scroll = true
+            "#,
+        )
+        .unwrap();
+        assert!(!config.input.natural_scroll);
+        assert!(config.input.touchpad.natural_scroll);
+    }
+
+    #[test]
+    fn a_misspelt_input_setting_is_refused_rather_than_ignored() {
+        // Silently dropping it would read as the setting not working.
+        assert!(
+            Config::parse("[input]\nnatural_scrolling = true\n").is_err(),
+            "an unknown key under [input] should be an error"
+        );
     }
 
     #[test]

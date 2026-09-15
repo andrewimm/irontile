@@ -221,7 +221,6 @@ pub const DEFAULT_BINDS: &[(&str, &str)] = &[
     ("Super+Shift+8", "move-to-workspace 8"),
     ("Super+Shift+9", "move-to-workspace 9"),
     ("Super+Shift+0", "move-to-workspace 10"),
-    ("Super+Return", "terminal"),
     ("Super+q", "close"),
     ("Super+f", "fullscreen"),
     ("Super+Shift+space", "float"),

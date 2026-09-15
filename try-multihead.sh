@@ -26,6 +26,9 @@ if [ -z "$TERMINAL" ]; then
     done
 fi
 [ -n "$TERMINAL" ] || { echo "no terminal found; set IRONTILE_TERMINAL" >&2; exit 1; }
+# The probe opens its own windows over the control socket and asks for this by
+# name, because the compositor no longer guesses at one.
+export IRONTILE_TERMINAL="$TERMINAL"
 
 # The probe has to be launched from the config, so a real one is copied and the
 # probe appended rather than used directly.

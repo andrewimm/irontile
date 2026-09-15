@@ -34,9 +34,6 @@ pub enum Action {
     MoveToWorkspace(u32),
     /// Program and arguments.
     Spawn(Vec<String>),
-    /// Launch the configured terminal. A binding written this way keeps
-    /// working when the terminal changes, which a literal `spawn` would not.
-    Terminal,
     /// Switch to another virtual terminal.
     ///
     /// A compositor holding the VT in graphics mode is the only thing that can
@@ -154,7 +151,6 @@ fn parse(input: &str) -> Result<Action, ParseError> {
         "close" => Action::Close,
         "workspace" => Action::Workspace(need_number(&mut argument, input)?),
         "move-to-workspace" => Action::MoveToWorkspace(need_number(&mut argument, input)?),
-        "terminal" => Action::Terminal,
         "vt" => {
             let word =
                 argument().ok_or_else(|| fail(Reason::MissingArgument("a terminal number")))?;
@@ -327,7 +323,6 @@ impl fmt::Display for Action {
             Action::Workspace(n) => write!(f, "workspace {n}"),
             Action::MoveToWorkspace(n) => write!(f, "move-to-workspace {n}"),
             Action::Spawn(argv) => write!(f, "spawn {}", argv.join(" ")),
-            Action::Terminal => write!(f, "terminal"),
             Action::SwitchVt(n) => write!(f, "vt {n}"),
             Action::Reload => write!(f, "reload"),
             Action::Quit => write!(f, "quit"),
@@ -352,7 +347,6 @@ pub const VERBS: &[&str] = &[
     "workspace <n>",
     "move-to-workspace <n>",
     "spawn <program> [args...]",
-    "terminal",
     "vt <n>",
     "warp <x> <y>",
     "click [1|2|3]",
@@ -500,7 +494,6 @@ mod tests {
             Action::Workspace(7),
             Action::MoveToWorkspace(2),
             Action::Spawn(vec!["foot".into(), "-e".into(), "htop".into()]),
-            Action::Terminal,
             Action::SwitchVt(2),
             Action::SendToOutput(Direction::Left),
             Action::WarpPointer(100, 200),
