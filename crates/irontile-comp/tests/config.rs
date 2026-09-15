@@ -106,11 +106,12 @@ fn a_broken_config_leaves_the_running_one_in_place() {
 
 /// What the Caps Lock key is bound to, read out of a compiled keymap.
 ///
-/// xkb writes keysyms numerically here, so this returns the text of the key's
-/// block rather than a name: 0xff1b is Escape, 0xffe5 is Caps_Lock. The whole
-/// block, because a key with nothing else set on it is written as a one-liner
-/// and one that has been remapped is not -- reading a fixed number of lines
-/// finds the *next* key's symbols in the first case.
+/// Returned as the text of the key's whole block, because neither half of its
+/// shape is stable. Some versions of xkbcommon write keysyms by name and others
+/// numerically, so a caller has to accept `Escape` or `0xff1b` for the same
+/// binding; and a key with nothing else set on it is written as a one-liner
+/// while a remapped one is not, so reading a fixed number of lines finds the
+/// *next* key's symbols in the first case.
 fn caps_binding(keymap: &str) -> String {
     let lines: Vec<&str> = keymap.lines().collect();
     let key = lines
@@ -154,7 +155,7 @@ fn xkb_options_reach_the_keymap_clients_are_given() {
     );
     let remapped = caps_binding(&keymap_with(Some(&config)));
     assert!(
-        remapped.contains("0xff1b"),
+        remapped.contains("Escape") || remapped.contains("0xff1b"),
         "Caps Lock should produce Escape, but the keymap says {remapped:?}"
     );
 
@@ -163,7 +164,7 @@ fn xkb_options_reach_the_keymap_clients_are_given() {
     // Caps Lock, 0xffe5.
     let plain = caps_binding(&keymap_with(None));
     assert!(
-        plain.contains("0xffe5"),
+        plain.contains("Caps_Lock") || plain.contains("0xffe5"),
         "without the option Caps Lock should be a Caps Lock, but the keymap says {plain:?}"
     );
 }
@@ -180,7 +181,7 @@ fn a_keymap_that_will_not_compile_falls_back_rather_than_refusing_to_start() {
     );
     let plain = caps_binding(&keymap_with(Some(&config)));
     assert!(
-        plain.contains("0xffe5"),
+        plain.contains("Caps_Lock") || plain.contains("0xffe5"),
         "the default keymap should have been used, but the keymap says {plain:?}"
     );
 }

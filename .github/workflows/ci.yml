@@ -21,9 +21,14 @@ env:
   # EGL and the GL driver are dlopened at runtime too, but nothing asks them for
   # a context here: the integration tests use the headless backend, so no
   # display server and no GL driver are needed to run them.
+  # hicolor-icon-theme: the icon tests resolve names against the themes that are
+  # installed, and assert that even a name nobody has still lands on a fallback.
+  # A runner image happens to ship one; a container does not, and a test that
+  # passes only where the image is fat is a test nobody can reproduce.
   SYSTEM_DEPS: >-
     libxkbcommon-dev
     libwayland-dev
+    hicolor-icon-theme
     libinput-dev
     libudev-dev
     libseat-dev
@@ -38,6 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: sudo apt-get update && sudo apt-get install -y ${{ env.SYSTEM_DEPS }}
+      # Sets up rustup; which toolchain actually compiles is rust-toolchain.toml's
+      # to say, and it outranks whatever is made default here. That file is the
+      # single place the version lives.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

@@ -23,6 +23,11 @@ cargo xtask run      # build and launch the compositor
 cargo xtask test     # rustfmt check, clippy with warnings denied, full test suite
 ```
 
+The Rust version is pinned exactly in `rust-toolchain.toml`, so rustup fetches
+the same compiler CI uses and a new Rust release cannot break the build without
+a commit that says so. `rust-version` in `Cargo.toml` is a separate promise: the
+oldest compiler the code still builds on, which the `msrv` job checks.
+
 ## Running
 
 ```
