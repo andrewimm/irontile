@@ -101,9 +101,11 @@ assets = [
     { source = "target/release/irontile-lock", dest = "/usr/bin/irontile-lock", mode = "755" },
     { source = "target/release/start-irontile", dest = "/usr/bin/start-irontile", mode = "755" },
     { source = "assets/irontile.desktop", dest = "/usr/share/wayland-sessions/irontile.desktop", mode = "644" },
-    # config, so that an upgrade leaves an edited stack alone rather than
-    # replacing what somebody decided their lock screen should ask for.
-    { source = "assets/pam/fedora", dest = "/etc/pam.d/irontile-lock", mode = "644", config = true },
+    # noreplace rather than a plain config: rpm's default moves an edited file
+    # aside on upgrade and installs the packaged one, and what a lock screen
+    # asks for is not ours to change under somebody. This matches what dpkg and
+    # pacman do with the same file, so the three packages behave alike.
+    { source = "assets/pam/fedora", dest = "/etc/pam.d/irontile-lock", mode = "644", config = "noreplace" },
     # Not marked doc: rpm skips documentation when the install sets nodocs,
     # which minimal installs and every container image do, and the licence is
     # the one file that has to be there. cargo-generate-rpm has no %license
