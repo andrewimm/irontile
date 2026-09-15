@@ -13,6 +13,7 @@ not a plugin on top of a floating one.
 | `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
 | `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
 | `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
+| `irontile-session` | `start-irontile`, the supervisor a login manager starts. |
 | `xtask` | Task runner. |
 
 ## Tasks
@@ -119,6 +120,53 @@ compositor and a broken one both show a background colour:
 [startup]
 exec = ["alacritty"]
 ```
+
+## Installing a session
+
+Four binaries and one desktop entry:
+
+| File | Where it goes |
+| --- | --- |
+| `irontile` | `/usr/bin` |
+| `irontile-bar` | `/usr/bin` |
+| `irontilectl` | `/usr/bin` |
+| `start-irontile` | `/usr/bin` |
+| `assets/irontile.desktop` | `/usr/share/wayland-sessions/` |
+
+That last file is the whole of what makes irontile selectable in GDM, SDDM,
+greetd or anything else that reads the directory. Without it the binaries are
+installed and nothing offers to start them.
+
+`start-irontile` is a supervisor, not a launcher. It starts the compositor,
+waits for it, and starts it again if it died:
+
+```
+start-irontile              # same as: start-irontile -- --session
+start-irontile -- --config /tmp/other.toml
+start-irontile --path ./target/release/irontile
+```
+
+A compositor is the one process in a session nothing else can stand in for, so
+losing it means losing every window *and* the display server, which from the
+chair looks like a hang. Restarting turns that into a blink. The windows are
+still gone -- this is a restart, not a resurrection.
+
+Exiting cleanly ends the session, and so does being asked to stop: a login
+manager ending the session and `Ctrl+C` at a terminal both arrive as a signal,
+which is passed on to the compositor and then honoured rather than read as a
+crash. Anything else is a crash. Five of those inside a minute and the
+supervisor stops, because a compositor that dies during startup -- a GPU it
+cannot drive, a display it cannot modeset -- would otherwise be restarted
+forever, with the seat flickering and no way back to a terminal.
+
+Without a login manager, a TTY works the same way:
+
+```
+exec start-irontile
+```
+
+Each binary answers `--version`, which is the quickest way to tell what a
+package actually installed.
 
 ## Configuration
 
@@ -676,3 +724,13 @@ at scale one, so it only shows up on a second monitor.
 output ids for the life of the session, so a monitor that comes back is the same
 display as far as the layout engine is concerned — which is what makes the
 desktop that preferred it return to it.
+
+## Releases
+
+Versions are the workspace `version` in `Cargo.toml`, and a release is that
+version tagged `v0.1.0`. The tag is the thing packaging builds from, so it moves
+only forward and never moves once pushed.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

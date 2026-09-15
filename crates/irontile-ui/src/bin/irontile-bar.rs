@@ -26,6 +26,7 @@ OPTIONS:
     --scale N       Display scale to render for --dump. Default 1.
     --tooltip TEXT  Render a tooltip saying TEXT rather than a bar, so the
                     [tooltip] settings can be seen. Newlines are written \\n.
+    --version       Show the version and exit.
     --help          Show this message.
 ";
 
@@ -52,6 +53,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--help" | "-h" => {
                 print!("{HELP}");
+                return Ok(());
+            }
+            "--version" | "-V" => {
+                println!("irontile-bar {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--config" => config_file = Some(std::path::PathBuf::from(need(iter.next(), arg)?)),

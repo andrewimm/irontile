@@ -48,6 +48,7 @@ OPTIONS:
                         compositor already holds wayland-1.
     --config PATH       Read configuration from PATH instead of the usual place.
     --print-config      Write the default configuration to stdout and exit.
+    --version           Show the version and exit.
     --help              Show this message.
 
 With no backend named, irontile nests if WAYLAND_DISPLAY or DISPLAY is set and
@@ -82,6 +83,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         match arg.as_str() {
             "--help" | "-h" => {
                 print!("{HELP}");
+                return Ok(());
+            }
+            "--version" | "-V" => {
+                println!("irontile {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--print-config" => {

@@ -1,0 +1,16 @@
+[Desktop Entry]
+Name=irontile
+Comment=A Wayland tiling compositor
+# start-irontile rather than irontile: a login manager signals and waits on the
+# process it started, and that wants to be the supervisor, not the compositor
+# it restarts. Named without a path so the entry works from either /usr/bin or
+# /usr/local/bin; TryExec makes a login manager hide it if neither has one.
+Exec=start-irontile
+TryExec=start-irontile
+Type=Application
+Keywords=tiling;wayland;compositor;
+# DesktopNames is deliberately absent. It sets XDG_CURRENT_DESKTOP, which is
+# what xdg-desktop-portal matches against to pick a backend, and there is no
+# portal backend for irontile -- naming one would leave file pickers and screen
+# sharing with nothing to answer them. Unset, they fall back to a default
+# backend that works. Add it here on the day a portal exists.

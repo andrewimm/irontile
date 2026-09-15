@@ -19,6 +19,7 @@ SUBCOMMANDS:
     layers              Panels and overlays on screen, and what they reserve
     layout              The whole layout engine state, as JSON
     watch               Stream events until interrupted
+    version             Show the version and exit
     help                Show this message
 
 ACTIONS:
@@ -46,6 +47,11 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{HELP}");
         return Err("no action given".into());
     };
+
+    if matches!(first.as_str(), "version" | "-V" | "--version") {
+        println!("irontilectl {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     if matches!(first.as_str(), "help" | "-h" | "--help") {
         print!("{HELP}");
