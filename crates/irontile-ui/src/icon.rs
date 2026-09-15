@@ -303,12 +303,8 @@ fn rescale(pixels: &crate::module::Pixels, size: u32) -> Option<Pixmap> {
         return None;
     }
     let mut source = Pixmap::new(w, h)?;
-    for (out, chunk) in source
-        .pixels_mut()
-        .iter_mut()
-        .zip(pixels.argb.chunks_exact(4))
-    {
-        let (a, r, g, b) = (chunk[0], chunk[1], chunk[2], chunk[3]);
+    let (chunks, _) = pixels.argb.as_chunks::<4>();
+    for (out, &[a, r, g, b]) in source.pixels_mut().iter_mut().zip(chunks) {
         *out = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
     }
 

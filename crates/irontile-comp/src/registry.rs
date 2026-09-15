@@ -95,10 +95,7 @@ impl Registry {
             }) {
                 return Some((id, &entry.window));
             }
-            match get_parent(&current) {
-                Some(parent) => current = parent,
-                None => return None,
-            }
+            current = get_parent(&current)?;
         }
     }
 

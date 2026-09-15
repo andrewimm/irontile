@@ -8,17 +8,36 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Everything the build links, named rather than relied on: a runner image
+  # ships a great deal by default, and a build that depends on which of it
+  # happens to be there breaks when the image changes rather than when the code
+  # does. None of these are on the image today.
+  #
+  # libxkbcommon: keymaps.       libinput, libudev, libseat: the session backend.
+  # libdrm, libgbm: modesetting. libpulse: the bar reads the volume from it.
+  # libwayland: the test client dlopens libwayland-client to talk to the
+  # compositor under test, so it is needed to run the tests, not to build them.
+  #
+  # EGL and the GL driver are dlopened at runtime too, but nothing asks them for
+  # a context here: the integration tests use the headless backend, so no
+  # display server and no GL driver are needed to run them.
+  SYSTEM_DEPS: >-
+    libxkbcommon-dev
+    libwayland-dev
+    libinput-dev
+    libudev-dev
+    libseat-dev
+    libdrm-dev
+    libgbm-dev
+    libpulse-dev
 
 jobs:
   check:
     name: fmt, clippy, tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      # The compositor links libxkbcommon. EGL and the GL driver are dlopened
-      # at runtime, so they are not needed to build, and the integration tests
-      # use the headless backend, so no display server is needed to run them.
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y ${{ env.SYSTEM_DEPS }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -31,8 +50,8 @@ jobs:
     name: minimum supported rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y ${{ env.SYSTEM_DEPS }}
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
@@ -43,7 +62,7 @@ jobs:
     name: layout builds for wasm32
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

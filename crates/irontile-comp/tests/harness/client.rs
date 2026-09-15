@@ -941,9 +941,11 @@ impl Dispatch<XdgToplevel, usize> for State {
                 window.pending.width = width;
                 window.pending.height = height;
                 let states: Vec<xdg_toplevel::State> = states
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .filter_map(|c| {
-                        let raw = u32::from_ne_bytes([c[0], c[1], c[2], c[3]]);
+                        let raw = u32::from_ne_bytes(*c);
                         xdg_toplevel::State::try_from(raw).ok()
                     })
                     .collect();
@@ -1016,10 +1018,10 @@ impl Dispatch<WlKeyboard, ()> for State {
     ) {
         match event {
             wl_keyboard::Event::Enter { surface, .. } => state.keyboard_focus = Some(surface),
-            wl_keyboard::Event::Leave { surface, .. } => {
-                if state.keyboard_focus.as_ref() == Some(&surface) {
-                    state.keyboard_focus = None;
-                }
+            wl_keyboard::Event::Leave { surface, .. }
+                if state.keyboard_focus.as_ref() == Some(&surface) =>
+            {
+                state.keyboard_focus = None;
             }
             _ => {}
         }
@@ -1174,13 +1176,14 @@ impl Dispatch<wayland_client::protocol::wl_pointer::WlPointer, ()> for State {
             }
             Event::Leave { .. } => state.pointer = None,
             Event::Button {
-                button, state: s, ..
+                button,
+                state:
+                    wayland_client::WEnum::Value(
+                        wayland_client::protocol::wl_pointer::ButtonState::Pressed,
+                    ),
+                ..
             } => {
-                if s == wayland_client::WEnum::Value(
-                    wayland_client::protocol::wl_pointer::ButtonState::Pressed,
-                ) {
-                    state.buttons.push(button);
-                }
+                state.buttons.push(button);
             }
             _ => {}
         }
