@@ -8,8 +8,9 @@
 use std::time::Instant;
 
 use irontile_layout::{
-    Command, Direction, Event, Frame, Layout, LayoutError, Output as LayoutOutput, OutputId,
-    PlacementKind, Point as LayoutPoint, Rect, Size, WindowId, WorkspaceId, dispatch, frame,
+    Command, Direction, Event, Frame, InsertTarget, Layout, LayoutError, Output as LayoutOutput,
+    OutputId, PlacementKind, Point as LayoutPoint, Rect, Size, WindowId, WorkspaceId, dispatch,
+    frame,
 };
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::renderer::element::solid::SolidColorBuffer;
@@ -1666,12 +1667,36 @@ impl CompositorHandler for Irontile {
 
         if self.windows.is_unmapped(id) {
             if has_buffer(surface) && self.windows.mark_mapped(id) {
-                // It was already given a cell when it appeared; this is only
-                // the point at which it starts being drawn.
+                // A window that unmapped and came back was taken out of the
+                // tree and needs a cell again. One that has simply never drawn
+                // has had a cell since it appeared, and this is only the point
+                // at which it starts being drawn in.
+                if !self.windows.in_tree(id) {
+                    self.windows.set_in_tree(id, true);
+                    self.apply(Command::AddWindow {
+                        window: id,
+                        workspace: None,
+                        target: InsertTarget::default(),
+                    });
+                }
                 self.dirty = true;
             }
             return;
         }
+
+        // A null buffer is how xdg-shell says a window is no longer on screen.
+        // The toplevel lives on and may map again, so this is not a destroy --
+        // but it has nothing to draw, and a cell held by something that draws
+        // nothing is an invisible window squeezing the real ones.
+        if !has_buffer(surface) {
+            if self.windows.mark_unmapped(id) {
+                self.windows.set_in_tree(id, false);
+                self.apply(Command::RemoveWindow { window: id });
+                self.dirty = true;
+            }
+            return;
+        }
+
         // A mapped client may have committed a size of its own; re-running the
         // layout puts it back in the cell the tree assigned it.
         self.dirty = true;

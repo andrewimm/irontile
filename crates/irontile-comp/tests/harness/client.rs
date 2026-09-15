@@ -660,6 +660,19 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Unmaps a window without destroying it, by attaching a null buffer.
+    ///
+    /// xdg-shell's way of saying "this window is not on screen now": the
+    /// toplevel object stays alive and can be mapped again by attaching a
+    /// buffer. A browser does this with a window it is keeping around.
+    pub fn unmap_window(&mut self, id: WindowId) {
+        let window = &mut self.state.windows[id.0];
+        window.surface.attach(None, 0, 0);
+        window.surface.commit();
+        window.mapped = false;
+        self.roundtrip();
+    }
+
     /// Renames a window, as a browser does when you change tab.
     pub fn set_title(&mut self, id: WindowId, title: &str) {
         self.state.windows[id.0]

@@ -37,6 +37,10 @@ impl Compositor {
 
     /// Starts a compositor reading a specific configuration file.
     pub fn with_config(displays: &str, config: Option<&std::path::Path>) -> Compositor {
+        // Once, and shared with the child: two calls would now be two different
+        // directories, and the compositor would bind its sockets somewhere the
+        // test is not looking.
+        let runtime = runtime_dir();
         let mut command = Command::new(env!("CARGO_BIN_EXE_irontile"));
         command
             .arg("--headless")
@@ -44,7 +48,7 @@ impl Compositor {
             .env("RUST_LOG", "irontile=info")
             // Both the Wayland socket and the control socket live under this,
             // and a bare CI runner has none.
-            .env("XDG_RUNTIME_DIR", runtime_dir())
+            .env("XDG_RUNTIME_DIR", &runtime)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         match config {
@@ -58,7 +62,6 @@ impl Compositor {
             }
         }
 
-        let runtime = runtime_dir();
         let mut child = command.spawn().expect("failed to start irontile");
         let Startup { control, wayland } = read_startup(&mut child);
         let socket = control;
@@ -149,23 +152,71 @@ impl Compositor {
 
 impl Drop for Compositor {
     fn drop(&mut self) {
+        // Asked to quit before being killed, so the ordinary exit path runs and
+        // the sockets the compositor made are removed by the code that made
+        // them. A killed process runs no destructors, so tests that only ever
+        // killed it were routing around the cleanup they should be covering.
+        let _ = self.client.action(irontile_ipc::Action::Quit);
+        let deadline = Instant::now() + SHUTDOWN;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    self.tidy();
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+                Err(_) => break,
+            }
+        }
+        // It did not go, so it is made to. A test that wedged the compositor
+        // must not also wedge the test run.
         let _ = self.child.kill();
         let _ = self.child.wait();
+        self.tidy();
     }
 }
 
-/// A runtime directory for the compositor's sockets.
-///
-/// Uses the session's own when there is one, and otherwise makes a private one,
-/// so the tests run on a bare machine with no session at all.
-fn runtime_dir() -> std::path::PathBuf {
-    if let Some(existing) = std::env::var_os("XDG_RUNTIME_DIR") {
-        let path = std::path::PathBuf::from(existing);
-        if path.is_dir() {
-            return path;
-        }
+impl Compositor {
+    /// Removes what the compositor leaves behind.
+    ///
+    /// Its own control socket goes on the way out, but the Wayland socket is
+    /// smithay's and is left on the floor -- harmless in a session, where the
+    /// lock file beside it lets the next start reclaim the name, and so much
+    /// litter across a test run that used to bury the one socket that mattered.
+    ///
+    /// The directory goes too, but only when it is empty: tests in one process
+    /// share it, so this succeeds for whichever compositor is the last to go
+    /// and fails harmlessly for the rest.
+    fn tidy(&self) {
+        let _ = std::fs::remove_dir_all(&self.runtime);
     }
-    let path = std::env::temp_dir().join(format!("irontile-runtime-{}", std::process::id()));
+}
+
+/// How long a compositor is given to exit on its own before it is killed.
+const SHUTDOWN: Duration = Duration::from_millis(500);
+
+/// A runtime directory for one compositor's sockets.
+///
+/// Always private, never the session's. A test compositor binds a real Wayland
+/// display name, and doing that in `XDG_RUNTIME_DIR` puts throwaway compositors
+/// in the namespace the desktop's own clients resolve names from -- shared
+/// mutable state between the test suite and whatever is logged in.
+///
+/// One per compositor rather than one per test run, so each owns what it puts
+/// there and can take the whole directory with it. Tests run in parallel in one
+/// process, and a directory they shared could be removed by one of them while
+/// another was still starting inside it.
+///
+/// Kept short on purpose: a unix socket path is limited to about a hundred
+/// bytes, and a long directory here is spent before the socket is even named.
+fn runtime_dir() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "irt-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::create_dir_all(&path).expect("failed to create a runtime directory");
     #[cfg(unix)]
     {

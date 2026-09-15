@@ -47,11 +47,12 @@ impl XdgShellHandler for Irontile {
         let Some(id) = self.windows.id_of(surface.wl_surface()) else {
             return;
         };
-        let mapped = !self.windows.is_unmapped(id);
+        // Whether it is in the tree, not whether it has drawn: a window is
+        // given its cell when it appears, so one destroyed before it ever drew
+        // still has a cell for the engine to forget.
+        let placed = self.windows.in_tree(id);
         self.windows.remove(id);
-        // A window that never mapped was never in the tree, so there is nothing
-        // for the layout engine to forget.
-        if mapped {
+        if placed {
             self.apply(Command::RemoveWindow { window: id });
         }
     }

@@ -503,3 +503,65 @@ fn dragging_the_seam_between_two_windows_resizes_both() {
         "grabbing along a vertical edge should not resize vertically"
     );
 }
+
+#[test]
+fn a_window_that_unmaps_itself_gives_up_its_cell() {
+    // The bug this exists for: a window that unmapped without destroying its
+    // toplevel kept its place in the tree forever. Nothing drew there, because
+    // there was no buffer to draw, so it read as an invisible window squeezing
+    // the real ones -- which is what a browser does with a window it keeps
+    // around after you close it.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    let keeper = client.map_window("stays");
+    let ghost = client.map_window("goes away");
+    let before = compositor.wait_for_windows(2);
+    assert_eq!(before.placements.len(), 2, "both are placed to begin with");
+
+    client.unmap_window(ghost);
+
+    let after = compositor.wait_for_windows(1);
+    let left: Vec<_> = after.placements.iter().map(|p| p.window).collect();
+    assert_eq!(
+        left.len(),
+        1,
+        "the unmapped window should be gone: {left:?}"
+    );
+
+    // And the one that stayed gets the whole display back, rather than being
+    // left squeezed beside a cell nothing is drawing in.
+    let placement = &after.placements[0];
+    assert_eq!(
+        placement.rect.w,
+        1920 - 8,
+        "the survivor fills the work area"
+    );
+    // Unmapping is not destroying: the toplevel is still there, and attaching
+    // a buffer again puts it back on screen with a cell of its own.
+    client.attach_buffer(ghost);
+    let back = compositor.wait_for_windows(2);
+    assert_eq!(back.placements.len(), 2, "it maps again");
+    let _ = keeper;
+}
+
+#[test]
+fn a_window_destroyed_before_it_ever_drew_leaves_no_cell_behind() {
+    // The other half of the same confusion: a window is given its cell when it
+    // appears, so that its first paint is already the right size. It was only
+    // taken back out of the tree if it had drawn -- so a toplevel created and
+    // destroyed without ever painting left a cell with nothing to remove it.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    client.map_window("real");
+    compositor.wait_for_windows(1);
+
+    let never = client.create_toplevel_without_buffer("never draws");
+    client.close_window(never);
+
+    let after = compositor.wait_for_windows(1);
+    assert_eq!(
+        after.placements[0].rect.w,
+        1920 - 8,
+        "the window that drew should have the whole work area"
+    );
+}

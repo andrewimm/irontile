@@ -38,6 +38,15 @@ pub struct Registry {
     /// never appears as an empty bordered cell that steals focus before it has
     /// painted anything.
     unmapped: HashSet<WindowId>,
+    /// Windows the layout engine has been told about.
+    ///
+    /// Separate from `unmapped`, because the two answer different questions and
+    /// disagree in both directions: a window that has appeared but not drawn is
+    /// in the tree and unmapped, and one that unmapped itself again is neither.
+    /// Conflating them is what let a window that unmapped keep its cell, and a
+    /// window destroyed before it ever drew keep one with nothing left to
+    /// remove it.
+    in_tree: HashSet<WindowId>,
 }
 
 impl Registry {
@@ -53,12 +62,33 @@ impl Registry {
             },
         );
         self.unmapped.insert(id);
+        self.in_tree.insert(id);
         id
     }
 
     pub fn remove(&mut self, id: WindowId) -> Option<Entry> {
         self.unmapped.remove(&id);
+        self.in_tree.remove(&id);
         self.entries.remove(&id)
+    }
+
+    /// Whether the layout engine has been given this window.
+    pub fn in_tree(&self, id: WindowId) -> bool {
+        self.in_tree.contains(&id)
+    }
+
+    pub fn set_in_tree(&mut self, id: WindowId, yes: bool) {
+        if yes {
+            self.in_tree.insert(id);
+        } else {
+            self.in_tree.remove(&id);
+        }
+    }
+
+    /// Marks a window as no longer showing anything. Returns whether this was
+    /// the transition, so the caller only takes it out of the tree once.
+    pub fn mark_unmapped(&mut self, id: WindowId) -> bool {
+        self.unmapped.insert(id)
     }
 
     pub fn is_unmapped(&self, id: WindowId) -> bool {
