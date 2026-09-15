@@ -25,6 +25,10 @@ env:
   # installed, and assert that even a name nobody has still lands on a fallback.
   # A runner image happens to ship one; a container does not, and a test that
   # passes only where the image is fat is a test nobody can reproduce.
+  # The two at the end are the lock screen's: pam-sys links libpam and
+  # generates its bindings with bindgen, which loads libclang at build time.
+  # Neither the headers nor libclang.so are on a runner by default, and
+  # "clang is installed" is not the same thing as either of them.
   SYSTEM_DEPS: >-
     libxkbcommon-dev
     libwayland-dev
@@ -35,6 +39,8 @@ env:
     libdrm-dev
     libgbm-dev
     libpulse-dev
+    libpam0g-dev
+    libclang-dev
 
 jobs:
   check:

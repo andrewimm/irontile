@@ -12,7 +12,10 @@ license=('MIT')
 # are opened the same way.
 depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse' 'pam'
          'libglvnd' 'wayland')
-makedepends=('cargo')
+# clang, because pam-sys generates its bindings with bindgen at build time and
+# bindgen loads libclang. Arch ships the PAM headers in `pam` itself, which is
+# already a runtime dependency, so there is nothing else to add for the locker.
+makedepends=('cargo' 'clang')
 # check() renders text and resolves icon names, so it needs a font and an icon
 # theme to be present. Neither is a runtime dependency of the compositor -- a
 # bar with no font is the user's arrangement to make -- but a test suite that
