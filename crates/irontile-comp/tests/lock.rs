@@ -92,3 +92,21 @@ fn a_second_lock_is_refused() {
         "the session was locked twice over"
     );
 }
+
+#[test]
+fn a_lock_screen_gets_its_frame_callbacks_back() {
+    // The bug this exists for: a locker that animates -- a fade, a clock, a
+    // caps-lock indicator -- asks for a frame callback and waits for it before
+    // drawing again. Never answering does not merely stop it drawing: one that
+    // expects a callback can spin waiting, which costs a core and starves the
+    // compositor's own event loop, so input then arrives too late for anything
+    // to notice somebody came back. swaylock draws once and waits, so it never
+    // showed any of this; hyprlock did, immediately.
+    let compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    client.lock_session();
+
+    let before = client.lock_frames(0);
+    client.request_lock_frame(0);
+    client.wait_for(|client| client.lock_frames(0) > before);
+}

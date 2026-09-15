@@ -201,6 +201,16 @@ pub struct Irontile {
     /// Middle-click paste. Held for its global.
     #[allow(dead_code)]
     pub primary_selection_state: PrimarySelectionState,
+    /// Tells clients how long the seat has been idle, which is what an idle
+    /// daemon waits on before dimming, locking or suspending.
+    pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Irontile>,
+    pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Surfaces asking the session to stay awake.
+    ///
+    /// Held rather than acted on directly: an inhibitor only counts while its
+    /// surface is actually on screen, and a video paused on a desktop you are
+    /// not looking at should not keep the display lit.
+    pub idle_inhibitors: std::collections::HashSet<WlSurface>,
     /// Lets clients name a cursor instead of supplying a buffer for it. Held
     /// for its global.
     #[allow(dead_code)]
@@ -319,6 +329,14 @@ impl Irontile {
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
             primary_selection_state: PrimarySelectionState::new::<Self>(dh),
+            idle_notifier: smithay::wayland::idle_notify::IdleNotifierState::new(
+                dh,
+                loop_handle.clone(),
+            ),
+            idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Self>(
+                dh,
+            ),
+            idle_inhibitors: std::collections::HashSet::new(),
             cursor_shape_state: CursorShapeManagerState::new::<Self>(dh),
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(dh),
             session_lock_state: smithay::wayland::session_lock::SessionLockManagerState::new::<
@@ -800,6 +818,9 @@ impl Irontile {
         self.sync_borders();
         self.sync_surface_outputs();
         self.refresh_keyboard_focus();
+        // What is on screen decides which inhibitors count, so this belongs
+        // wherever that changes rather than only where one is created.
+        self.refresh_idle_inhibit();
     }
 
     /// Tells one client the cell it has been given.
@@ -1130,6 +1151,12 @@ impl Irontile {
         let Some(smithay_output) = self.smithay_output(output) else {
             return;
         };
+        // A locked session draws the lock screen and nothing else, so the lock
+        // screen is the only thing that was shown and the only thing to tell.
+        if self.session_lock.is_some() {
+            self.send_lock_frame_callbacks(Some(output), time);
+            return;
+        }
         for placement in &self.placements.placements {
             if placement.output != output {
                 continue;
@@ -1157,6 +1184,37 @@ impl Irontile {
         for layer in map.layers() {
             let out = entry.output.clone();
             layer.send_frame(&out, time, None, |_, _| Some(out.clone()));
+        }
+    }
+
+    /// Releases the frame callbacks of the lock screen.
+    ///
+    /// A locker that animates -- a fade in, a caps-lock indicator, a clock --
+    /// asks for a callback and waits for it before drawing again. Never
+    /// answering does not merely stop it drawing: a locker that expects one can
+    /// spin waiting, which costs a core and starves the compositor's own event
+    /// loop, and then input arrives too late for anything to notice somebody
+    /// came back. A locker that draws once and waits, as swaylock does, never
+    /// shows any of this, which is why it went unnoticed.
+    fn send_lock_frame_callbacks(&self, only: Option<OutputId>, time: std::time::Duration) {
+        let Some(lock) = &self.session_lock else {
+            return;
+        };
+        for (id, surface) in lock.surfaces() {
+            if only.is_some_and(|wanted| wanted != *id) {
+                continue;
+            }
+            let Some(output) = self.smithay_output(*id) else {
+                continue;
+            };
+            let out = output.clone();
+            smithay::desktop::utils::send_frames_surface_tree(
+                surface.wl_surface(),
+                &out,
+                time,
+                None,
+                |_, _| Some(out.clone()),
+            );
         }
     }
 
@@ -1206,6 +1264,10 @@ impl Irontile {
     /// what lets animating clients produce their next buffer.
     pub fn send_frame_callbacks(&self) {
         let time = self.start_time.elapsed();
+        if self.session_lock.is_some() {
+            self.send_lock_frame_callbacks(None, time);
+            return;
+        }
         for placement in &self.placements.placements {
             let (Some(window), Some(output)) = (
                 self.windows.window(placement.window),
@@ -1425,6 +1487,24 @@ impl Irontile {
                     .context("failed to create a keyboard")
             }
         }
+    }
+
+    /// Works out whether anything on screen is asking to stay awake.
+    ///
+    /// An inhibitor counts only while its surface is placed: a window on a
+    /// desktop that is not being shown is not playing anything anybody is
+    /// watching, and the protocol leaves it to the compositor to say so.
+    /// Dropped inhibitors are forgotten here rather than tracked, because a
+    /// client that dies without tidying up would otherwise hold the screen on
+    /// for the rest of the session.
+    pub fn refresh_idle_inhibit(&mut self) {
+        self.idle_inhibitors.retain(|surface| surface.alive());
+        let awake = self.idle_inhibitors.iter().any(|surface| {
+            self.windows
+                .find(surface)
+                .is_some_and(|(id, _)| self.placements.placements.iter().any(|p| p.window == id))
+        });
+        self.idle_notifier.set_is_inhibited(awake);
     }
 
     /// The topmost floating window under a point.
@@ -1764,6 +1844,26 @@ impl SeatHandler for Irontile {
 
 impl smithay::wayland::output::OutputHandler for Irontile {}
 
+impl smithay::wayland::idle_notify::IdleNotifierHandler for Irontile {
+    fn idle_notifier_state(
+        &mut self,
+    ) -> &mut smithay::wayland::idle_notify::IdleNotifierState<Irontile> {
+        &mut self.idle_notifier
+    }
+}
+
+impl smithay::wayland::idle_inhibit::IdleInhibitHandler for Irontile {
+    fn inhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitors.insert(surface);
+        self.refresh_idle_inhibit();
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitors.remove(&surface);
+        self.refresh_idle_inhibit();
+    }
+}
+
 impl SelectionHandler for Irontile {
     type SelectionUserData = ();
 }
@@ -1809,6 +1909,8 @@ impl ServerDndGrabHandler for Irontile {
 delegate_compositor!(Irontile);
 smithay::delegate_dmabuf!(Irontile);
 smithay::delegate_fractional_scale!(Irontile);
+smithay::delegate_idle_notify!(Irontile);
+smithay::delegate_idle_inhibit!(Irontile);
 smithay::delegate_viewporter!(Irontile);
 smithay::delegate_primary_selection!(Irontile);
 smithay::delegate_cursor_shape!(Irontile);

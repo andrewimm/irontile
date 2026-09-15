@@ -150,7 +150,11 @@ impl Config {
             .startup
             .exec
             .iter()
-            .map(|line| line.split_whitespace().map(str::to_owned).collect())
+            // The same splitting a `spawn` binding gets, so that quoting means
+            // the same thing in both places. Without it a startup command could
+            // not pass an argument containing a space -- which is most of how
+            // an idle daemon is configured.
+            .map(|line| irontile_ipc::split_argv(line))
             .filter(|argv: &Vec<String>| !argv.is_empty())
             .collect();
 
@@ -813,6 +817,26 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.theme.border_width, Theme::default().border_width);
         assert!(config.keymap.binds().count() > 0);
+    }
+
+    #[test]
+    fn a_startup_command_can_carry_an_argument_with_spaces_in_it() {
+        // How an idle daemon is configured: the thing to run on a timeout is
+        // one argument, and splitting on spaces would make it several.
+        let config = Config::parse(
+            r#"
+            [startup]
+            exec = ["swayidle -w timeout 240 'brightnessctl -s set 5%' resume 'brightnessctl -r' before-sleep hyprlock"]
+            "#,
+        )
+        .unwrap();
+        let argv = &config.startup[0];
+        assert_eq!(argv[0], "swayidle");
+        // The whole point: each of these reaches swayidle as one argument, not
+        // as the three or four words it is written with.
+        assert_eq!(argv[4], "brightnessctl -s set 5%");
+        assert_eq!(argv[6], "brightnessctl -r");
+        assert_eq!(argv.last().unwrap(), "hyprlock");
     }
 
     #[test]

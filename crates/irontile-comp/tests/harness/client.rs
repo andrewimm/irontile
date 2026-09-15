@@ -22,6 +22,10 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
+use wayland_protocols::ext::idle_notify::v1::client::{
+    ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+    ext_idle_notifier_v1::ExtIdleNotifierV1,
+};
 use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
@@ -30,6 +34,9 @@ use wayland_protocols::ext::session_lock::v1::client::{
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
+use wayland_protocols::wp::idle_inhibit::zv1::client::{
+    zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
 };
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
 use wayland_protocols::xdg::decoration::zv1::client::{
@@ -97,6 +104,8 @@ struct Globals {
     /// its displays in.
     outputs: Vec<wayland_client::protocol::wl_output::WlOutput>,
     session_lock: Option<ExtSessionLockManagerV1>,
+    idle_notifier: Option<ExtIdleNotifierV1>,
+    idle_inhibit: Option<ZwpIdleInhibitManagerV1>,
     screencopy: Option<ZwlrScreencopyManagerV1>,
     seat: Option<WlSeat>,
 }
@@ -109,6 +118,7 @@ struct State {
     /// ours. This is how a test sees where focus actually went.
     keyboard_focus: Option<WlSurface>,
     keymap: Option<String>,
+    idled: bool,
     /// Where the pointer is and on which of our surfaces, if any.
     pointer: Option<(WlSurface, (f64, f64))>,
     /// The session lock, while this client holds one.
@@ -154,6 +164,7 @@ struct LockPanel {
     /// other size is a protocol error, which is the compositor making sure a
     /// lock screen really covers the display it claims to.
     size: (u32, u32),
+    frames: u32,
 }
 
 /// Which panel a fractional-scale object belongs to.
@@ -201,6 +212,7 @@ impl TestClient {
                 advertised: Vec::new(),
                 keyboard_focus: None,
                 keymap: None,
+                idled: false,
                 pointer: None,
                 lock: None,
                 locks: Vec::new(),
@@ -367,6 +379,58 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Asks to be told when the seat has been idle for `after`.
+    ///
+    /// Returned so the caller can drop it: destroying the notification is how a
+    /// client stops caring, and the compositor should forget it.
+    pub fn watch_idle(&mut self, after: Duration) -> ExtIdleNotificationV1 {
+        let handle = self.queue.handle();
+        let notifier = self
+            .state
+            .globals
+            .idle_notifier
+            .clone()
+            .expect("the compositor should advertise ext-idle-notify");
+        let seat = self
+            .state
+            .globals
+            .seat
+            .clone()
+            .expect("the seat is bound at connect");
+        let notification =
+            notifier.get_idle_notification(after.as_millis() as u32, &seat, &handle, ());
+        self.roundtrip();
+        notification
+    }
+
+    /// Asks the session to stay awake while this window is on screen, as a
+    /// video player does.
+    pub fn inhibit_idle(&mut self, id: WindowId) -> ZwpIdleInhibitorV1 {
+        let handle = self.queue.handle();
+        let manager = self
+            .state
+            .globals
+            .idle_inhibit
+            .clone()
+            .expect("the compositor should advertise idle-inhibit");
+        let surface = self.state.windows[id.0].surface.clone();
+        let inhibitor = manager.create_inhibitor(&surface, &handle, ());
+        self.roundtrip();
+        inhibitor
+    }
+
+    /// Stops asking.
+    pub fn release_idle_inhibitor(&mut self, inhibitor: ZwpIdleInhibitorV1) {
+        inhibitor.destroy();
+        self.roundtrip();
+    }
+
+    /// Whether the compositor currently considers the seat idle.
+    pub fn idled(&mut self) -> bool {
+        self.roundtrip();
+        self.state.idled
+    }
+
     /// The keymap the compositor compiled and sent, as xkb text.
     pub fn keymap(&mut self) -> Option<String> {
         self.roundtrip();
@@ -438,6 +502,7 @@ impl TestClient {
                 shell,
                 configured: false,
                 size: (0, 0),
+                frames: 0,
             });
         }
         // Each has to be configured before it may attach a buffer, and the
@@ -499,6 +564,21 @@ impl TestClient {
         panel.surface.frame(&handle, id.0);
         panel.surface.commit();
         self.roundtrip();
+    }
+
+    /// Asks the compositor to say when the lock screen was shown.
+    pub fn request_lock_frame(&mut self, index: usize) {
+        let handle = self.queue.handle();
+        let lock = &mut self.state.locks[index];
+        lock.surface.frame(&handle, LockFrame(index));
+        lock.surface.commit();
+        self.roundtrip();
+    }
+
+    /// How many frame callbacks this lock screen has been given.
+    pub fn lock_frames(&mut self, index: usize) -> u32 {
+        self.roundtrip();
+        self.state.locks[index].frames
     }
 
     /// How many frame callbacks this panel has been given.
@@ -907,6 +987,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             "ext_session_lock_manager_v1" => {
                 state.globals.session_lock = Some(registry.bind(name, version.min(1), handle, ()));
             }
+            "ext_idle_notifier_v1" => {
+                state.globals.idle_notifier = Some(registry.bind(name, version.min(1), handle, ()));
+            }
+            "zwp_idle_inhibit_manager_v1" => {
+                state.globals.idle_inhibit = Some(registry.bind(name, version.min(1), handle, ()));
+            }
             _ => {}
         }
     }
@@ -1072,6 +1158,28 @@ impl Dispatch<WlKeyboard, ()> for State {
 
 delegate_noop!(State: ignore WlSeat);
 delegate_noop!(State: ignore ExtSessionLockManagerV1);
+delegate_noop!(State: ignore ExtIdleNotifierV1);
+delegate_noop!(State: ignore ZwpIdleInhibitManagerV1);
+delegate_noop!(State: ignore ZwpIdleInhibitorV1);
+
+/// Whether the compositor has reported the seat idle, and whether it has since
+/// reported it busy again.
+impl Dispatch<ExtIdleNotificationV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtIdleNotificationV1,
+        event: ext_idle_notification_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_idle_notification_v1::Event::Idled => state.idled = true,
+            ext_idle_notification_v1::Event::Resumed => state.idled = false,
+            _ => {}
+        }
+    }
+}
 delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
 
 impl Dispatch<WpFractionalScaleV1, usize> for State {
@@ -1093,6 +1201,25 @@ impl Dispatch<WpFractionalScaleV1, usize> for State {
 }
 
 /// A frame callback released on a panel.
+/// Tells a lock screen's frame callback apart from a panel's. They share an
+/// interface but not the list they are counted against.
+struct LockFrame(usize);
+
+impl Dispatch<wayland_client::protocol::wl_callback::WlCallback, LockFrame> for State {
+    fn event(
+        state: &mut Self,
+        _: &wayland_client::protocol::wl_callback::WlCallback,
+        _: wayland_client::protocol::wl_callback::Event,
+        lock: &LockFrame,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let Some(lock) = state.locks.get_mut(lock.0) {
+            lock.frames += 1;
+        }
+    }
+}
+
 impl Dispatch<wayland_client::protocol::wl_callback::WlCallback, usize> for State {
     fn event(
         state: &mut Self,

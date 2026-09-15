@@ -631,6 +631,8 @@ min_width = 180
 | `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
 | `wlr-screencopy` | Copies a display to a client. Screenshots today, screen sharing once a portal sits on top |
 | `ext-session-lock` | Locks the session: one surface per display, and nothing behind them reachable |
+| `ext-idle-notify` | How long the seat has been idle, which is what an idle daemon waits on to dim, lock or suspend |
+| `idle-inhibit` | A window asking the session to stay awake, honoured only while it is on screen |
 | `fractional-scale`, `viewporter` | A client is told the exact scale of the display it is on, so it can render at 1.5x rather than at 2x and be resampled down. The two go together: without viewporter there is no way to say how large a 1.5x buffer should appear. Layer surfaces are told too, which is what keeps a bar's text sharp |
 
 The pointer is drawn by the compositor, because on real hardware nothing else

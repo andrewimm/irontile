@@ -24,7 +24,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use action::{Action, ParseError, Reason, VERBS, parse_action};
+pub use action::{Action, ParseError, Reason, VERBS, parse_action, split_argv};
 pub use client::{Client, ClientError};
 pub use irontile_layout::{
     Axis, Command, Direction, Event, Frame, Layout, LayoutError, Output, OutputId, Placement,

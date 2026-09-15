@@ -210,7 +210,12 @@ fn parse(input: &str) -> Result<Action, ParseError> {
 /// binding runs anything with a pipeline or a substitution in it, and splitting
 /// that into five words hands `sh -c` the word `grim` and throws the rest away.
 /// Quotes group; a backslash escapes the next character.
-fn split_argv(line: &str) -> Vec<String> {
+/// Splits a command line into arguments, with quotes grouping rather than
+/// surviving.
+///
+/// Shared with the configuration file's startup commands, so that a program
+/// launched at login is written exactly the way one launched from a binding is.
+pub fn split_argv(line: &str) -> Vec<String> {
     let mut argv = Vec::new();
     let mut current = String::new();
     let mut started = false;

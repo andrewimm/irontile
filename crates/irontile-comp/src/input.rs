@@ -38,6 +38,18 @@ pub fn handle<B: InputBackend>(
     event: InputEvent<B>,
     output_size: Size<i32, Logical>,
 ) {
+    // Somebody is there. Devices appearing and disappearing are not somebody
+    // being there, and neither is the control socket moving the pointer -- that
+    // arrives further in, so a script driving the compositor cannot hold the
+    // screen awake by pretending to be a hand.
+    if !matches!(
+        event,
+        InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
+    ) {
+        let seat = state.seat.clone();
+        state.idle_notifier.notify_activity(&seat);
+    }
+
     match event {
         InputEvent::Keyboard { event } => keyboard::<B>(state, event),
         InputEvent::PointerMotionAbsolute { event } => {
