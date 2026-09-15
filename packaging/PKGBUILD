@@ -1,6 +1,6 @@
 # Maintainer: Andrew Imm <aimm22@gmail.com>
 pkgname=irontile
-pkgver=0.1.1
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="A Wayland tiling compositor with a split-container tree as its native model"
 arch=('x86_64')
@@ -18,11 +18,27 @@ makedepends=('cargo')
 optdepends=('libxcb: running nested inside another compositor'
             'libx11: running nested inside another compositor'
             'libxcursor: running nested inside another compositor')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('129985adc50a89f11cc74cf80e999f5affe2e5dfc0f6b00d3d77760878b3cbda')
+
+# Built from the checkout this file sits in, not from a downloaded release
+# tarball, which is why there is nothing to name or checksum here.
+#
+# A tarball's checksum cannot be known until its tag exists, and pushing the tag
+# is what starts the build -- so pinning one would mean committing a checksum
+# for a file that does not exist yet. Packaging the tree directly also means the
+# package is provably built from what was tagged rather than from something
+# fetched back afterwards.
+#
+# An AUR recipe is the other way round and wants the tarball: it is written
+# after a release exists, and lives in the AUR repository rather than here.
+source=()
+
+# $startdir is where makepkg was run, so this is the workspace around it.
+_workspace() {
+    cd "$startdir/.."
+}
 
 prepare() {
-    cd "$pkgname-$pkgver"
+    _workspace
     # RUSTUP_TOOLCHAIN is not boilerplate here: the repo carries a
     # rust-toolchain.toml, which outranks whichever toolchain is default and
     # would otherwise decide the build on its own.
@@ -31,20 +47,21 @@ prepare() {
 }
 
 build() {
-    cd "$pkgname-$pkgver"
+    _workspace
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo build --frozen --release --all-features
 }
 
 check() {
-    cd "$pkgname-$pkgver"
+    _workspace
     export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
     cargo test --frozen --all-features
 }
 
 package() {
-    cd "$pkgname-$pkgver"
+    _workspace
     install -Dm755 target/release/irontile "$pkgdir/usr/bin/irontile"
     install -Dm755 target/release/irontile-bar "$pkgdir/usr/bin/irontile-bar"
     install -Dm755 target/release/irontilectl "$pkgdir/usr/bin/irontilectl"
