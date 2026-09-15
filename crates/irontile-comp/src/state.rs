@@ -5,7 +5,7 @@
 //! events become layout commands, and the [`Frame`] that comes back becomes
 //! surface configures and render elements.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use irontile_layout::{
     Command, Direction, Event, Frame, InsertTarget, Layout, LayoutError, Output as LayoutOutput,
@@ -124,6 +124,13 @@ impl OutputSpec {
 /// a second it repeats after that. The same numbers clients are told to use for
 /// typing, so a held binding and a held letter feel the same.
 pub const REPEAT_DELAY_MS: i32 = 200;
+
+/// How long a frame may stand before it is drawn again regardless.
+///
+/// The redraw flag should catch everything; this is what happens when it does
+/// not. A second of staleness is a bug worth finding, not a session worth
+/// losing, and one frame a second costs nothing next to sixty.
+const RENDER_BACKSTOP: Duration = Duration::from_secs(1);
 pub const REPEAT_RATE_HZ: i32 = 25;
 
 /// A binding firing over and over while its key is held.
@@ -183,6 +190,17 @@ pub struct Irontile {
     pub running: bool,
     /// Set whenever something changed the layout; the next tick reflows.
     pub dirty: bool,
+    /// Set whenever what is on screen should be drawn again.
+    ///
+    /// Deliberately not the same flag as `dirty`. That one means the layout has
+    /// to be recomputed, and anything that reflows eagerly -- mapping a window
+    /// does -- clears it before the loop comes round, so a render gated on it
+    /// would skip the very frame that was needed and leave the last one on
+    /// screen forever. This is set by anything that changes what a frame would
+    /// look like, whether or not the layout moved.
+    pub redraw: bool,
+    /// When a frame was last put on screen, for the backstop below.
+    pub last_render: Instant,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -320,6 +338,8 @@ impl Irontile {
             socket_name,
             running: true,
             dirty: true,
+            redraw: true,
+            last_render: Instant::now(),
             compositor_state: CompositorState::new::<Self>(dh),
             xdg_shell_state: XdgShellState::new::<Self>(dh),
             layer_shell_state: WlrLayerShellState::new::<Self>(dh),
@@ -815,6 +835,9 @@ impl Irontile {
             }
         }
         self.placements = next;
+        // Everything that sets `dirty` arrives here, so this one line covers
+        // every layout change without having to find them all.
+        self.redraw = true;
         self.sync_borders();
         self.sync_surface_outputs();
         self.refresh_keyboard_focus();
@@ -1489,6 +1512,27 @@ impl Irontile {
         }
     }
 
+    /// Whether to draw a frame now, and records that one was drawn.
+    ///
+    /// The flag is the fast path and the elapsed time is the backstop: if
+    /// something changes the screen without saying so, the mistake costs a
+    /// second of staleness rather than a frame that never arrives. Cheap
+    /// insurance against exactly the bug that made this render unconditionally
+    /// in the first place.
+    pub fn should_render(&mut self) -> bool {
+        if !render_now(self.redraw, self.last_render.elapsed()) {
+            return false;
+        }
+        self.redraw = false;
+        self.last_render = Instant::now();
+        true
+    }
+
+    /// Asks for the screen to be drawn again.
+    pub fn queue_redraw(&mut self) {
+        self.redraw = true;
+    }
+
     /// Works out whether anything on screen is asking to stay awake.
     ///
     /// An inhibitor counts only while its surface is placed: a window on a
@@ -1695,6 +1739,11 @@ impl CompositorHandler for Irontile {
     fn commit(&mut self, surface: &WlSurface) {
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
         self.popups.commit(surface);
+        // Any client drawing anything -- a window, a panel, a cursor, a popup,
+        // a lock screen -- is a reason to draw. Set here rather than in each of
+        // the branches below, because a commit that changes nothing else still
+        // changes the pixels that surface contributes.
+        self.redraw = true;
 
         // A lock screen is only locked once every display is covered by a
         // surface that has actually drawn something. Confirming on the
@@ -1745,8 +1794,18 @@ impl CompositorHandler for Irontile {
         };
         window.on_commit();
 
+        // Whether the *window* has anything to show, which is not the same
+        // question as whether the surface that just committed does. `find`
+        // walks up from subsurfaces and popups, so the committed surface is
+        // frequently a child -- and a child with no buffer says nothing at all
+        // about the window it belongs to. Asking the child was enough to make a
+        // browser's window vanish on a click, because that is when it commits
+        // one.
+        let toplevel = window.toplevel().map(|t| t.wl_surface().clone());
+        let shown = toplevel.as_ref().is_some_and(has_buffer);
+
         if self.windows.is_unmapped(id) {
-            if has_buffer(surface) && self.windows.mark_mapped(id) {
+            if shown && self.windows.mark_mapped(id) {
                 // A window that unmapped and came back was taken out of the
                 // tree and needs a cell again. One that has simply never drawn
                 // has had a cell since it appeared, and this is only the point
@@ -1768,7 +1827,7 @@ impl CompositorHandler for Irontile {
         // The toplevel lives on and may map again, so this is not a destroy --
         // but it has nothing to draw, and a cell held by something that draws
         // nothing is an invisible window squeezing the real ones.
-        if !has_buffer(surface) {
+        if !shown {
             if self.windows.mark_unmapped(id) {
                 self.windows.set_in_tree(id, false);
                 self.apply(Command::RemoveWindow { window: id });
@@ -1839,6 +1898,7 @@ impl SeatHandler for Irontile {
         image: smithay::input::pointer::CursorImageStatus,
     ) {
         self.cursor_status = image;
+        self.redraw = true;
     }
 }
 
@@ -1920,6 +1980,12 @@ delegate_data_device!(Irontile);
 delegate_output!(Irontile);
 
 /// Whether a surface has committed a buffer, and so has something to show.
+/// Whether a frame is due: because something asked, or because it has been too
+/// long since the last one.
+fn render_now(asked: bool, since: Duration) -> bool {
+    asked || since >= RENDER_BACKSTOP
+}
+
 fn has_buffer(surface: &WlSurface) -> bool {
     smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
         state.buffer().is_some()
@@ -1945,4 +2011,35 @@ fn transform_of(transform: crate::config::OutputTransform) -> smithay::utils::Tr
 
 fn display_scale(output: &Output) -> f64 {
     output.current_scale().fractional_scale()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RENDER_BACKSTOP, render_now};
+    use std::time::Duration;
+
+    #[test]
+    fn a_frame_is_drawn_when_something_asked_for_one() {
+        assert!(render_now(true, Duration::ZERO));
+    }
+
+    #[test]
+    fn a_screen_standing_still_is_not_redrawn() {
+        // The whole point: sixty times a second over a static screen cost
+        // several percent of a core.
+        assert!(!render_now(false, Duration::ZERO));
+        assert!(!render_now(
+            false,
+            RENDER_BACKSTOP - Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn a_frame_nobody_asked_for_still_arrives_eventually() {
+        // The backstop. Something that changes the screen without saying so is
+        // a bug, and this is what decides whether that bug costs a second of
+        // staleness or a session that never draws again.
+        assert!(render_now(false, RENDER_BACKSTOP));
+        assert!(render_now(false, RENDER_BACKSTOP * 2));
+    }
 }

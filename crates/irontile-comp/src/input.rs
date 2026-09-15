@@ -292,6 +292,9 @@ fn pointer_motion(state: &mut Irontile, location: Point<f64, Logical>, time: u32
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
+    // The compositor draws the pointer, so moving it is a change to the screen
+    // that no client will commit for.
+    state.redraw = true;
     let serial = SERIAL_COUNTER.next_serial();
 
     if let Some(drag) = state.drag {

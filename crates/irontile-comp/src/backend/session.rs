@@ -341,13 +341,13 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         if state.dirty {
             state.reflow();
         }
-        // Unconditionally, not only when something is known to have changed.
-        // Anything that reflows eagerly -- mapping a window does -- clears the
-        // dirty flag before this runs, so gating on it loses the very redraw
-        // that was needed and leaves the last frame on screen forever. The
-        // compositor's own damage tracking makes the nothing-changed case
-        // cheap, and reports it as an empty frame so no page flip is queued.
-        render_all(state);
+        // Only when something has changed, with a backstop in case something
+        // changed without saying so. Rendering every pass regardless was the
+        // simple way to be sure nothing was ever missed, and it cost several
+        // percent of a core on a screen that was standing still.
+        if state.should_render() {
+            render_all(state);
+        }
         state.popups.cleanup();
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(%err, "failed to flush clients");

@@ -7,7 +7,7 @@
 mod harness;
 
 use harness::Compositor;
-use irontile_ipc::{Action, PlacementKind};
+use irontile_ipc::{Action, PlacementKind, Query, ResponsePayload};
 
 #[test]
 fn a_mapped_window_fills_the_work_area() {
@@ -563,5 +563,64 @@ fn a_window_destroyed_before_it_ever_drew_leaves_no_cell_behind() {
         after.placements[0].rect.w,
         1920 - 8,
         "the window that drew should have the whole work area"
+    );
+}
+
+/// Each window's cell, keyed by title, so a window that was taken out of the
+/// tree and put back somewhere else is visible rather than hidden by two cells
+/// happening to swap.
+fn cells_by_title(compositor: &mut Compositor) -> Vec<(String, irontile_ipc::Rect)> {
+    let frame = compositor.client.frame().expect("frame");
+    let windows = match compositor.client.query(Query::Windows).expect("windows") {
+        ResponsePayload::Windows(windows) => windows,
+        other => panic!("unexpected reply: {other:?}"),
+    };
+    let mut out: Vec<_> = frame
+        .placements
+        .iter()
+        .filter_map(|p| {
+            windows
+                .iter()
+                .find(|w| w.id == p.window)
+                .and_then(|w| w.title.clone())
+                .map(|title| (title, p.rect))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+#[test]
+fn a_child_surface_with_no_buffer_does_not_unmap_its_window() {
+    // The bug this exists for: a browser's window disappeared the moment it was
+    // clicked. The compositor finds the window a surface belongs to by walking
+    // up from it, so a commit arrives carrying a subsurface far more often than
+    // the window's own surface -- and asking whether *that* surface had a
+    // buffer answered a different question than the one intended. A child
+    // without a buffer says nothing about the window it hangs from.
+    //
+    // Three windows, and the middle one is the one with children: taken out of
+    // the tree and put back, a window is inserted wherever the default target
+    // says rather than where it was, and with only two windows that lands it
+    // back in the same place by luck.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    client.map_window("first");
+    let middle = client.map_window("middle");
+    client.map_window("last");
+    compositor.wait_for_windows(3);
+    let before = cells_by_title(&mut compositor);
+
+    // Several, because a click is not one commit and the first might be
+    // forgiven by luck.
+    for _ in 0..3 {
+        client.commit_empty_subsurface(middle);
+    }
+    compositor.wait_for_windows(3);
+
+    assert_eq!(
+        cells_by_title(&mut compositor),
+        before,
+        "every window should still hold the cell it had"
     );
 }

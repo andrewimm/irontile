@@ -19,6 +19,8 @@ use wayland_client::protocol::{
     wl_seat::WlSeat,
     wl_shm::{self, WlShm},
     wl_shm_pool::WlShmPool,
+    wl_subcompositor::WlSubcompositor,
+    wl_subsurface::WlSubsurface,
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
@@ -94,6 +96,7 @@ struct Window {
 #[derive(Default)]
 struct Globals {
     compositor: Option<WlCompositor>,
+    subcompositor: Option<WlSubcompositor>,
     shm: Option<WlShm>,
     wm_base: Option<XdgWmBase>,
     decoration_manager: Option<ZxdgDecorationManagerV1>,
@@ -740,6 +743,38 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Gives a window a subsurface and commits it with no buffer of its own.
+    ///
+    /// What a browser does constantly. The compositor finds the window a
+    /// surface belongs to by walking up from it, so a commit like this arrives
+    /// carrying a child rather than the window's own surface -- and a child has
+    /// no buffer until it is given one.
+    pub fn commit_empty_subsurface(&mut self, id: WindowId) -> WlSurface {
+        let handle = self.queue.handle();
+        let compositor = self
+            .state
+            .globals
+            .compositor
+            .clone()
+            .expect("checked at connect");
+        let subcompositor = self
+            .state
+            .globals
+            .subcompositor
+            .clone()
+            .expect("the compositor should advertise wl_subcompositor");
+        let parent = self.state.windows[id.0].surface.clone();
+
+        let child = compositor.create_surface(&handle, ());
+        let _sub = subcompositor.get_subsurface(&child, &parent, &handle, ());
+        // No buffer attached: this is the commit that used to be read as the
+        // whole window unmapping itself.
+        child.commit();
+        parent.commit();
+        self.roundtrip();
+        child
+    }
+
     /// Unmaps a window without destroying it, by attaching a null buffer.
     ///
     /// xdg-shell's way of saying "this window is not on screen now": the
@@ -946,6 +981,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
         match interface.as_str() {
             "wl_compositor" => {
                 state.globals.compositor = Some(registry.bind(name, version.min(6), handle, ()));
+            }
+            "wl_subcompositor" => {
+                state.globals.subcompositor = Some(registry.bind(name, version.min(1), handle, ()));
             }
             "wl_shm" => {
                 state.globals.shm = Some(registry.bind(name, version.min(1), handle, ()));
@@ -1159,6 +1197,8 @@ impl Dispatch<WlKeyboard, ()> for State {
 delegate_noop!(State: ignore WlSeat);
 delegate_noop!(State: ignore ExtSessionLockManagerV1);
 delegate_noop!(State: ignore ExtIdleNotifierV1);
+delegate_noop!(State: ignore WlSubcompositor);
+delegate_noop!(State: ignore WlSubsurface);
 delegate_noop!(State: ignore ZwpIdleInhibitManagerV1);
 delegate_noop!(State: ignore ZwpIdleInhibitorV1);
 
