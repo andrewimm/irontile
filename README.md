@@ -13,6 +13,7 @@ not a plugin on top of a floating one.
 | `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
 | `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
 | `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
+| `irontile-lock` | `irontile-lock`, the lock screen. Draws, and asks PAM. |
 | `irontile-session` | `start-irontile`, the supervisor a login manager starts. |
 | `xtask` | Task runner. |
 
@@ -128,19 +129,27 @@ exec = ["alacritty"]
 
 ## Installing a session
 
-Four binaries and one desktop entry:
+Five binaries, a desktop entry and a PAM service:
 
 | File | Where it goes |
 | --- | --- |
 | `irontile` | `/usr/bin` |
 | `irontile-bar` | `/usr/bin` |
+| `irontile-lock` | `/usr/bin` |
 | `irontilectl` | `/usr/bin` |
 | `start-irontile` | `/usr/bin` |
 | `assets/irontile.desktop` | `/usr/share/wayland-sessions/` |
+| `assets/pam/<distribution>` | `/etc/pam.d/irontile-lock` |
 
-That last file is the whole of what makes irontile selectable in GDM, SDDM,
+The desktop entry is the whole of what makes irontile selectable in GDM, SDDM,
 greetd or anything else that reads the directory. Without it the binaries are
 installed and nothing offers to start them.
+
+The PAM file decides what unlocking the screen requires, which is the
+administrator's to change rather than this program's to assume. There is one per
+distribution because the stack a graphical locker should defer to is named
+differently on each, and the packages install the right one. Without the file
+nothing authenticates -- which is the safe way round.
 
 `start-irontile` is a supervisor, not a launcher. It starts the compositor,
 waits for it, and starts it again if it died:
@@ -617,6 +626,37 @@ border_width = 1
 padding = 8
 min_width = 180
 ```
+
+## Lock screen
+
+`irontile-lock` is an ordinary `ext-session-lock` client with no privileges of
+its own: it covers every display, asks PAM about a password, and unlocks. Bind
+it, or hand it to an idle daemon.
+
+Three pieces that do not know about each other. The drawing knows nothing about
+Wayland, so `--dump PATH --size WxH --scale N` renders every state of the screen
+to a PNG -- resting, typing, checking, refused, accepted -- which is the only
+way to work on a lock screen without locking the machine and hoping. The
+authentication knows nothing about drawing, and `--verify` runs it alone from a
+terminal. The session half holds the displays and drives the other two.
+
+**PAM runs on its own thread.** It takes a couple of seconds to refuse, which is
+deliberate and is what makes guessing expensive. Asking it on the loop that
+draws would stop the clock and the keyboard for that whole time -- a lock screen
+that appears to have crashed at exactly the moment somebody is anxious about it.
+The answer comes back over a channel, and a pipe wakes the loop that is asleep
+on file descriptors.
+
+**The field shows a fixed number of pips, and never grows.** A track that grew
+with the entry would shift as it was typed and would tell anyone watching how
+long the password is. One pip brighter than the rest, walking round as keys
+land, says a key registered without saying how many have.
+
+**It draws when the compositor asks for a frame**, so a locked laptop with its
+displays asleep does no work at all: the clock stops because nobody can see it.
+A backstop redraws anyway if no frame is asked for within a couple of seconds,
+because a compositor going quiet without turning the displays off would
+otherwise stop the clock in front of somebody.
 
 ## Protocols
 

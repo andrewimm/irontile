@@ -1,0 +1,16 @@
+# PAM configuration for the irontile lock screen, as Fedora arranges it.
+#
+# Installed as /etc/pam.d/irontile-lock.
+#
+# password-auth rather than system-auth: it is the stack Fedora points
+# non-console services at, and it is what the other screen lockers on the
+# distribution use. postlogin carries pam_lastlog and the keyring, which want
+# running on a successful unlock too.
+#
+# The `account` group is not optional: irontile-lock calls pam_acct_mgmt, and a
+# service without one falls through to /etc/pam.d/other, which denies
+# everything. The symptom is the right password being rejected forever.
+auth       substack     password-auth
+auth       include      postlogin
+account    required     pam_nologin.so
+account    include      password-auth

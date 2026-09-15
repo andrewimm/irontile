@@ -6,6 +6,7 @@ members = [
     "crates/irontile-ipc",
     "crates/irontile-ui",
     "crates/irontile-session",
+    "crates/irontile-lock",
     "xtask",
 ]
 
@@ -38,6 +39,8 @@ anyhow = "1"
 toml = "0.9"
 libc = "0.2"
 signal-hook = "0.3"
+pam = "0.8"
+xkbcommon = "0.9"
 xcursor = "0.3"
 tiny-skia = "0.12"
 resvg = { version = "0.48", default-features = false }

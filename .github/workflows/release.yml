@@ -140,7 +140,11 @@ jobs:
           irontile --version
           irontile-bar --version
           irontilectl --version
+          irontile-lock --version
           start-irontile --version
+          # Without this the lock screen authenticates nobody, and the only
+          # place that would show up is a locked machine.
+          test -f /etc/pam.d/irontile-lock
 
   verify-rpm:
     name: install rpm
@@ -156,7 +160,11 @@ jobs:
           irontile --version
           irontile-bar --version
           irontilectl --version
+          irontile-lock --version
           start-irontile --version
+          # Without this the lock screen authenticates nobody, and the only
+          # place that would show up is a locked machine.
+          test -f /etc/pam.d/irontile-lock
 
   verify-arch:
     name: install arch package
@@ -173,7 +181,11 @@ jobs:
           irontile --version
           irontile-bar --version
           irontilectl --version
+          irontile-lock --version
           start-irontile --version
+          # Without this the lock screen authenticates nobody, and the only
+          # place that would show up is a locked machine.
+          test -f /etc/pam.d/irontile-lock
 
   publish:
     name: attach to the release

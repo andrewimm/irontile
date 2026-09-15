@@ -1,0 +1,16 @@
+# PAM configuration for the irontile lock screen, as Arch arranges it.
+#
+# Installed as /etc/pam.d/irontile-lock.
+#
+# Both groups, not just `auth`. The lockers this replaces ship `auth include
+# login` alone, which works for them because they only ever call
+# pam_authenticate. irontile-lock also calls pam_acct_mgmt, so that a correct
+# password on an expired or administratively locked account is still refused --
+# and a service with no `account` group falls through to /etc/pam.d/other, which
+# denies everything. The symptom is the right password being rejected forever.
+#
+# One file per distribution rather than one clever file for all of them: the
+# stack a lock screen should defer to is named differently everywhere, and
+# guessing wrong here means an account that cannot be unlocked.
+auth    include login
+account include login

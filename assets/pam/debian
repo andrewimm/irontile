@@ -1,0 +1,14 @@
+# PAM configuration for the irontile lock screen, as Debian arranges it.
+#
+# Installed as /etc/pam.d/irontile-lock.
+#
+# Debian splits the shared stacks by group, and `login` here carries pam_securetty
+# and pam_nologin, which belong to a console login rather than to unlocking a
+# session that is already running. The common stacks are what a graphical locker
+# should defer to.
+#
+# The `account` group is not optional: irontile-lock calls pam_acct_mgmt, and a
+# service without one falls through to /etc/pam.d/other, which denies
+# everything. The symptom is the right password being rejected forever.
+@include common-auth
+@include common-account

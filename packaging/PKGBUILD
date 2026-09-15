@@ -10,7 +10,7 @@ license=('MIT')
 # the compositor happens to use: mesa for gbm, libglvnd for the EGL that is
 # opened by name at runtime, wayland for the two wayland client libraries that
 # are opened the same way.
-depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse'
+depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse' 'pam'
          'libglvnd' 'wayland')
 makedepends=('cargo')
 # check() renders text and resolves icon names, so it needs a font and an icon
@@ -24,6 +24,9 @@ checkdepends=('noto-fonts' 'hicolor-icon-theme')
 # image does not -- so a build produces one package on one machine and two on
 # another. Said here instead, so what comes out is the same everywhere.
 options=(!debug)
+# An upgrade leaves an edited PAM stack in place: what the lock screen asks for
+# is the administrator's decision, and overwriting it could lock somebody out.
+backup=('etc/pam.d/irontile-lock')
 # Only the nested backend reaches for X, and that is for development rather than
 # for running a session.
 optdepends=('libxcb: running nested inside another compositor'
@@ -76,9 +79,13 @@ package() {
     install -Dm755 target/release/irontile "$pkgdir/usr/bin/irontile"
     install -Dm755 target/release/irontile-bar "$pkgdir/usr/bin/irontile-bar"
     install -Dm755 target/release/irontilectl "$pkgdir/usr/bin/irontilectl"
+    install -Dm755 target/release/irontile-lock "$pkgdir/usr/bin/irontile-lock"
     install -Dm755 target/release/start-irontile "$pkgdir/usr/bin/start-irontile"
     # What makes irontile appear in a login manager's session list.
     install -Dm644 assets/irontile.desktop \
         "$pkgdir/usr/share/wayland-sessions/irontile.desktop"
+    # Without this the lock screen authenticates nothing, which is the safe way
+    # round for a file that decides who gets back into the session.
+    install -Dm644 assets/pam/arch "$pkgdir/etc/pam.d/irontile-lock"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

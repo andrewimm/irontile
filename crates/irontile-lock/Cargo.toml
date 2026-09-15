@@ -1,0 +1,29 @@
+[package]
+name = "irontile-lock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The lock screen for irontile"
+
+# Deliberately not a dependent of irontile-ui. The bar reaches for a sound
+# server and a D-Bus connection to do its job; a lock screen should link as
+# little as it can get away with, so the few hundred lines of drawing it needs
+# are its own rather than borrowed along with everything else.
+[[bin]]
+name = "irontile-lock"
+path = "src/main.rs"
+
+[dependencies]
+pam.workspace = true
+rustix = { workspace = true, features = ["termios"] }
+tiny-skia.workspace = true
+cosmic-text.workspace = true
+chrono.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+xkbcommon.workspace = true
+
+[lints]
+workspace = true
