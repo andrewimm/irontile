@@ -107,7 +107,8 @@ jobs:
           ref: ${{ inputs.tag || github.ref_name }}
       - run: |
           pacman -Syu --noconfirm --needed rust git \
-            mesa libinput seatd systemd-libs libxkbcommon libpulse libglvnd wayland
+            mesa libinput seatd systemd-libs libxkbcommon libpulse libglvnd wayland \
+            noto-fonts hicolor-icon-theme
       - run: cargo xtask release-check "${{ inputs.tag || github.ref_name }}"
       # makepkg refuses to run as root, and every dependency is installed above,
       # so it is told not to go looking for them again.

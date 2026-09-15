@@ -13,6 +13,17 @@ license=('MIT')
 depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse'
          'libglvnd' 'wayland')
 makedepends=('cargo')
+# check() renders text and resolves icon names, so it needs a font and an icon
+# theme to be present. Neither is a runtime dependency of the compositor -- a
+# bar with no font is the user's arrangement to make -- but a test suite that
+# asserts what those look up cannot run without them, and a base image has
+# nothing at all: no fonts, and no /usr/share/icons.
+checkdepends=('noto-fonts' 'hicolor-icon-theme')
+# Whether a separate -debug package is split out is a property of whichever
+# makepkg.conf is in front of you -- Arch's default has it on, a stock container
+# image does not -- so a build produces one package on one machine and two on
+# another. Said here instead, so what comes out is the same everywhere.
+options=(!debug)
 # Only the nested backend reaches for X, and that is for development rather than
 # for running a session.
 optdepends=('libxcb: running nested inside another compositor'
