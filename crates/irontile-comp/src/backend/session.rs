@@ -216,14 +216,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         options.config_path,
         event_loop.handle(),
     );
-    state
-        .seat
-        .add_keyboard(
-            Default::default(),
-            crate::state::REPEAT_DELAY_MS,
-            crate::state::REPEAT_RATE_HZ,
-        )
-        .context("failed to create a keyboard")?;
+    state.add_keyboard()?;
     state.seat.add_pointer();
     state.backend = Backend::Session(Box::new(Session {
         session: session.clone(),

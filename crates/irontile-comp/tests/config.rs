@@ -103,3 +103,84 @@ fn a_broken_config_leaves_the_running_one_in_place() {
     assert_eq!(layout.config().params.inner_gap, 11);
     layout.validate().unwrap();
 }
+
+/// What the Caps Lock key is bound to, read out of a compiled keymap.
+///
+/// xkb writes keysyms numerically here, so this returns the text of the key's
+/// block rather than a name: 0xff1b is Escape, 0xffe5 is Caps_Lock. The whole
+/// block, because a key with nothing else set on it is written as a one-liner
+/// and one that has been remapped is not -- reading a fixed number of lines
+/// finds the *next* key's symbols in the first case.
+fn caps_binding(keymap: &str) -> String {
+    let lines: Vec<&str> = keymap.lines().collect();
+    let key = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with("key <CAPS>"))
+        .expect("every keymap binds a Caps Lock key");
+    let mut block = String::new();
+    for line in &lines[key..] {
+        block.push_str(line.trim());
+        block.push(' ');
+        if line.contains("};") {
+            break;
+        }
+    }
+    block
+}
+
+fn keymap_with(config: Option<&TempConfig>) -> String {
+    let compositor = Compositor::with_config("1920x1080", config.map(TempConfig::path));
+    let mut client = compositor.connect_client();
+    let mut keymap = None;
+    client.wait_for(|client| {
+        keymap = client.keymap();
+        keymap.is_some()
+    });
+    keymap.expect("the compositor sends every keyboard a keymap")
+}
+
+#[test]
+fn xkb_options_reach_the_keymap_clients_are_given() {
+    // The one keyboard setting a binding cannot stand in for: a binding maps a
+    // key to a compositor action, never to another key. Asserted from the
+    // client's side, because the keymap the compositor compiled is only
+    // observable as the one it hands out.
+    let config = TempConfig::new(
+        r#"
+        [input.keyboard]
+        layout = "us"
+        options = "caps:escape"
+        "#,
+    );
+    let remapped = caps_binding(&keymap_with(Some(&config)));
+    assert!(
+        remapped.contains("0xff1b"),
+        "Caps Lock should produce Escape, but the keymap says {remapped:?}"
+    );
+
+    // And the contrast, so this says the setting did it rather than that the
+    // keyboard was always like that: without the option the key is still a
+    // Caps Lock, 0xffe5.
+    let plain = caps_binding(&keymap_with(None));
+    assert!(
+        plain.contains("0xffe5"),
+        "without the option Caps Lock should be a Caps Lock, but the keymap says {plain:?}"
+    );
+}
+
+#[test]
+fn a_keymap_that_will_not_compile_falls_back_rather_than_refusing_to_start() {
+    // On real hardware a compositor that will not start over a mistyped option
+    // leaves no session to fix it from.
+    let config = TempConfig::new(
+        r#"
+        [input.keyboard]
+        layout = "definitely-not-a-layout"
+        "#,
+    );
+    let plain = caps_binding(&keymap_with(Some(&config)));
+    assert!(
+        plain.contains("0xffe5"),
+        "the default keymap should have been used, but the keymap says {plain:?}"
+    );
+}

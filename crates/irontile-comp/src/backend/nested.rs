@@ -49,14 +49,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     );
     state.backend = Backend::Nested(Box::new(graphics));
     state.advertise_dmabuf();
-    state
-        .seat
-        .add_keyboard(
-            Default::default(),
-            crate::state::REPEAT_DELAY_MS,
-            crate::state::REPEAT_RATE_HZ,
-        )
-        .context("failed to create a keyboard")?;
+    state.add_keyboard()?;
     state.seat.add_pointer();
     state.configure_outputs(&[nested_spec(window_size.to_logical(1))]);
 

@@ -189,6 +189,38 @@ pub struct InputConfig {
     /// the fingers rather than the scrollbar following them.
     pub natural_scroll: Option<bool>,
     pub touchpad: TouchpadConfig,
+    pub keyboard: KeyboardConfig,
+}
+
+/// The keymap every keyboard on the seat is given.
+///
+/// Unlike the pointer settings, this is not per device: one keymap is compiled
+/// and handed to clients, so every keyboard shares it. The names are xkb's, and
+/// an empty one means xkb's own default for that field.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KeyboardConfig {
+    /// A comma separated list of layouts, such as `us` or `us,de`.
+    pub layout: String,
+    pub variant: String,
+    pub model: String,
+    pub rules: String,
+    /// Comma separated xkb options, such as `caps:escape` to make Caps Lock
+    /// another Escape. This is the one keyboard setting a binding cannot
+    /// stand in for: a binding maps a key to an action, never to another key.
+    pub options: Option<String>,
+}
+
+impl KeyboardConfig {
+    pub fn xkb(&self) -> smithay::input::keyboard::XkbConfig<'_> {
+        smithay::input::keyboard::XkbConfig {
+            rules: &self.rules,
+            model: &self.model,
+            layout: &self.layout,
+            variant: &self.variant,
+            options: self.options.clone(),
+        }
+    }
 }
 
 /// Touchpads, kept separate from the settings above.

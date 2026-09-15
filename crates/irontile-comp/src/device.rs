@@ -137,6 +137,7 @@ mod tests {
                 tap_to_click: Some(false),
                 middle_button_emulation: Some(false),
             },
+            ..InputConfig::default()
         }
     }
 

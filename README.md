@@ -210,6 +210,16 @@ click_method = "clickfinger"
 tap_to_click = false
 middle_button_emulation = false
 
+# The keymap, which is the seat's rather than any one device's: one is compiled
+# and handed to every client. Names are xkb's, and an empty one means xkb's own
+# default. A keymap that will not compile falls back to the default rather than
+# refusing to start -- a mistyped option should not cost you the session you
+# would fix it from.
+[input.keyboard]
+layout = "us"
+options = "caps:escape"   # the one setting a binding cannot stand in for:
+                          # a binding maps a key to an action, not to another key
+
 # One per display, matched on the connector name the hardware reports. A "*"
 # entry applies to any display without one of its own.
 [[output]]

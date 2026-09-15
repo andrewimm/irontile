@@ -1375,6 +1375,35 @@ impl Irontile {
         None
     }
 
+    /// Gives the seat its keyboard, with the configured keymap.
+    ///
+    /// A keymap that will not compile falls back to the default rather than
+    /// refusing to start. A mistyped xkb option is a plausible thing to have in
+    /// a file, and on real hardware a compositor that will not start over one
+    /// leaves no session to fix it from.
+    pub fn add_keyboard(&mut self) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let keyboard = self.config.input.keyboard.clone();
+        match self
+            .seat
+            .add_keyboard(keyboard.xkb(), REPEAT_DELAY_MS, REPEAT_RATE_HZ)
+        {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                tracing::error!(
+                    %err,
+                    layout = keyboard.layout,
+                    options = keyboard.options,
+                    "the configured keymap would not compile; using the default"
+                );
+                self.seat
+                    .add_keyboard(Default::default(), REPEAT_DELAY_MS, REPEAT_RATE_HZ)
+                    .map(|_| ())
+                    .context("failed to create a keyboard")
+            }
+        }
+    }
+
     /// The topmost floating window under a point.
     ///
     /// Tiled windows are deliberately not returned: a drag would move one and

@@ -108,6 +108,7 @@ struct State {
     /// The surface the compositor last gave the keyboard to, if it is one of
     /// ours. This is how a test sees where focus actually went.
     keyboard_focus: Option<WlSurface>,
+    keymap: Option<String>,
     /// Where the pointer is and on which of our surfaces, if any.
     pointer: Option<(WlSurface, (f64, f64))>,
     /// The session lock, while this client holds one.
@@ -199,6 +200,7 @@ impl TestClient {
             state: State {
                 advertised: Vec::new(),
                 keyboard_focus: None,
+                keymap: None,
                 pointer: None,
                 lock: None,
                 locks: Vec::new(),
@@ -363,6 +365,12 @@ impl TestClient {
         panel.surface.damage(0, 0, i32::MAX, i32::MAX);
         panel.surface.commit();
         self.roundtrip();
+    }
+
+    /// The keymap the compositor compiled and sent, as xkb text.
+    pub fn keymap(&mut self) -> Option<String> {
+        self.roundtrip();
+        self.state.keymap.clone()
     }
 
     /// Where the pointer is, in surface-local coordinates, and on which
@@ -1027,6 +1035,17 @@ impl Dispatch<WlKeyboard, ()> for State {
         _: &QueueHandle<Self>,
     ) {
         match event {
+            // The compiled keymap, as every client receives it. Reading it is
+            // the only way from outside to see which keymap the compositor
+            // actually built.
+            wl_keyboard::Event::Keymap { fd, size, .. } => {
+                use std::io::Read as _;
+                let file = std::fs::File::from(fd);
+                let mut text = String::new();
+                if file.take(u64::from(size)).read_to_string(&mut text).is_ok() {
+                    state.keymap = Some(text);
+                }
+            }
             wl_keyboard::Event::Enter { surface, .. } => state.keyboard_focus = Some(surface),
             wl_keyboard::Event::Leave { surface, .. }
                 if state.keyboard_focus.as_ref() == Some(&surface) =>

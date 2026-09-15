@@ -35,14 +35,7 @@ pub fn run(outputs: Vec<OutputSpec>, options: Options) -> anyhow::Result<()> {
         options.config_path,
         event_loop.handle(),
     );
-    state
-        .seat
-        .add_keyboard(
-            Default::default(),
-            crate::state::REPEAT_DELAY_MS,
-            crate::state::REPEAT_RATE_HZ,
-        )
-        .context("failed to create a keyboard")?;
+    state.add_keyboard()?;
     state.seat.add_pointer();
     state.configure_outputs(&outputs);
     state.reflow();
