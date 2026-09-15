@@ -48,6 +48,8 @@ pub struct Scene<'a> {
     /// `None` when something else draws the pointer, which is the case whenever
     /// irontile is nested.
     pub cursor: Option<Cursor<'a>>,
+    /// Set while the session is locked. Nothing behind it is drawn.
+    pub lock: Option<&'a crate::lock::Lock>,
 }
 
 /// The pointer, ready to draw.
@@ -149,6 +151,32 @@ where
             );
         }
         None => {}
+    }
+
+    // A locked session shows its lock screen and nothing else. Not the windows,
+    // not the panels, not even a bar that reserved space -- the guarantee is
+    // that what was on screen is not on screen, and a compositor that draws it
+    // underneath is only pretending.
+    //
+    // A display with no lock surface is left as the background colour, which is
+    // what a locker that has died looks like: blank, and still locked.
+    if let Some(lock) = scene.lock {
+        if let Some(surface) = lock.surface_for(output) {
+            out.extend(
+                smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                    R,
+                    IrontileElement<R>,
+                >(
+                    renderer,
+                    surface.wl_surface(),
+                    to_physical(Rect::new(0, 0, 0, 0), scale),
+                    scale,
+                    1.0,
+                    Kind::Unspecified,
+                ),
+            );
+        }
+        return out;
     }
 
     // Overlay and top layers go above every window; background and bottom go

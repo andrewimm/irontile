@@ -194,6 +194,11 @@ pub struct Irontile {
     /// than the whole number `wl_output` is limited to. Held for its global.
     #[allow(dead_code)]
     pub fractional_scale_state: FractionalScaleManagerState,
+    pub session_lock_state: smithay::wayland::session_lock::SessionLockManagerState,
+    /// Set while the session is locked. See [`crate::lock`].
+    pub session_lock: Option<crate::lock::Lock>,
+    /// Screenshots that have been asked for and not yet taken.
+    pub screencopy: crate::screencopy::Screencopy,
     /// Required alongside fractional scale: a client rendering at 1.5x has no
     /// way to say how large the result should be without it. Held for its
     /// global.
@@ -212,7 +217,7 @@ pub struct Irontile {
     /// The most recent frame, kept so rendering and hit-testing agree with what
     /// clients were last configured for.
     /// The displays as the backend described them, before work areas.
-    arrangement: Vec<OutputSpec>,
+    pub arrangement: Vec<OutputSpec>,
     pub placements: Frame,
     pub config: Config,
     /// Where the configuration came from, so a reload reads the same file.
@@ -290,6 +295,18 @@ impl Irontile {
             primary_selection_state: PrimarySelectionState::new::<Self>(dh),
             cursor_shape_state: CursorShapeManagerState::new::<Self>(dh),
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(dh),
+            session_lock_state: smithay::wayland::session_lock::SessionLockManagerState::new::<
+                Self,
+                _,
+            >(
+                dh,
+                // Any client may lock. A compositor has no way to tell the lock
+                // screen it was configured with from anything else asking, and
+                // refusing everything would mean no lock at all.
+                |_| true,
+            ),
+            session_lock: None,
+            screencopy: crate::screencopy::Screencopy::new(dh),
             viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Self>(dh),
             popups: PopupManager::default(),
             seat,
@@ -999,6 +1016,22 @@ impl Irontile {
         if keyboard.is_grabbed() {
             return;
         }
+        // A locked session gives the keyboard to the lock screen and to nothing
+        // else. This is the whole guarantee, so it is checked before anything
+        // that could outrank it -- and it holds even when the locker has drawn
+        // nothing yet, because a keystroke reaching a window behind a
+        // half-drawn lock screen is exactly what must not happen.
+        if let Some(lock) = &self.session_lock {
+            let target = lock
+                .keyboard_target()
+                .cloned()
+                .map(crate::focus::KeyboardFocus::Lock);
+            if keyboard.current_focus() != target {
+                keyboard.set_focus(self, target, SERIAL_COUNTER.next_serial());
+            }
+            return;
+        }
+
         // A layer surface that asked for the keyboard outranks the tiling tree
         // -- that is what makes a launcher able to read what is typed into it.
         // The window underneath keeps its place and gets focus back when the
@@ -1072,6 +1105,40 @@ impl Irontile {
         }
     }
 
+    /// Which display a client's `wl_output` is, if it is one of ours.
+    pub fn output_id_of(
+        &self,
+        output: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
+    ) -> Option<OutputId> {
+        let found = smithay::output::Output::from_resource(output)?;
+        self.outputs
+            .iter()
+            .find(|entry| entry.output == found)
+            .map(|entry| entry.id)
+    }
+
+    /// A display's size in its own pixels, which is what a copy of it is
+    /// measured in.
+    pub fn output_pixels(
+        &self,
+        id: OutputId,
+    ) -> smithay::utils::Size<i32, smithay::utils::Physical> {
+        self.arrangement
+            .iter()
+            .find(|spec| spec.id == id)
+            .map(|spec| (spec.physical.w, spec.physical.h).into())
+            .unwrap_or_else(|| (0, 0).into())
+    }
+
+    /// How many of those pixels there are to a logical one.
+    pub fn output_scale(&self, id: OutputId) -> f64 {
+        self.arrangement
+            .iter()
+            .find(|spec| spec.id == id)
+            .map(|spec| spec.scale)
+            .unwrap_or(1.0)
+    }
+
     /// Logical size of a display.
     pub fn output_size(&self, id: OutputId) -> SmithaySize<i32, Logical> {
         self.layout
@@ -1108,6 +1175,22 @@ impl Irontile {
         point: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
         use smithay::wayland::shell::wlr_layer::Layer;
+
+        // A locked session has exactly one thing under the pointer: the lock
+        // screen for the display it is on. Everything else is behind it and
+        // must stay unreachable, drawn or not.
+        if let Some(lock) = &self.session_lock {
+            for spec in &self.arrangement {
+                let area = spec.logical();
+                if !area.contains(irontile_layout::Point::new(point.x as i32, point.y as i32)) {
+                    continue;
+                }
+                let surface = lock.surface_for(spec.id)?;
+                let origin = Point::<i32, Logical>::from((area.x, area.y));
+                return Some((surface.wl_surface().clone(), origin.to_f64()));
+            }
+            return None;
+        }
 
         // Panels above the windows, then the windows, then panels below them --
         // the order things are drawn in, which is the order they are under the
@@ -1371,6 +1454,27 @@ impl CompositorHandler for Irontile {
     fn commit(&mut self, surface: &WlSurface) {
         smithay::backend::renderer::utils::on_commit_buffer_handler::<Self>(surface);
         self.popups.commit(surface);
+
+        // A lock screen is only locked once every display is covered by a
+        // surface that has actually drawn something. Confirming on the
+        // configure instead would say the session is locked while a display
+        // still shows what was on it.
+        if self
+            .session_lock
+            .as_ref()
+            .is_some_and(|lock| lock.owns(surface))
+        {
+            let outputs: Vec<_> = self.arrangement.iter().map(|spec| spec.id).collect();
+            if has_buffer(surface)
+                && let Some(lock) = &mut self.session_lock
+                && lock.covers(&outputs)
+                && lock.confirm()
+            {
+                tracing::info!("the session is locked");
+            }
+            self.dirty = true;
+            return;
+        }
 
         if let Some(layer) = self.layer_for_surface(surface) {
             // A layer surface must be configured before it may attach a

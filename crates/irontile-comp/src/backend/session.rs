@@ -788,6 +788,9 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         outputs,
         layout,
         config,
+        session_lock: lock,
+        screencopy,
+        start_time,
         ..
     } = state;
     let Backend::Session(session) = backend else {
@@ -844,8 +847,41 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
                 (None, None) => None,
             }
         }),
+        lock: lock.as_ref(),
     };
     let elements = render::elements(&scene, renderer, id, scale);
+
+    // Anything waiting for a picture of this display gets one from the same
+    // element list that is about to be shown, so what is copied is what is on
+    // screen rather than an approximation of it.
+    let pixels = outputs
+        .iter()
+        .find(|entry| entry.id == id)
+        .map(|entry| {
+            entry
+                .output
+                .current_mode()
+                .map(|m| m.size)
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    crate::screencopy::serve(
+        screencopy,
+        renderer,
+        &elements,
+        crate::screencopy::Display {
+            id,
+            size: pixels,
+            scale,
+            transform: outputs
+                .iter()
+                .find(|entry| entry.id == id)
+                .map(|entry| entry.output.current_transform())
+                .unwrap_or(smithay::utils::Transform::Normal),
+            clear: config.theme.background,
+        },
+        start_time.elapsed(),
+    );
 
     match surface
         .compositor

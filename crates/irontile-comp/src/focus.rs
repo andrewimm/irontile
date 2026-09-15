@@ -25,6 +25,9 @@ pub enum KeyboardFocus {
     /// other variants, and focus is copied around on every input event.
     Popup(Box<PopupKind>),
     Layer(LayerSurface),
+    /// The lock screen, which takes the keyboard from everything else for as
+    /// long as the session is locked.
+    Lock(smithay::wayland::session_lock::LockSurface),
 }
 
 impl KeyboardFocus {
@@ -36,6 +39,7 @@ impl KeyboardFocus {
                 .expect("a managed window is always a wayland toplevel"),
             KeyboardFocus::Popup(popup) => popup.wl_surface().clone(),
             KeyboardFocus::Layer(layer) => layer.wl_surface().clone(),
+            KeyboardFocus::Lock(lock) => lock.wl_surface().clone(),
         }
     }
 }
@@ -46,6 +50,7 @@ impl IsAlive for KeyboardFocus {
             KeyboardFocus::Window(window) => window.alive(),
             KeyboardFocus::Popup(popup) => popup.alive(),
             KeyboardFocus::Layer(layer) => layer.alive(),
+            KeyboardFocus::Lock(lock) => lock.alive(),
         }
     }
 }
@@ -56,6 +61,7 @@ impl WaylandFocus for KeyboardFocus {
             KeyboardFocus::Window(window) => window.wl_surface(),
             KeyboardFocus::Popup(popup) => Some(Cow::Owned(popup.wl_surface().clone())),
             KeyboardFocus::Layer(layer) => Some(Cow::Owned(layer.wl_surface().clone())),
+            KeyboardFocus::Lock(lock) => Some(Cow::Owned(lock.wl_surface().clone())),
         }
     }
 

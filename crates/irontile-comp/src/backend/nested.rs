@@ -147,6 +147,9 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         outputs,
         layout,
         config,
+        session_lock: lock,
+        screencopy,
+        start_time,
         ..
     } = state;
     let Backend::Nested(graphics) = backend else {
@@ -166,8 +169,24 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         theme: &config.theme,
         // The compositor irontile is nested inside draws the pointer already.
         cursor: None,
+        lock: lock.as_ref(),
     };
     let elements = render::elements(&scene, renderer, NESTED_OUTPUT, scale);
+
+    // The same list that is about to be shown, so a copy is what is on screen.
+    crate::screencopy::serve(
+        screencopy,
+        renderer,
+        &elements,
+        crate::screencopy::Display {
+            id: NESTED_OUTPUT,
+            size: (size.w, size.h).into(),
+            scale,
+            transform: NESTED_TRANSFORM,
+            clear: config.theme.background,
+        },
+        start_time.elapsed(),
+    );
 
     let mut frame = renderer
         .render(&mut framebuffer, size, NESTED_TRANSFORM)

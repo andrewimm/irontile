@@ -128,7 +128,8 @@ fn parse(input: &str) -> Result<Action, ParseError> {
     // `spawn` swallows the rest of the line, so it is handled before the
     // trailing-input check that every other verb gets.
     if verb == "spawn" {
-        let argv: Vec<String> = words.map(str::to_owned).collect();
+        let rest = input.trim_start()[verb.len()..].trim_start();
+        let argv = split_argv(rest);
         if argv.is_empty() {
             return Err(fail(Reason::MissingArgument("a program to run")));
         }
@@ -190,6 +191,52 @@ fn parse(input: &str) -> Result<Action, ParseError> {
         return Err(fail(Reason::TrailingInput(rest.join(" "))));
     }
     Ok(action)
+}
+
+/// Splits a command line into arguments, honouring quotes.
+///
+/// Whitespace alone is not enough: `spawn sh -c "grim -g $(slurp)"` is how a
+/// binding runs anything with a pipeline or a substitution in it, and splitting
+/// that into five words hands `sh -c` the word `grim` and throws the rest away.
+/// Quotes group; a backslash escapes the next character.
+fn split_argv(line: &str) -> Vec<String> {
+    let mut argv = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for c in line.chars() {
+        if escaped {
+            current.push(c);
+            escaped = false;
+            continue;
+        }
+        match (c, quote) {
+            ('\\', Some('\'')) => current.push(c),
+            ('\\', _) => escaped = true,
+            ('\'' | '"', None) => {
+                quote = Some(c);
+                // An empty quoted string is still an argument.
+                started = true;
+            }
+            (c, Some(open)) if c == open => quote = None,
+            (c, None) if c.is_whitespace() => {
+                if started {
+                    argv.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (c, _) => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        argv.push(current);
+    }
+    argv
 }
 
 fn need_number_arg<'a>(
@@ -384,6 +431,47 @@ mod tests {
             parse_action("workspace x").unwrap_err().reason,
             Reason::BadNumber(_)
         ));
+    }
+
+    #[test]
+    fn a_spawn_keeps_a_quoted_argument_together() {
+        // The shape a binding takes whenever it needs a pipeline or a
+        // substitution: `sh -c` and one argument. Split on spaces alone, `sh`
+        // is handed the word `grim` and the rest is thrown away, which fails
+        // silently -- something runs, just not what was asked for.
+        let action = parse_action(r#"spawn sh -c "grim -g $(slurp)""#).unwrap();
+        assert_eq!(
+            action,
+            Action::Spawn(vec!["sh".into(), "-c".into(), "grim -g $(slurp)".into(),])
+        );
+    }
+
+    #[test]
+    fn quoting_is_only_grouping() {
+        assert_eq!(
+            parse_action("spawn foot -e htop").unwrap(),
+            Action::Spawn(vec!["foot".into(), "-e".into(), "htop".into()]),
+            "an unquoted line is unchanged"
+        );
+        assert_eq!(
+            parse_action(r#"spawn echo 'one two' three"#).unwrap(),
+            Action::Spawn(vec!["echo".into(), "one two".into(), "three".into()]),
+            "single quotes group too"
+        );
+        assert_eq!(
+            parse_action(r#"spawn echo a\ b"#).unwrap(),
+            Action::Spawn(vec!["echo".into(), "a b".into()]),
+            "and a backslash escapes the next character"
+        );
+        assert_eq!(
+            parse_action(r#"spawn echo """#).unwrap(),
+            Action::Spawn(vec!["echo".into(), String::new()]),
+            "an empty argument is still an argument"
+        );
+        assert!(
+            parse_action("spawn").is_err(),
+            "and nothing to run is still an error"
+        );
     }
 
     #[test]

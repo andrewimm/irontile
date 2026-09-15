@@ -174,6 +174,11 @@ focus_follows_move = true
 "XF86AudioMute" = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
 ```
 
+A `spawn` honours quotes, so `spawn sh -c "grim -g \"$(slurp)\""` reaches the
+shell as one argument rather than five words. Splitting on spaces alone hands
+`sh -c` the first word and throws the rest away, which fails silently: something
+runs, just not what was asked for.
+
 Key names are xkb keysyms, so anything `xkbcli` prints works, including the
 `XF86` media keys a laptop sends. A binding needs no modifier, which is what
 makes those expressible at all. Unknown settings and unparseable bindings are
@@ -275,6 +280,30 @@ surface belongs to a display outright rather than through a placement, so it was
 the one kind of surface that was never told anything: it asked what scale to
 draw at, got the focused display's answer, and on a second monitor that is the
 wrong one.
+
+**A copy of the screen is rendered rather than read back.** A screenshot is
+taken by drawing the display again into an offscreen buffer, from the same
+element list that is about to be shown, rather than reading whatever the
+hardware last scanned out. That costs a frame's work for something that happens
+when somebody presses a key, and in exchange it is one code path on every
+backend and asks nothing of the display controller. The copy is made with the
+backend's own transform, or the picture comes out upside down -- which is how
+this was found.
+
+**A locked session shows the lock screen and nothing else.** Not the windows,
+not the panels, not even a bar that reserved space. What is being kept is a
+guarantee rather than an appearance: the keyboard goes to the lock screen before
+it has drawn anything, because a keystroke reaching a window behind a half-drawn
+lock screen is exactly what must not happen, and the pointer can reach nothing
+else whether or not anything is visible. A compositor that draws a lock screen
+over a live desktop is only pretending.
+
+The session is called locked only once every display is covered by a surface
+that has actually drawn -- confirming on the configure instead would say
+"locked" while a second monitor still showed what was on it. And the lock
+outlives the client: if the locker dies without unlocking, its surfaces go with
+it and every display is painted blank, but the session stays locked. A lock
+screen that unlocks by crashing is worth less than no lock at all.
 
 **A session says where it is.** A program the compositor starts inherits its
 environment and finds the right display. A program started by something else
@@ -500,6 +529,8 @@ min_width = 180
 | `wl_data_device`, `primary-selection` | Clipboard and middle-click paste |
 | `cursor-shape` | Clients name a cursor and the compositor supplies the image, from an XCursor theme |
 | `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
+| `wlr-screencopy` | Copies a display to a client. Screenshots today, screen sharing once a portal sits on top |
+| `ext-session-lock` | Locks the session: one surface per display, and nothing behind them reachable |
 | `fractional-scale`, `viewporter` | A client is told the exact scale of the display it is on, so it can render at 1.5x rather than at 2x and be resampled down. The two go together: without viewporter there is no way to say how large a 1.5x buffer should appear. Layer surfaces are told too, which is what keeps a bar's text sharp |
 
 The pointer is drawn by the compositor, because on real hardware nothing else

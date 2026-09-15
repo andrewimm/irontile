@@ -22,6 +22,11 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, EventQueue, QueueHandle, delegate_noop};
+use wayland_protocols::ext::session_lock::v1::client::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
+    ext_session_lock_v1::{self, ExtSessionLockV1},
+};
 use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
@@ -39,6 +44,10 @@ use wayland_protocols::xdg::shell::client::{
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -87,6 +96,8 @@ struct Globals {
     /// In the order the compositor advertised them, which is the order it holds
     /// its displays in.
     outputs: Vec<wayland_client::protocol::wl_output::WlOutput>,
+    session_lock: Option<ExtSessionLockManagerV1>,
+    screencopy: Option<ZwlrScreencopyManagerV1>,
     seat: Option<WlSeat>,
 }
 
@@ -99,6 +110,15 @@ struct State {
     keyboard_focus: Option<WlSurface>,
     /// Where the pointer is and on which of our surfaces, if any.
     pointer: Option<(WlSurface, (f64, f64))>,
+    /// The session lock, while this client holds one.
+    lock: Option<ExtSessionLockV1>,
+    locks: Vec<LockPanel>,
+    /// Set once the compositor confirms the session is locked.
+    locked: bool,
+    /// Set when the compositor refuses a lock.
+    refused: bool,
+    /// The shape of buffer a screen copy was offered: width, height, stride.
+    offered: Option<(u32, u32, u32)>,
     /// Button codes pressed, in order.
     buttons: Vec<u32>,
     globals: Globals,
@@ -121,6 +141,18 @@ struct LayerPanel {
     /// Frame callbacks the compositor has released.
     frames: u32,
     mapped: bool,
+}
+
+/// One display's share of the lock screen.
+struct LockPanel {
+    surface: WlSurface,
+    #[allow(dead_code)]
+    shell: ExtSessionLockSurfaceV1,
+    configured: bool,
+    /// The size the compositor asked for. A lock surface whose buffer is any
+    /// other size is a protocol error, which is the compositor making sure a
+    /// lock screen really covers the display it claims to.
+    size: (u32, u32),
 }
 
 /// Which panel a fractional-scale object belongs to.
@@ -168,6 +200,11 @@ impl TestClient {
                 advertised: Vec::new(),
                 keyboard_focus: None,
                 pointer: None,
+                lock: None,
+                locks: Vec::new(),
+                locked: false,
+                refused: false,
+                offered: None,
                 buttons: Vec::new(),
                 globals: Globals::default(),
                 windows: Vec::new(),
@@ -345,6 +382,105 @@ impl TestClient {
     pub fn buttons(&mut self) -> Vec<u32> {
         self.roundtrip();
         self.state.buttons.clone()
+    }
+
+    /// Asks for a copy of a display and reports the buffer it is offered.
+    ///
+    /// Only the offer: filling it needs a renderer, and a headless compositor
+    /// has none.
+    pub fn ask_for_a_copy(&mut self, display: usize) -> Option<(u32, u32, u32)> {
+        let handle = self.queue.handle();
+        let manager = self.state.globals.screencopy.clone()?;
+        let output = self.state.globals.outputs.get(display)?.clone();
+        let _frame = manager.capture_output(0, &output, &handle, ());
+        self.wait_until(
+            |state| state.offered.is_some(),
+            "an offer of a buffer to copy into",
+        );
+        self.state.offered
+    }
+
+    /// Locks the session and covers every display, the way a lock screen does.
+    ///
+    /// Returns once the compositor has said the session is locked, which it
+    /// only does when every display is covered by a surface that has drawn.
+    pub fn lock_session(&mut self) {
+        let handle = self.queue.handle();
+        let manager = self
+            .state
+            .globals
+            .session_lock
+            .clone()
+            .expect("the compositor advertised no session lock");
+        let compositor = self
+            .state
+            .globals
+            .compositor
+            .clone()
+            .expect("checked at connect");
+        let lock = manager.lock(&handle, ());
+
+        let outputs = self.state.globals.outputs.clone();
+        let buffer = self.buffer();
+        for (index, output) in outputs.iter().enumerate() {
+            let surface = compositor.create_surface(&handle, ());
+            let shell = lock.get_lock_surface(&surface, output, &handle, index);
+            self.state.locks.push(LockPanel {
+                surface,
+                shell,
+                configured: false,
+                size: (0, 0),
+            });
+        }
+        // Each has to be configured before it may attach a buffer, and the
+        // compositor only calls the session locked once they all have.
+        let _ = buffer;
+        let count = outputs.len();
+        self.wait_until(
+            |state| state.locks.iter().take(count).all(|lock| lock.configured),
+            "a configure for every lock surface",
+        );
+        for index in 0..count {
+            let (w, h) = self.state.locks[index].size;
+            let covering = self.sized_buffer(w.max(1) as i32, h.max(1) as i32);
+            let panel = &self.state.locks[index];
+            panel.surface.attach(Some(&covering), 0, 0);
+            panel.surface.damage(0, 0, i32::MAX, i32::MAX);
+            panel.surface.commit();
+        }
+        self.state.lock = Some(lock);
+        self.wait_until(|state| state.locked, "the session to be locked");
+    }
+
+    /// Asks to lock a session that may already be locked.
+    ///
+    /// Returns whether the compositor allowed it. A refusal arrives as
+    /// `finished` rather than an error, so this waits for one or the other.
+    pub fn try_lock_session(&mut self) -> bool {
+        let handle = self.queue.handle();
+        let Some(manager) = self.state.globals.session_lock.clone() else {
+            return false;
+        };
+        let lock = manager.lock(&handle, ());
+        self.state.lock = Some(lock);
+        // A refusal is immediate; a success would need surfaces, which this
+        // deliberately does not provide.
+        for _ in 0..10 {
+            self.roundtrip();
+            if self.state.refused {
+                return false;
+            }
+        }
+        !self.state.refused
+    }
+
+    /// Unlocks it again.
+    pub fn unlock_session(&mut self) {
+        if let Some(lock) = self.state.lock.take() {
+            lock.unlock_and_destroy();
+        }
+        self.state.locked = false;
+        self.roundtrip();
     }
 
     /// Asks for a frame callback on a panel, the way a toolkit does before
@@ -616,6 +752,29 @@ impl TestClient {
         }
     }
 
+    /// A buffer of an exact size, for the surfaces that must match one.
+    fn sized_buffer(&mut self, width: i32, height: i32) -> WlBuffer {
+        let handle = self.queue.handle();
+        let shm = self.state.globals.shm.clone().expect("checked at connect");
+        let stride = width * 4;
+        let size = stride * height;
+        let file = rustix::fs::memfd_create(c"irontile-test", rustix::fs::MemfdFlags::CLOEXEC)
+            .expect("failed to create a buffer");
+        rustix::fs::ftruncate(&file, size as u64).expect("failed to size a buffer");
+        let pool = shm.create_pool(file.as_fd(), size, &handle, ());
+        let buffer = pool.create_buffer(
+            0,
+            width,
+            height,
+            stride,
+            wl_shm::Format::Argb8888,
+            &handle,
+            (),
+        );
+        pool.destroy();
+        buffer
+    }
+
     /// One shared buffer for every window. Nothing reads the contents; only its
     /// existence matters.
     fn buffer(&mut self) -> WlBuffer {
@@ -710,6 +869,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                     .globals
                     .outputs
                     .push(registry.bind(name, version.min(4), handle, ()));
+            }
+            "zwlr_screencopy_manager_v1" => {
+                state.globals.screencopy = Some(registry.bind(name, version.min(2), handle, ()));
+            }
+            "ext_session_lock_manager_v1" => {
+                state.globals.session_lock = Some(registry.bind(name, version.min(1), handle, ()));
             }
             _ => {}
         }
@@ -862,6 +1027,8 @@ impl Dispatch<WlKeyboard, ()> for State {
 }
 
 delegate_noop!(State: ignore WlSeat);
+delegate_noop!(State: ignore ExtSessionLockManagerV1);
+delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
 
 impl Dispatch<WpFractionalScaleV1, usize> for State {
     fn event(
@@ -908,6 +1075,73 @@ impl Dispatch<WpFractionalScaleV1, PanelScale> for State {
     ) {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             state.layers[panel.0].fractional_scale = Some(scale);
+        }
+    }
+}
+
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwlr_screencopy_frame_v1::Event::Buffer {
+            width,
+            height,
+            stride,
+            ..
+        } = event
+        {
+            state.offered = Some((width, height, stride));
+        }
+    }
+}
+
+impl Dispatch<ExtSessionLockV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtSessionLockV1,
+        event: ext_session_lock_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_session_lock_v1::Event::Locked => state.locked = true,
+            // The compositor refused; a lock screen that hears this must not
+            // pretend the session is locked.
+            ext_session_lock_v1::Event::Finished => {
+                state.locked = false;
+                state.refused = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtSessionLockSurfaceV1, usize> for State {
+    fn event(
+        state: &mut Self,
+        shell: &ExtSessionLockSurfaceV1,
+        event: ext_session_lock_surface_v1::Event,
+        index: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_session_lock_surface_v1::Event::Configure {
+            serial,
+            width,
+            height,
+        } = event
+        {
+            shell.ack_configure(serial);
+            if let Some(panel) = state.locks.get_mut(*index) {
+                panel.configured = true;
+                panel.size = (width, height);
+            }
         }
     }
 }
