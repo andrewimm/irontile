@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # The same thing by hand, for a tag that already exists: a release that failed
+  # halfway, or one cut before this workflow did. It builds the tag rather than
+  # whatever the branch has now, so a rerun produces what the tag says and not
+  # something newer that happens to be sitting on main.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and release, such as v0.1.1"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Outranks rust-toolchain.toml, which would otherwise pull in whatever stable
+  # is that day and build the release with a compiler nobody chose.
+  RUSTUP_TOOLCHAIN: 1.90.0
+  # The same set the CI workflow installs, for the same reason.
+  SYSTEM_DEPS: >-
+    libxkbcommon-dev
+    libwayland-dev
+    libinput-dev
+    libudev-dev
+    libseat-dev
+    libdrm-dev
+    libgbm-dev
+    libpulse-dev
+
+jobs:
+  # Packages are built inside the oldest distribution they are meant to install
+  # on, never on the runner. glibc is not backward compatible, so a binary built
+  # against a newer one will not start on an older system; and the tools that
+  # work out what a package depends on read the build machine's own package
+  # database, so run anywhere else they are confidently wrong rather than
+  # unavailable. Both failures produce a package that looks perfectly healthy.
+  deb:
+    name: build deb
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - run: |
+          apt-get update
+          apt-get install -y build-essential pkg-config curl ca-certificates dpkg-dev ${{ env.SYSTEM_DEPS }}
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain 1.90.0 --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      # Before anything is built, because the version a package carries comes
+      # from Cargo.toml and not from the tag that triggered this.
+      - run: cargo xtask release-check "${{ inputs.tag || github.ref_name }}"
+      - run: cargo install cargo-deb --locked
+      - run: cargo build --release --workspace --locked
+      - run: cargo deb -p irontile-comp --no-build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: target/debian/*.deb
+
+  rpm:
+    name: build rpm
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - run: |
+          dnf install -y gcc pkgconf-pkg-config curl rpm-build \
+            libxkbcommon-devel wayland-devel libinput-devel systemd-devel \
+            libseat-devel libdrm-devel mesa-libgbm-devel pulseaudio-libs-devel
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain 1.90.0 --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: cargo xtask release-check "${{ inputs.tag || github.ref_name }}"
+      - run: cargo install cargo-generate-rpm --locked
+      - run: cargo build --release --workspace --locked
+      - run: cargo generate-rpm -p crates/irontile-comp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: target/generate-rpm/*.rpm
+
+  # Installing the package is the only thing that actually tests the dependency
+  # list, and it has to happen somewhere the build never touched: the container
+  # that built it has every -dev package installed, so it satisfies everything
+  # by accident. A clean one does not.
+  verify-deb:
+    name: install deb
+    needs: deb
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+      - run: |
+          apt-get update
+          apt-get install -y ./irontile_*.deb
+          irontile --version
+          irontile-bar --version
+          irontilectl --version
+          start-irontile --version
+
+  verify-rpm:
+    name: install rpm
+    needs: rpm
+    runs-on: ubuntu-latest
+    container: fedora:41
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm
+      - run: |
+          dnf install -y ./irontile-*.rpm
+          irontile --version
+          irontile-bar --version
+          irontilectl --version
+          start-irontile --version
+
+  publish:
+    name: attach to the release
+    needs: [verify-deb, verify-rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/**/*

@@ -35,3 +35,75 @@ rustix.workspace = true
 
 [lints]
 workspace = true
+
+# Packaging. Both of these describe the same package -- every irontile binary,
+# plus the session entry that makes it selectable at login -- and both are built
+# by running the tool inside a container of the distribution being packaged for,
+# never on the developer's machine. Three things go wrong otherwise:
+#
+#   - glibc is not backward compatible. A binary built against a newer one than
+#     the target has simply will not start there.
+#   - dpkg-shlibdeps does not exist off Debian, so `$auto` below quietly
+#     contributes nothing and the package installs onto systems missing half of
+#     what it links.
+#   - rpm dependency discovery falls back to walking ldd's whole transitive
+#     closure, which names private host libraries no distribution ships.
+#
+# Each of those produces a package that looks correct and cannot run.
+
+[package.metadata.deb]
+name = "irontile"
+maintainer = "Andrew Imm <aimm22@gmail.com>"
+copyright = "2026, Andrew Imm"
+license-file = ["../../LICENSE", "0"]
+section = "x11"
+priority = "optional"
+extended-description = """
+A Wayland tiling compositor with a split-container tree as its native model, \
+rather than a plugin on top of a floating one."""
+# $auto reads ELF headers, so it finds everything the binaries link and nothing
+# they open by name at runtime. EGL and both wayland client libraries are
+# dlopened, so they are named here or they are missed.
+depends = "$auto, libegl1, libwayland-client0, libwayland-egl1"
+# Only the nested backend touches X, and that is for development rather than
+# for running a session, so these are offered rather than pulled in.
+suggests = "libxcb1, libx11-xcb1, libxcursor1"
+# Paths are relative to this manifest, which is what cargo-deb resolves against.
+# It will warn that they are not recognised as build artifacts; that is correct
+# and expected, because the workspace is built first and packaged with
+# --no-build.
+assets = [
+    ["../../target/release/irontile", "usr/bin/", "755"],
+    ["../../target/release/irontile-bar", "usr/bin/", "755"],
+    ["../../target/release/irontilectl", "usr/bin/", "755"],
+    ["../../target/release/start-irontile", "usr/bin/", "755"],
+    ["../../assets/irontile.desktop", "usr/share/wayland-sessions/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "irontile"
+summary = "A Wayland tiling compositor"
+# find-requires rather than the default: the fallback walks ldd's closure and
+# invents dependencies on whatever the build host happened to have installed.
+# Naming it means packaging outside an rpm distribution fails and says so,
+# instead of producing something unsatisfiable.
+auto-req = "find-requires"
+# Unlike cargo-deb, these resolve against the workspace root.
+assets = [
+    { source = "target/release/irontile", dest = "/usr/bin/irontile", mode = "755" },
+    { source = "target/release/irontile-bar", dest = "/usr/bin/irontile-bar", mode = "755" },
+    { source = "target/release/irontilectl", dest = "/usr/bin/irontilectl", mode = "755" },
+    { source = "target/release/start-irontile", dest = "/usr/bin/start-irontile", mode = "755" },
+    { source = "assets/irontile.desktop", dest = "/usr/share/wayland-sessions/irontile.desktop", mode = "644" },
+    # Not marked doc: rpm skips documentation when the install sets nodocs,
+    # which minimal installs and every container image do, and the licence is
+    # the one file that has to be there. cargo-generate-rpm has no %license
+    # flag of its own, so a plain file in the conventional place it is.
+    { source = "LICENSE", dest = "/usr/share/licenses/irontile/LICENSE", mode = "644" },
+]
+
+# Dlopened, so find-requires cannot see them either.
+[package.metadata.generate-rpm.requires]
+"libEGL.so.1()(64bit)" = "*"
+"libwayland-client.so.0()(64bit)" = "*"
+"libwayland-egl.so.1()(64bit)" = "*"

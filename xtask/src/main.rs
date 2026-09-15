@@ -24,6 +24,9 @@ SUBCOMMANDS:
             Exercise multi-display behaviour against a running compositor over
             its control socket, writing a log. Started by try-multihead.sh as a
             startup command, so it runs inside the session under test.
+    release-check <TAG>
+            Check that TAG names the version the workspace would actually
+            build, before a release is cut from it.
 
 OPTIONS (test):
     --skip-lints    Run only the test suite, skipping rustfmt and clippy.
@@ -57,6 +60,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "run" => cmd_run(rest),
         "test" => cmd_test(rest),
         "multihead" => multihead::run(rest),
+        "release-check" => cmd_release_check(rest),
         "help" | "-h" | "--help" => {
             print!("{HELP}");
             Ok(())
@@ -66,6 +70,58 @@ fn run(args: &[String]) -> Result<(), String> {
             Err(format!("unknown subcommand `{other}`"))
         }
     }
+}
+
+/// Checks a release tag against the version the workspace would build.
+///
+/// A package takes its version from `Cargo.toml` and never from the tag it was
+/// built at, so the two can disagree silently: a `v0.2.0` tag happily produces
+/// packages called 0.1.0, and the mistake is only visible once somebody
+/// installs one.
+fn cmd_release_check(args: &[String]) -> Result<(), String> {
+    let tag = args
+        .first()
+        .ok_or("release-check needs the tag to check, such as v0.1.0")?;
+    let version = workspace_version()?;
+    let expected = format!("v{version}");
+    if *tag != expected {
+        return Err(format!(
+            "tag {tag} would build version {version}, which is released as \
+             {expected}; set one to match the other"
+        ));
+    }
+    println!("{tag} matches the workspace version");
+    Ok(())
+}
+
+/// The `version` under `[workspace.package]`.
+///
+/// Read by hand rather than through a TOML parser, so that xtask keeps building
+/// with nothing behind it. The shape it needs is two lines of a file that lives
+/// next door and changes about once a release.
+fn workspace_version() -> Result<String, String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or("xtask is not inside a workspace")?
+        .join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[workspace.package]";
+            continue;
+        }
+        if in_package
+            && let Some(rest) = line.strip_prefix("version")
+            && let Some(value) = rest.trim_start().strip_prefix('=')
+        {
+            return Ok(value.trim().trim_matches('"').to_string());
+        }
+    }
+    Err("no version under [workspace.package]".to_string())
 }
 
 fn cmd_run(args: &[String]) -> Result<(), String> {

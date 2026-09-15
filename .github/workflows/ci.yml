@@ -54,7 +54,14 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ${{ env.SYSTEM_DEPS }}
       - uses: dtolnay/rust-toolchain@1.90.0
       - uses: Swatinem/rust-cache@v2
+      # RUSTUP_TOOLCHAIN, not the toolchain the action made default: a
+      # rust-toolchain.toml in the repo outranks `rustup default`, so without
+      # this the job installs 1.90 and then quietly compiles with whatever
+      # stable happens to be -- passing while saying nothing about the version
+      # it is named after.
       - run: cargo check --workspace --all-features
+        env:
+          RUSTUP_TOOLCHAIN: 1.90.0
 
   # The layout engine is meant to stay portable enough to become a WASM
   # component later. Building it for wasm32 keeps that honest from the start.
