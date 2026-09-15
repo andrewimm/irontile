@@ -312,6 +312,12 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         seat = %seat_name,
         "irontile is running on the session"
     );
+    // Before anything is started, so the first program launched already finds
+    // the right display -- and only from the session backend: the compositor
+    // that *is* the session is the one entitled to say where the session is.
+    if state.config.session.announce {
+        crate::environment::publish(&socket_name, state.config.session.announce_to_systemd);
+    }
     state.run_startup_commands();
 
     let signal = event_loop.get_signal();

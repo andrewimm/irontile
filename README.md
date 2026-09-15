@@ -270,10 +270,51 @@ wide as the panel is -- nothing resampled, which is what text needs. Where the
 compositor offers no viewporter there is no way to express a fraction, so the
 whole-number `preferred_buffer_scale` is used with `set_buffer_scale` instead.
 
-**A panel is told which display it is on.** A layer surface belongs to a display
-outright rather than through a placement, so it was the one kind of surface that
-was never told anything: it asked what scale to draw at, got the focused
-display's answer, and on a second monitor that is the wrong one.
+**A panel is told which display it is on, and not told it has left.** A layer
+surface belongs to a display outright rather than through a placement, so it was
+the one kind of surface that was never told anything: it asked what scale to
+draw at, got the focused display's answer, and on a second monitor that is the
+wrong one.
+
+**A session says where it is.** A program the compositor starts inherits its
+environment and finds the right display. A program started by something else
+does not: D-Bus activates a service with the environment the *bus* was given,
+and a desktop entry launched through the systemd user manager gets that
+*manager's*. Both were set by whichever session started first, and neither hears
+about a new one unless told. Untold, a launcher appears on this display and
+opens windows on another, which looks like the launcher misbehaving and is
+nothing of the sort.
+
+Only the session backend says it -- the compositor that *is* the session is the
+one entitled to say where the session is; nested and headless share somebody
+else's bus and keep quiet. `XDG_CURRENT_DESKTOP` is deliberately not announced:
+it selects a desktop portal backend, and naming one with no backend installed
+takes away the file picker rather than improving anything.
+
+```toml
+[session]
+announce = true              # tell the session bus
+announce_to_systemd = false  # and the user manager
+```
+
+The second is off by default because that manager is shared by every session
+this user has open: setting it while another session is running points that
+session's launches here too, and from the outside the two are
+indistinguishable. Turn it on when irontile is the only session, which is when
+it is the true thing to say.
+
+**A panel gets its frame callbacks back.** A toolkit asks for one and waits for
+it before drawing its next frame, so a panel that never receives one draws
+exactly once and then stops -- which reads as a client that renders badly rather
+than a compositor that never answered. irontile's own bar draws on a schedule of
+its own and never asks, so it is the one panel that would never have shown this.
+
+Saying so is only half of it. A panel between sizes has no rectangle for a
+moment, and reporting that as "you have left the display" is a thing clients
+believe: a toolkit that sizes itself as a share of its monitor then has no
+monitor to take a share of. `wofi`, whose default size is half the screen by two
+fifths of it, came up a hundred and thirty pixels wide. Going quiet for a frame
+says nothing untrue; saying the wrong thing does.
 
 **A bar reuses two buffers and never makes a third.** A buffer handed to the
 compositor belongs to the compositor until it says otherwise, so it can neither

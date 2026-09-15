@@ -118,6 +118,8 @@ struct LayerPanel {
     configures: u32,
     /// How many configures had arrived when this panel last unmapped itself.
     unmapped_at: u32,
+    /// Frame callbacks the compositor has released.
+    frames: u32,
     mapped: bool,
 }
 
@@ -297,6 +299,7 @@ impl TestClient {
             fractional_scale: None,
             configures: 0,
             unmapped_at: 0,
+            frames: 0,
             mapped: false,
         });
 
@@ -342,6 +345,22 @@ impl TestClient {
     pub fn buttons(&mut self) -> Vec<u32> {
         self.roundtrip();
         self.state.buttons.clone()
+    }
+
+    /// Asks for a frame callback on a panel, the way a toolkit does before
+    /// drawing its next frame.
+    pub fn request_frame(&mut self, id: LayerId) {
+        let handle = self.queue.handle();
+        let panel = &mut self.state.layers[id.0];
+        panel.surface.frame(&handle, id.0);
+        panel.surface.commit();
+        self.roundtrip();
+    }
+
+    /// How many frame callbacks this panel has been given.
+    pub fn frames(&mut self, id: LayerId) -> u32 {
+        self.roundtrip();
+        self.state.layers[id.0].frames
     }
 
     /// The exact scale the compositor says this panel's display is at, in
@@ -858,6 +877,22 @@ impl Dispatch<WpFractionalScaleV1, usize> for State {
             // on the next ack.
             state.windows[*index].pending.fractional_scale = Some(scale);
             state.windows[*index].current.fractional_scale = Some(scale);
+        }
+    }
+}
+
+/// A frame callback released on a panel.
+impl Dispatch<wayland_client::protocol::wl_callback::WlCallback, usize> for State {
+    fn event(
+        state: &mut Self,
+        _: &wayland_client::protocol::wl_callback::WlCallback,
+        _: wayland_client::protocol::wl_callback::Event,
+        panel: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let Some(panel) = state.layers.get_mut(*panel) {
+            panel.frames += 1;
         }
     }
 }

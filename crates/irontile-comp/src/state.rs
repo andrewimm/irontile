@@ -841,6 +841,16 @@ impl Irontile {
                         let size = map.layer_geometry(layer)?.size;
                         Some((layer.wl_surface().clone(), size))
                     })
+                    // A panel between sizes has no rectangle for a moment, and
+                    // saying so would tell it that it has left the display it
+                    // is sitting on. It has not: a layer surface belongs to the
+                    // display that owns it for as long as it is mapped, and
+                    // going quiet for a frame says nothing untrue.
+                    //
+                    // A client that hears "you have left" believes it, and a
+                    // toolkit that sizes itself as a share of its monitor then
+                    // has no monitor to take a share of.
+                    .filter(|(_, size)| size.w > 0 && size.h > 0)
                     .collect()
             };
             for (surface, size) in layers {
@@ -1041,6 +1051,25 @@ impl Irontile {
                 window.send_frame(&out, time, None, |_, _| Some(out.clone()));
             }
         }
+        self.send_panel_frame_callbacks(output, time);
+    }
+
+    /// Releases the frame callbacks of the panels on a display.
+    ///
+    /// A toolkit asks for one of these and waits for it before drawing again,
+    /// so a panel that never receives one draws exactly once and then stops --
+    /// which looks like a client that renders badly rather than a compositor
+    /// that never replied. irontile's own bar draws on its own schedule and so
+    /// never noticed; everything else does notice.
+    fn send_panel_frame_callbacks(&self, output: OutputId, time: std::time::Duration) {
+        let Some(entry) = self.outputs.iter().find(|entry| entry.id == output) else {
+            return;
+        };
+        let map = layer_map_for_output(&entry.output);
+        for layer in map.layers() {
+            let out = entry.output.clone();
+            layer.send_frame(&out, time, None, |_, _| Some(out.clone()));
+        }
     }
 
     /// Logical size of a display.
@@ -1064,6 +1093,9 @@ impl Irontile {
             };
             let output = output.clone();
             window.send_frame(&output, time, None, |_, _| Some(output.clone()));
+        }
+        for entry in &self.outputs {
+            self.send_panel_frame_callbacks(entry.id, time);
         }
     }
 

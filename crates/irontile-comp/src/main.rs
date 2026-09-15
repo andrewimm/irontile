@@ -8,6 +8,7 @@ mod action;
 mod backend;
 mod config;
 mod cursor;
+mod environment;
 mod focus;
 mod input;
 mod ipc;

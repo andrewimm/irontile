@@ -33,6 +33,8 @@ pub struct Config {
     /// that merely shows a background colour: with nothing launched, there is
     /// no way to tell those apart.
     pub startup: Vec<Vec<String>>,
+    /// What to tell the wider session about this compositor.
+    pub session: SessionConfig,
 }
 
 impl Default for Config {
@@ -48,6 +50,7 @@ impl Default for Config {
             cursor: CursorConfig::default(),
             outputs: Vec::new(),
             startup: Vec::new(),
+            session: SessionConfig::default(),
         }
     }
 }
@@ -161,6 +164,7 @@ impl Config {
             cursor: file.cursor,
             outputs,
             startup,
+            session: file.session,
         })
     }
 }
@@ -327,6 +331,7 @@ struct ConfigFile {
     /// `false` removes a binding.
     binds: BTreeMap<String, toml::Value>,
     startup: StartupConfig,
+    session: SessionConfig,
     cursor: CursorConfig,
     #[serde(rename = "output")]
     outputs: Vec<OutputFile>,
@@ -341,6 +346,7 @@ impl Default for ConfigFile {
             default_binds: true,
             binds: BTreeMap::new(),
             startup: StartupConfig::default(),
+            session: SessionConfig::default(),
             cursor: CursorConfig::default(),
             outputs: Vec::new(),
         }
@@ -410,6 +416,31 @@ impl OutputFile {
             transform,
             enabled: self.enabled,
         })
+    }
+}
+
+/// What to tell the wider session about this compositor.
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SessionConfig {
+    /// Announce the display to the D-Bus session bus, so that a program
+    /// activated rather than started by the compositor connects here.
+    pub announce: bool,
+    /// Also tell the systemd user manager.
+    ///
+    /// Off by default: that manager is shared by every session this user has
+    /// open, so setting it while another session is running points that
+    /// session's launches here too. Turn it on when irontile is the only
+    /// session, which is when it is the right thing to say.
+    pub announce_to_systemd: bool,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            announce: true,
+            announce_to_systemd: false,
+        }
     }
 }
 
@@ -799,6 +830,30 @@ mod tests {
             assert_eq!(key, "Super+q");
             assert!(message.contains(expected), "{message}");
         }
+    }
+
+    #[test]
+    fn a_session_says_where_it_is_but_not_to_the_user_manager() {
+        // The bus a compositor was started under belongs to that session. The
+        // systemd user manager does not: it is shared by every session this
+        // user has open, so writing to it while another one is running points
+        // that session's launches at this one -- which from the outside looks
+        // exactly like a launcher opening windows on the wrong screen.
+        let config = Config::parse("").unwrap();
+        assert!(config.session.announce, "a session says where it is");
+        assert!(
+            !config.session.announce_to_systemd,
+            "and by default keeps it to its own session"
+        );
+
+        let shared = Config::parse(
+            r#"
+            [session]
+            announce_to_systemd = true
+            "#,
+        )
+        .unwrap();
+        assert!(shared.session.announce_to_systemd, "and can be told to");
     }
 
     #[test]

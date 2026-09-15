@@ -355,3 +355,19 @@ fn a_panel_that_hides_itself_can_come_back() {
         assert!(shown(&mut compositor), "shown again on round {round}");
     }
 }
+
+#[test]
+fn a_panel_gets_its_frame_callbacks_back() {
+    // A toolkit asks for one of these and waits for it before drawing its next
+    // frame. A panel that never receives one draws exactly once and then stops,
+    // which looks like a client that renders badly rather than a compositor
+    // that never answered -- and irontile's own bar draws on a schedule of its
+    // own, so it is the one panel that would never have shown this.
+    let compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+    let bar = client.map_top_bar(BAR, BAR);
+
+    let before = client.frames(bar);
+    client.request_frame(bar);
+    client.wait_for(|client| client.frames(bar) > before);
+}
