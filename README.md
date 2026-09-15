@@ -3,6 +3,8 @@
 A Wayland tiling compositor with a split-container tree as its native model,
 not a plugin on top of a floating one.
 
+<img width="2256" height="1504" alt="2026-09-14_180519" src="https://github.com/user-attachments/assets/f554458f-f9a5-42f4-9deb-2d639aecdabd" />
+
 ## Workspace
 
 | Crate | What it is |
