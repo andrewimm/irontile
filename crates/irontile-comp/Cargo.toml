@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 irontile-layout.workspace = true
+rustix.workspace = true
 irontile-version.workspace = true
 irontile-ipc.workspace = true
 serde.workspace = true

@@ -1745,6 +1745,37 @@ impl Irontile {
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// What connected, taken from the socket when it arrived.
+    ///
+    /// Asked for at that moment because there is no later one: by the time a
+    /// client is reported gone the socket has gone with it, and a protocol
+    /// error that names an interface and an object id but not a program leaves
+    /// the reader guessing which of half a dozen candidates misbehaved.
+    pub who: Option<String>,
+}
+
+impl ClientState {
+    /// Names whatever is on the other end of a socket, as `swaync[1234]`.
+    ///
+    /// Best effort throughout: a client that has already exited, or one this
+    /// process may not look at, is simply unnamed rather than an error. This
+    /// only ever decorates a log line.
+    pub fn named(stream: &std::os::unix::net::UnixStream) -> ClientState {
+        // rustix rather than `UnixStream::peer_cred`, which is still unstable.
+        let who = rustix::net::sockopt::socket_peercred(stream)
+            .ok()
+            .map(|cred| {
+                let pid = cred.pid.as_raw_nonzero();
+                match std::fs::read_to_string(format!("/proc/{pid}/comm")) {
+                    Ok(comm) => format!("{}[{pid}]", comm.trim()),
+                    Err(_) => format!("pid {pid}"),
+                }
+            });
+        ClientState {
+            who,
+            ..ClientState::default()
+        }
+    }
 }
 
 impl ClientData for ClientState {
@@ -1759,11 +1790,12 @@ impl ClientData for ClientState {
     /// disconnects a client it thinks has misbehaved, and from the outside that
     /// is indistinguishable from the client simply never coming back.
     fn disconnected(&self, id: ClientId, reason: DisconnectReason) {
+        let who = self.who.as_deref().unwrap_or("unknown");
         match reason {
             DisconnectReason::ConnectionClosed => {
-                tracing::debug!(?id, "client disconnected");
+                tracing::debug!(?id, who, "client disconnected");
             }
-            other => tracing::warn!(?id, ?other, "client dropped"),
+            other => tracing::warn!(?id, who, ?other, "client dropped"),
         }
     }
 }

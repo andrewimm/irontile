@@ -140,9 +140,12 @@ pub fn insert_wayland_sources(
 ) -> anyhow::Result<()> {
     handle
         .insert_source(socket, move |stream, _, state: &mut Irontile| {
+            // Named here, while there is still a socket to ask.
+            let client = ClientState::named(&stream);
+            let stream2 = stream;
             if let Err(err) = state
                 .display_handle
-                .insert_client(stream, std::sync::Arc::new(ClientState::default()))
+                .insert_client(stream2, std::sync::Arc::new(client))
             {
                 tracing::warn!(%err, "failed to accept a client");
             }
