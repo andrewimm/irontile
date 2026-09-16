@@ -37,9 +37,10 @@ use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+    set_data_device_focus,
 };
 use smithay::wayland::selection::primary_selection::{
-    PrimarySelectionHandler, PrimarySelectionState,
+    PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
 };
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
@@ -1886,7 +1887,30 @@ impl SeatHandler for Irontile {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&Self::KeyboardFocus>) {}
+    /// Focus moved, so hand both selections to whoever has it now.
+    ///
+    /// A clipboard is only ever offered to the client the seat believes is
+    /// focused. Leaving this empty does not look like a broken clipboard from
+    /// the compositor's side -- a client can still *set* the selection, and
+    /// copying appears to work -- but the offer that carries it is sent to the
+    /// focused client and nobody was ever named, so every paste everywhere
+    /// came back with nothing.
+    ///
+    /// Done here rather than beside each of the three places focus is set:
+    /// smithay calls this for all of them, and a clipboard that depends on
+    /// remembering to say so at every call site is one that breaks again the
+    /// next time focus moves somewhere new.
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        use smithay::reexports::wayland_server::Resource as _;
+
+        let client = focused
+            .map(|focus| focus.surface())
+            .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        // The middle-click selection travels the same way and is just as
+        // invisible when it does not.
+        set_primary_focus(&self.display_handle, seat, client);
+    }
 
     /// A client asked the pointer to look like something.
     ///
