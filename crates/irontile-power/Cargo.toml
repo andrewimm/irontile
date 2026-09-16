@@ -1,0 +1,11 @@
+[package]
+name = "irontile-power"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "What the kernel says about the battery, for the parts of irontile that show it"
+
+[lints]
+workspace = true

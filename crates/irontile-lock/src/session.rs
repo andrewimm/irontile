@@ -228,6 +228,9 @@ struct State {
     panels: Vec<Panel>,
     xkb: Keyboard,
 
+    /// Last read from the kernel, so a repaint mid-keystroke does not go to
+    /// sysfs. Refreshed once a second alongside the clock.
+    battery: Option<irontile_power::Battery>,
     user: String,
     host: String,
     service: String,
@@ -291,6 +294,7 @@ pub fn run(service: &str, user: &str, ready: Option<OwnedFd>) -> Result<(), Stri
         checking: false,
         finished: false,
         unlocked: false,
+        battery: irontile_power::battery(),
         clock: String::new(),
         text: Text::new(&["Anonymous Pro".to_string()]),
         palette: Palette::default(),
@@ -434,14 +438,25 @@ impl State {
             host: self.host.clone(),
             status: self.status.clone(),
             caps: self.xkb.caps(),
+            battery: self.battery,
         }
     }
 
-    /// Repaints when the clock has moved on.
+    /// Repaints when the clock has moved on, or the battery has.
     fn tick(&mut self) {
         let now = chrono::Local::now().format("%H:%M:%S").to_string();
         if self.clock != now {
             self.clock = now;
+            self.dirty = true;
+        }
+        // Read on the same beat as the clock. Two small files a second is
+        // nothing beside the repaint that is already happening for the
+        // seconds, and it means plugging in while the screen is locked shows
+        // up straight away -- which is most of the reason for showing this at
+        // all.
+        let battery = irontile_power::battery();
+        if self.battery != battery {
+            self.battery = battery;
             self.dirty = true;
         }
     }

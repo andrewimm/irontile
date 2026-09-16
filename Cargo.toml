@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/irontile-layout",
+    "crates/irontile-power",
     "crates/irontile-comp",
     "crates/irontile-ipc",
     "crates/irontile-ui",
@@ -20,6 +21,7 @@ repository = "https://github.com/andrewimm/irontile"
 [workspace.dependencies]
 irontile-layout = { path = "crates/irontile-layout", version = "0.2.0" }
 irontile-ipc = { path = "crates/irontile-ipc", version = "0.2.0" }
+irontile-power = { path = "crates/irontile-power", version = "0.2.0" }
 libpulse-binding = "2.30"
 zbus = "5"
 serde = { version = "1", features = ["derive"] }

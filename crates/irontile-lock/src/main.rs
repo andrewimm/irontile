@@ -155,6 +155,10 @@ fn render_to_png(
     let palette = Palette::default();
     let now = chrono::Local::now();
     let host = hostname();
+    // The real one, like the clock and the hostname above it: this renders
+    // what a display would show, and a made-up battery would make the one
+    // picture anybody checks the design against a picture of nothing real.
+    let battery = irontile_power::battery();
 
     let states_drawn = states.len();
     for (index, status) in states.into_iter().enumerate() {
@@ -167,6 +171,7 @@ fn render_to_png(
             host: host.clone(),
             caps: matches!(status, Status::Denied(_)),
             status,
+            battery,
         };
         paint::draw(&mut tile.as_mut(), &screen, &mut text, &palette, scale);
         sheet.draw_pixmap(

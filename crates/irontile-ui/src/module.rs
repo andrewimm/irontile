@@ -641,11 +641,11 @@ fn finish(config: &ModuleConfig, mut segment: Segment) -> Segment {
 }
 
 /// What a battery reports.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Battery {
-    pub percent: f64,
-    pub charging: bool,
-}
+///
+/// Shared with the lock screen, which draws the same two numbers in a corner
+/// while this draws them in a module, and re-exported here so a module still
+/// reads as though the type were its own.
+pub use irontile_power::Battery;
 
 /// What the machine is connected by.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -6,6 +6,7 @@
 //! while it is doing its job.
 
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
+use irontile_power::Battery;
 use tiny_skia::{Color, LinearGradient, Paint, PixmapMut, Point, Rect, SpreadMode, Transform};
 
 /// How far the entry has got, and what to say about it.
@@ -34,6 +35,9 @@ pub struct Screen {
     pub host: String,
     pub status: Status,
     pub caps: bool,
+    /// What the battery is doing, or `None` on a machine without one, which
+    /// draws nothing rather than a zero.
+    pub battery: Option<Battery>,
 }
 
 /// Colours, named for what they are rather than where they are used.
@@ -201,6 +205,130 @@ fn box_at(pixmap: &mut PixmapMut<'_>, x: f32, y: f32, w: f32, h: f32, paint: &Pa
     }
 }
 
+/// How wide the battery glyph is, including its terminal, in logical pixels.
+const BATTERY_W: f32 = 17.5;
+/// How tall its body is. Chosen against the 11px corner text: a shade shorter
+/// than the letters beside it, so it sits in the line rather than on it.
+const BATTERY_H: f32 = 8.0;
+/// Below this, unplugged, the number is the point rather than the decoration.
+const BATTERY_LOW: f64 = 15.0;
+
+/// Draws the battery glyph with its top left at `x`, `y`, sized in real pixels.
+///
+/// Drawn from rectangles rather than set in a font. Every glyph on this screen
+/// comes from whatever the machine happens to have installed, and a battery is
+/// exactly the character a bare machine turns out not to have -- the lock
+/// screen is the last place to find that out. Rectangles are always there.
+fn battery_at(
+    pixmap: &mut PixmapMut<'_>,
+    x: f32,
+    y: f32,
+    scale: f32,
+    state: &Battery,
+    palette: &Palette,
+) {
+    let px = |logical: f32| logical * scale;
+    // Snapped to whole pixels, all of it. The case is a single pixel thick,
+    // and a single pixel laid down at half past a pixel is drawn as two grey
+    // ones -- a soft grey box beside type that is pin sharp, which looks like
+    // a mistake even to somebody who could not say what was wrong with it.
+    let x = x.round();
+    let y = y.round();
+    let body_w = px(16.0).round();
+    let body_h = px(BATTERY_H).round();
+    let edge = px(1.0).round().max(1.0);
+
+    let shell = if state.charging {
+        palette.warm_near
+    } else if state.percent <= BATTERY_LOW {
+        palette.bad
+    } else {
+        palette.dim
+    };
+    let paint = solid(shell);
+
+    // The case, as four strips rather than a stroked path: at this size a
+    // stroke lands on half pixels and comes out a different weight on each
+    // side, which reads as a wonky box next to type that is pin sharp.
+    box_at(pixmap, x, y, body_w, edge, &paint);
+    box_at(pixmap, x, y + body_h - edge, body_w, edge, &paint);
+    box_at(pixmap, x, y, edge, body_h, &paint);
+    box_at(pixmap, x + body_w - edge, y, edge, body_h, &paint);
+
+    // The terminal on the positive end, which is what makes a rounded oblong
+    // read as a battery and not as a progress bar.
+    let nub_h = px(3.5).round();
+    box_at(
+        pixmap,
+        x + body_w,
+        y + ((body_h - nub_h) / 2.0).round(),
+        px(BATTERY_W - 16.0).round().max(1.0),
+        nub_h,
+        &paint,
+    );
+
+    // The charge inside, inset by the case and a gap so the two never touch.
+    let inset = edge * 2.0;
+    let room = body_w - inset * 2.0;
+    let level = (state.percent.clamp(0.0, 100.0) / 100.0) as f32;
+    // On the charger the case fills regardless of level: the bolt has to sit
+    // on something, and the number beside it says how full it is anyway.
+    let filled = if state.charging { room } else { room * level };
+    // Anything left at all shows as a sliver rather than rounding away to an
+    // empty case: "nearly flat" and "flat" are different enough to be worth a
+    // pixel, and the case is drawn either way so nothing is lost by it.
+    let filled = if filled > 0.0 {
+        filled.round().max(1.0)
+    } else {
+        0.0
+    };
+    box_at(
+        pixmap,
+        x + inset,
+        y + inset,
+        filled,
+        body_h - inset * 2.0,
+        &paint,
+    );
+
+    if state.charging {
+        bolt(pixmap, x, y, body_w, body_h, palette.ground);
+    }
+}
+
+/// Cuts a lightning bolt out of a filled battery, in the ground colour.
+///
+/// Drawn as a hole rather than a mark so it reads at eleven pixels: a bolt
+/// drawn *on* the case competes with the case, while a bolt taken out of it
+/// has the whole fill behind it.
+fn bolt(pixmap: &mut PixmapMut<'_>, x: f32, y: f32, w: f32, h: f32, colour: Color) {
+    // Proportions of the body, so the shape holds at any scale.
+    let at = |fx: f32, fy: f32| Point::from_xy(x + w * fx, y + h * fy);
+    let points = [
+        at(0.58, 0.12),
+        at(0.34, 0.56),
+        at(0.47, 0.56),
+        at(0.40, 0.88),
+        at(0.66, 0.42),
+        at(0.52, 0.42),
+    ];
+    let mut path = tiny_skia::PathBuilder::new();
+    path.move_to(points[0].x, points[0].y);
+    for point in &points[1..] {
+        path.line_to(point.x, point.y);
+    }
+    path.close();
+    if let Some(path) = path.finish() {
+        pixmap.fill_path(
+            &path,
+            &solid(colour),
+            tiny_skia::FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
 fn circle(pixmap: &mut PixmapMut<'_>, cx: f32, cy: f32, r: f32, paint: &Paint<'_>) {
     let mut path = tiny_skia::PathBuilder::new();
     path.push_circle(cx, cy, r);
@@ -240,6 +368,47 @@ pub fn draw(
     let who = format!("{}@{}", screen.user, screen.host);
     let who_w = text.width(&who, meta);
     text.draw(pixmap, &who, meta, w - gutter - who_w, gutter, palette.dim);
+
+    // The battery under it, sharing that right edge. This corner is where the
+    // screen says what machine it is; how much of it is left belongs with
+    // that, and it is the one thing on here that cannot be found out any
+    // other way -- the bar that would otherwise say it is behind this.
+    if let Some(state) = &screen.battery {
+        let reading = format!("{}%", state.percent.round());
+        let reading_w = text.width(&reading, meta);
+        let gap = px(5.0);
+        let group_w = px(BATTERY_W) + gap + reading_w;
+        let group_x = w - gutter - group_w;
+        // Far enough below the name to be its own line, close enough to read
+        // as the same corner.
+        let row_y = gutter + px(19.0);
+        // Text sits in a box a quarter taller than the type; the glyph is
+        // centred on that box rather than on the text's own top edge.
+        let middle = row_y + meta * 1.25 / 2.0;
+        battery_at(
+            pixmap,
+            group_x,
+            middle - px(BATTERY_H) / 2.0,
+            scale,
+            state,
+            palette,
+        );
+        let ink = if state.charging {
+            palette.warm_near
+        } else if state.percent <= BATTERY_LOW {
+            palette.bad
+        } else {
+            palette.dim
+        };
+        text.draw(
+            pixmap,
+            &reading,
+            meta,
+            group_x + px(BATTERY_W) + gap,
+            row_y,
+            ink,
+        );
+    }
 
     // The clock, which is the only thing on here anybody looks at on purpose.
     let clock_size = px(96.0);
@@ -452,5 +621,126 @@ mod font_tests {
             "asked for {family}, which is monospaced, and got i={narrow} \
              m={wide} -- something else was substituted without saying so"
         );
+    }
+}
+
+#[cfg(test)]
+mod battery_tests {
+    use super::{Battery, Palette, Screen, Status, Text, draw};
+    use irontile_power::Battery as Power;
+
+    /// Renders the corner and hands back its pixels.
+    ///
+    /// Everything asserted below is drawn from rectangles, so these say the
+    /// same thing on a machine with a full set of fonts and on one with none
+    /// at all -- which is the state a build container is in.
+    fn corner(battery: Option<Power>) -> Vec<[u8; 4]> {
+        let mut pixmap = tiny_skia::Pixmap::new(600, 200).expect("a pixmap that size");
+        let screen = Screen {
+            time: "17:30".to_string(),
+            seconds: ":46".to_string(),
+            date: "tuesday, 15 september".to_string(),
+            user: "andrew".to_string(),
+            host: "enlil".to_string(),
+            status: Status::Typing(0),
+            caps: false,
+            battery,
+        };
+        let mut text = Text::new(&[]);
+        draw(
+            &mut pixmap.as_mut(),
+            &screen,
+            &mut text,
+            &Palette::default(),
+            1.0,
+        );
+        let mut out = Vec::new();
+        for y in 0..70 {
+            for x in 400..600 {
+                let p = pixmap.pixel(x, y).expect("inside the pixmap");
+                out.push([p.red(), p.green(), p.blue(), p.alpha()]);
+            }
+        }
+        out
+    }
+
+    fn holds(pixels: &[[u8; 4]], colour: tiny_skia::Color) -> bool {
+        let want = [
+            (colour.red() * 255.0).round() as u8,
+            (colour.green() * 255.0).round() as u8,
+            (colour.blue() * 255.0).round() as u8,
+        ];
+        pixels
+            .iter()
+            .any(|p| p[0] == want[0] && p[1] == want[1] && p[2] == want[2])
+    }
+
+    #[test]
+    fn a_machine_without_a_battery_is_not_a_machine_at_nought_percent() {
+        let none = corner(None);
+        let some = corner(Some(Power {
+            percent: 45.0,
+            charging: false,
+        }));
+        assert_ne!(
+            none, some,
+            "a desktop should draw no battery at all, not an empty one"
+        );
+    }
+
+    #[test]
+    fn a_battery_running_out_is_drawn_in_the_colour_of_a_warning() {
+        let palette = Palette::default();
+        let low = corner(Some(Power {
+            percent: 8.0,
+            charging: false,
+        }));
+        let fine = corner(Some(Power {
+            percent: 80.0,
+            charging: false,
+        }));
+        assert!(
+            holds(&low, palette.bad),
+            "a battery this low is the one thing in that corner worth looking at"
+        );
+        assert!(
+            !holds(&fine, palette.bad),
+            "and a battery that is fine should not be shouting"
+        );
+    }
+
+    #[test]
+    fn the_charger_shows_in_the_glyph_and_not_only_in_the_number() {
+        let charging = corner(Some(Power {
+            percent: 45.0,
+            charging: true,
+        }));
+        let not = corner(Some(Power {
+            percent: 45.0,
+            charging: false,
+        }));
+        assert_ne!(
+            charging, not,
+            "plugging in at the same percentage has to change the picture: \
+             the number is identical, so the glyph is the whole signal"
+        );
+    }
+
+    #[test]
+    fn a_battery_at_nought_still_draws_its_case() {
+        // The case is the frame the fill goes in. An empty battery that drew
+        // nothing would read as no battery at all, which is a different fact.
+        let empty = corner(Some(Power {
+            percent: 0.0,
+            charging: false,
+        }));
+        let none = corner(None);
+        assert_ne!(empty, none);
+    }
+
+    /// The type the screen holds is the shared one, not a copy of it.
+    #[allow(dead_code)]
+    fn types_line_up(power: Power) -> Battery {
+        power
     }
 }

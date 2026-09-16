@@ -1148,6 +1148,7 @@ version = "0.2.4"
 dependencies = [
  "chrono",
  "cosmic-text",
+ "irontile-power",
  "libc",
  "pam",
  "rustix 1.1.4",
@@ -1156,6 +1157,10 @@ dependencies = [
  "wayland-protocols",
  "xkbcommon 0.9.0",
 ]
+
+[[package]]
+name = "irontile-power"
+version = "0.2.4"
 
 [[package]]
 name = "irontile-session"
@@ -1172,6 +1177,7 @@ dependencies = [
  "chrono",
  "cosmic-text",
  "irontile-ipc",
+ "irontile-power",
  "libpulse-binding",
  "resvg",
  "rustix 1.1.4",

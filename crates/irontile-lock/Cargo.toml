@@ -22,6 +22,7 @@ rustix = { workspace = true, features = ["termios"] }
 tiny-skia.workspace = true
 cosmic-text.workspace = true
 chrono.workspace = true
+irontile-power.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 xkbcommon.workspace = true

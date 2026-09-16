@@ -658,6 +658,18 @@ half that waits exits on that byte, or non-zero if the pipe closes without one.
 Forking a live Wayland connection instead would leave two processes holding one
 socket and one sequence of object ids.
 
+**The battery sits under the hostname, in the corner that says what machine
+this is.** It is the one thing on the lock screen that cannot be found out any
+other way: the bar that would otherwise show it is behind the very screen you
+are looking at, and a laptop locked by an idle timer spends its time suspended
+with the lid shut. So the corner answers the question you actually walk up with
+-- is it charging, and did it survive. The glyph is drawn from rectangles
+rather than set from a font, because a battery is exactly the character a bare
+machine turns out not to have, and a lock screen is the last place to find that
+out. On the charger the case fills and takes a bolt; under fifteen percent
+unplugged, the case and the number go red; on a machine with no battery at all
+nothing is drawn, which is not the same picture as nought percent.
+
 **The field shows a fixed number of pips, and never grows.** A track that grew
 with the entry would shift as it was typed and would tell anyone watching how
 long the password is. One pip brighter than the rest, walking round as keys

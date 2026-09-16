@@ -148,31 +148,8 @@ impl World for System {
         chrono::Local::now().format(format).to_string()
     }
 
-    /// Reads the first battery the kernel reports.
-    ///
-    /// Straight from sysfs rather than through a service: it is two files, it
-    /// is stable, and it means the bar has no daemon to depend on.
     fn battery(&self) -> Option<Battery> {
-        let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let kind = std::fs::read_to_string(path.join("type")).unwrap_or_default();
-            if kind.trim() != "Battery" {
-                continue;
-            }
-            let Some(percent) = std::fs::read_to_string(path.join("capacity"))
-                .ok()
-                .and_then(|s| s.trim().parse::<f64>().ok())
-            else {
-                continue;
-            };
-            let status = std::fs::read_to_string(path.join("status")).unwrap_or_default();
-            return Some(Battery {
-                percent,
-                charging: matches!(status.trim(), "Charging" | "Full"),
-            });
-        }
-        None
+        irontile_power::battery()
     }
 
     fn volume(&self) -> Option<Volume> {

@@ -12,6 +12,7 @@ name = "irontile-bar"
 path = "src/bin/irontile-bar.rs"
 
 [dependencies]
+irontile-power.workspace = true
 irontile-ipc.workspace = true
 serde.workspace = true
 toml.workspace = true
