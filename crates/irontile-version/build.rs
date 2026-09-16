@@ -24,6 +24,10 @@ fn main() {
         }
     }
 
+    // The build machine may hand it over instead of letting git be asked.
+    println!("cargo:rerun-if-env-changed=IRONTILE_COMMIT");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+
     println!("cargo:rustc-env=IRONTILE_COMMIT={}", describe());
 }
 
@@ -39,10 +43,41 @@ fn git_dir() -> Option<String> {
 
 /// The short commit, with `-dirty` when the tree has uncommitted changes.
 ///
-/// Empty when there is no git to ask -- a source tarball, or a build somewhere
-/// the repository did not come along. A missing hash is better than a wrong
-/// one, so nothing is invented.
+/// Asked of git first, and of the environment when git will not answer. That
+/// second case is not hypothetical: a package is built by a different user
+/// than the one that made the checkout, in a container, from a repository git
+/// may decline to talk about -- and the release built exactly that way came
+/// out carrying no commit at all, which is the one build where knowing it
+/// matters most.
+///
+/// Empty when neither can say. A missing hash is better than a wrong one, so
+/// nothing is invented.
 fn describe() -> String {
+    if let Some(given) = from_environment() {
+        return given;
+    }
+    from_git()
+}
+
+/// A commit handed over by whatever is doing the building.
+///
+/// `IRONTILE_COMMIT` for anybody who wants to say it outright, and `GITHUB_SHA`
+/// because a workflow sets it already and it names the commit being built even
+/// when the checkout is one git will not discuss.
+fn from_environment() -> Option<String> {
+    let given = std::env::var("IRONTILE_COMMIT")
+        .ok()
+        .or_else(|| std::env::var("GITHUB_SHA").ok())?;
+    let given = given.trim();
+    if given.is_empty() {
+        return None;
+    }
+    // Shortened here rather than by whoever set it, so both spellings of the
+    // same commit come out looking the same.
+    Some(given.chars().take(8).collect())
+}
+
+fn from_git() -> String {
     let Some(out) = Command::new("git")
         .args(["rev-parse", "--short=8", "HEAD"])
         .output()
