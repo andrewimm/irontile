@@ -120,7 +120,14 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    init_tracing();
+    // Decided before the backend runs, because the backend is the reason: a
+    // session drives real hardware from a virtual terminal nobody reads
+    // afterwards, while nested and headless are run from a terminal that is
+    // being watched right now. Writing every nested run to the same file would
+    // also rotate away the log of the session it is nested inside, which is the
+    // one worth keeping.
+    let backend = chosen.get_or_insert_with(default_backend);
+    init_tracing(matches!(backend, Chosen::Session));
     let path = config_path.unwrap_or_else(config::config_path);
     let config = match config::Config::load_from(&path) {
         Ok(config) => config,
@@ -136,7 +143,7 @@ fn run(args: &[String]) -> anyhow::Result<()> {
         config_path: path,
         wayland_display,
     };
-    match chosen.unwrap_or_else(default_backend) {
+    match chosen.expect("filled in above") {
         Chosen::Headless(outputs) => backend::headless::run(outputs, options),
         Chosen::Nested => backend::nested::run(options),
         Chosen::Session => backend::session::run(options),
@@ -203,15 +210,60 @@ fn number(text: &str, part: &str) -> anyhow::Result<i32> {
         .map_err(|_| anyhow::anyhow!("{text:?} in {part:?} is not a number"))
 }
 
-fn init_tracing() {
+fn init_tracing(to_file: bool) {
     use std::io::IsTerminal;
     use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let terminal = tracing_subscriber::fmt::layer()
         // Escape codes in a redirected log make it unreadable and unparseable.
-        .with_ansi(std::io::stdout().is_terminal())
+        .with_ansi(std::io::stdout().is_terminal());
+
+    // A compositor started from a virtual terminal writes to that terminal, and
+    // a virtual terminal is not somewhere anybody reads from afterwards: the
+    // session that went wrong is precisely the session whose output is gone.
+    // So it is written down as well, and the previous run is kept, because the
+    // interesting run is usually the one before the machine came back up.
+    let file = to_file.then(log_file).flatten().map(|file| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+    });
+    let missing = to_file && file.is_none();
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(terminal)
+        .with(file)
         .init();
+    if missing {
+        tracing::warn!("no log file; this session's output lives only in this terminal");
+    }
+}
+
+/// Opens the log, keeping the previous run's as `irontile.log.1`.
+///
+/// `None` rather than a failure: a compositor that would not start because it
+/// could not write a log would be a worse compositor than one that starts
+/// without it.
+fn log_file() -> Option<std::fs::File> {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })?
+        .join("irontile");
+    std::fs::create_dir_all(&state).ok()?;
+
+    let path = state.join("irontile.log");
+    // Renamed rather than appended to, so the file is one run and its size is
+    // that run's. An append would grow without bound across a year of logins.
+    if path.exists() {
+        let _ = std::fs::rename(&path, state.join("irontile.log.1"));
+    }
+    std::fs::File::create(&path).ok()
 }
 
 #[cfg(test)]
