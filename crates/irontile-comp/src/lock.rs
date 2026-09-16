@@ -10,9 +10,18 @@
 //! without unlocking, its surfaces go with it and every display is painted
 //! blank, but the session stays locked and nothing but a new locker can change
 //! that.
+//!
+//! "Nothing but a new locker" is load-bearing, and was not true for a while: a
+//! second lock was refused whenever the session was locked, dead client or not,
+//! so a locker that died left a blank screen that took the keyboard, answered
+//! nothing, and could only be escaped by rebooting the machine. A lock whose
+//! client is gone is now replaceable, which is the difference between losing a
+//! session and typing a password into a new lock screen.
 
 use std::collections::HashMap;
 
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
+use smithay::reexports::wayland_server::Resource as _;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::session_lock::{
@@ -31,15 +40,36 @@ pub struct Lock {
     /// which point the client is told the session is locked. Dropping it
     /// without that tells the client the lock was refused.
     pending: Option<SessionLocker>,
+    /// The client's lock object, kept past the confirmation so that whether
+    /// the locker is still there remains a question that can be asked. Without
+    /// it a lock is only as alive as its surfaces, and a client that has
+    /// locked but not yet drawn has none.
+    object: Option<ExtSessionLockV1>,
 }
 
 impl Lock {
-    /// Whether every display is covered by a surface.
+    /// Whether the locker is still there at all.
+    ///
+    /// Either it holds a live lock object, which covers the moment between
+    /// asking for the lock and drawing anything, or one of its surfaces is
+    /// still alive. Neither is true once the process is gone, and that is the
+    /// state a new locker is allowed to replace.
+    pub fn alive(&self) -> bool {
+        self.object.as_ref().is_some_and(|object| object.is_alive())
+            || self.surfaces.values().any(|surface| surface.alive())
+    }
+
+    /// Whether every display is covered by a surface that still exists.
     ///
     /// Held to until then so that a locker which manages one display of two
-    /// cannot leave the other showing what was on it.
+    /// cannot leave the other showing what was on it. Liveness is part of the
+    /// question: a dead surface is an entry in a map and nothing on screen, so
+    /// counting it as cover is how a blank display comes to be called locked.
     pub fn covers(&self, outputs: &[OutputId]) -> bool {
-        !outputs.is_empty() && outputs.iter().all(|id| self.surfaces.contains_key(id))
+        !outputs.is_empty()
+            && outputs
+                .iter()
+                .all(|id| self.surfaces.get(id).is_some_and(|surface| surface.alive()))
     }
 
     /// Says the session is locked, once. Returns whether this was the moment.
@@ -53,8 +83,12 @@ impl Lock {
         }
     }
 
+    /// The surface covering a display, if one is still alive.
+    ///
+    /// A dead one draws nothing, so handing it back would paint a blank
+    /// display and call it covered.
     pub fn surface_for(&self, output: OutputId) -> Option<&LockSurface> {
-        self.surfaces.get(&output)
+        self.surfaces.get(&output).filter(|surface| surface.alive())
     }
 
     pub fn surfaces(&self) -> impl Iterator<Item = (&OutputId, &LockSurface)> {
@@ -83,16 +117,27 @@ impl SessionLockHandler for Irontile {
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
-        // Already locked: the session cannot be locked twice, and telling the
-        // newcomer it succeeded would hand it a session somebody else is
-        // holding. Dropping the confirmation refuses it.
-        if self.session_lock.is_some() {
-            tracing::warn!("refused a second lock on an already locked session");
-            return;
+        // Already locked and the locker is still there: the session cannot be
+        // locked twice, and telling the newcomer it succeeded would hand it a
+        // session somebody else is holding. Dropping the confirmation refuses
+        // it.
+        if let Some(existing) = &self.session_lock {
+            if existing.alive() {
+                tracing::warn!("refused a second lock on an already locked session");
+                return;
+            }
+            // The locker is gone and its surfaces with it, so every display is
+            // blank and the keyboard goes nowhere. Refusing here would leave
+            // the machine in a state a reboot is the only way out of, which is
+            // worse in every case than letting somebody else draw a lock
+            // screen: the session stays locked throughout, and whoever takes
+            // over still has to satisfy PAM before anything is given back.
+            tracing::warn!("the locker is gone; letting a new one take the lock");
         }
         tracing::info!("locking the session");
         self.session_lock = Some(Lock {
             surfaces: HashMap::new(),
+            object: Some(confirmation.ext_session_lock().clone()),
             pending: Some(confirmation),
         });
         // Nothing else may have the keyboard from this moment, whether or not

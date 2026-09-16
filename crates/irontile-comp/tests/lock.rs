@@ -110,3 +110,38 @@ fn a_lock_screen_gets_its_frame_callbacks_back() {
     client.request_lock_frame(0);
     client.wait_for(|client| client.lock_frames(0) > before);
 }
+
+#[test]
+fn a_new_locker_takes_over_from_one_that_died() {
+    // The session stays locked when a locker dies -- that is the whole point of
+    // it -- but it was also unrecoverable: every new lock was refused because
+    // one already existed, so the displays stayed blank, the keyboard went
+    // nowhere, and the only way back into the machine was to reboot it. A lock
+    // whose client is gone is a lock nothing is drawing.
+    let compositor = Compositor::start("1920x1080");
+    let mut first = compositor.connect_client();
+    first.lock_session();
+    drop(first);
+
+    let mut second = compositor.connect_client();
+    assert!(
+        second.try_lock_session(),
+        "a locker that died left a session nothing could ever draw on again"
+    );
+}
+
+#[test]
+fn a_locker_that_is_still_there_is_not_replaced() {
+    // The other half of it: taking over from a locker that is alive and drawing
+    // would hand the session to whoever asked second.
+    let compositor = Compositor::start("1920x1080");
+    let mut first = compositor.connect_client();
+    first.lock_session();
+
+    let mut second = compositor.connect_client();
+    assert!(
+        !second.try_lock_session(),
+        "a live lock screen was pushed aside by a newcomer"
+    );
+    drop(first);
+}
