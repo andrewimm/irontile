@@ -196,10 +196,34 @@ jobs:
     name: attach to the release
     needs: [verify-deb, verify-rpm, verify-arch]
     runs-on: ubuntu-latest
+    # Job permissions replace the workflow's rather than adding to them, so
+    # contents is repeated: without it the upload below loses the write it
+    # already had.
+    permissions:
+      contents: write
+      # The provenance below is signed with a certificate fetched using this
+      # token and valid for minutes. That is the whole reason for attesting
+      # rather than signing: there is no key to keep, and so none to leak. A
+      # GPG key in the repository's secrets would be held by whoever holds the
+      # account that publishes the releases, which is the same account an
+      # attacker would have to take to publish a bad one.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+      # Records where each package came from: this repository, this commit,
+      # this workflow run. Anybody can check a downloaded package against it
+      # with `gh attestation verify <file> --repo andrewimm/irontile`, which
+      # answers "was this built from the source it claims" without a keyring.
+      #
+      # Done here rather than in the three build jobs so that what is attested
+      # is the file as published, and so the step exists once instead of three
+      # times inside three distribution containers.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/**/*
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}

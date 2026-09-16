@@ -129,6 +129,20 @@ exec = ["alacritty"]
 
 ## Installing a session
 
+The packages attached to a release carry build provenance, so a downloaded one
+can be tied back to the commit and workflow run that produced it:
+
+```
+gh attestation verify irontile-0.2.6-1-x86_64.pkg.tar.zst --repo andrewimm/irontile
+```
+
+Nothing here is signed with a GPG key, deliberately. A key kept in the
+repository's secrets would be held by whoever holds the account that publishes
+the releases, which is the same account somebody would have to take to publish a
+bad one; the certificate behind the attestation lives for minutes and there is
+nothing to leak. This is also why `pacman -U` on a release URL asks for a
+`.sig` and does not find one: download the package first and install the file.
+
 Five binaries, a desktop entry and a PAM service:
 
 | File | Where it goes |
