@@ -112,6 +112,23 @@ impl Lock {
         self.covered_at = Instant::now();
     }
 
+    /// What this lock amounts to right now, for the log.
+    ///
+    /// A blank screen under a lock has two quite different causes -- surfaces
+    /// that went away, and surfaces that are still there with nothing in them
+    /// -- and they are told apart by counting. Guessing which one it was, from
+    /// a report of a dark screen hours later, is what the last three of these
+    /// cost.
+    pub fn tally(&self) -> (usize, usize, usize) {
+        let alive = self.surfaces.values().filter(|s| s.alive()).count();
+        let drawn = self
+            .surfaces
+            .values()
+            .filter(|s| s.alive() && crate::state::has_buffer(s.wl_surface()))
+            .count();
+        (self.surfaces.len(), alive, drawn)
+    }
+
     /// Whether every display is covered by a surface that still exists.
     ///
     /// Held to until then so that a locker which manages one display of two
@@ -189,8 +206,13 @@ impl Irontile {
         }
         lock.reported_dead = true;
         let alive = lock.alive();
+        let (surfaces, alive_surfaces, drawn) = lock.tally();
         tracing::warn!(
             client_alive = alive,
+            displays = outputs.len(),
+            surfaces,
+            alive = alive_surfaces,
+            drawn,
             "the lock screen has stopped covering the displays: they are blank and the \
              session stays locked. Run irontile-lock again, from a virtual terminal if \
              there is no other way in, and it will take the lock over"

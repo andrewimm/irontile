@@ -973,6 +973,15 @@ fn resume_devices(state: &mut Irontile) {
     }
     state.dirty = true;
     render_all(state);
+
+    // What the lock amounted to at the moment the displays came back, which is
+    // the moment the screen has three times now failed to come back with them.
+    // Surfaces that went away and surfaces still there with nothing in them
+    // look identical from the chair and are entirely different bugs.
+    if let Some(lock) = &state.session_lock {
+        let (surfaces, alive, drawn) = lock.tally();
+        tracing::info!(surfaces, alive, drawn, "resumed with the session locked");
+    }
 }
 
 /// DRM reports a mode's timings; the refresh rate has to be derived from them.

@@ -2067,7 +2067,7 @@ fn render_now(asked: bool, since: Duration) -> bool {
     asked || since >= RENDER_BACKSTOP
 }
 
-fn has_buffer(surface: &WlSurface) -> bool {
+pub fn has_buffer(surface: &WlSurface) -> bool {
     smithay::backend::renderer::utils::with_renderer_surface_state(surface, |state| {
         state.buffer().is_some()
     })
