@@ -156,6 +156,7 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         config,
         session_lock: lock,
         screencopy,
+        indicator,
         start_time,
         ..
     } = state;
@@ -177,6 +178,10 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         // The compositor irontile is nested inside draws the pointer already.
         cursor: None,
         lock: lock.as_ref(),
+        // Asked before the copy is served, so the mark is in the element list
+        // that screencopy renders from: a recording carries the light that
+        // says it is a recording.
+        capture: screencopy.capturing().then(|| indicator.buffer(scale)),
     };
     let elements = render::elements(&scene, renderer, NESTED_OUTPUT, scale);
 

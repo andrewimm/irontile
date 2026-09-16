@@ -30,7 +30,11 @@ render_elements! {
     pub IrontileElement<R> where R: ImportAll + ImportMem;
     Surface = WaylandSurfaceRenderElement<R>,
     Border = SolidColorRenderElement,
-    Cursor = MemoryRenderBufferRenderElement<R>,
+    /// Any image the compositor rasterised itself: the pointer, and the mark
+    /// that says the screen is being copied. One variant rather than two
+    /// because the element type is what the list holds, and the macro derives
+    /// a conversion per type.
+    Image = MemoryRenderBufferRenderElement<R>,
 }
 
 /// Everything drawing one display needs.
@@ -50,6 +54,9 @@ pub struct Scene<'a> {
     pub cursor: Option<Cursor<'a>>,
     /// Set while the session is locked. Nothing behind it is drawn.
     pub lock: Option<&'a crate::lock::Lock>,
+    /// The capture indicator, when something is copying the screen. Drawn over
+    /// everything including the lock screen, and included in the copy itself.
+    pub capture: Option<&'a MemoryRenderBuffer>,
 }
 
 /// The pointer, ready to draw.
@@ -96,6 +103,36 @@ where
 
     let mut out = Vec::new();
 
+    // Above everything except the pointer, and above it in every sense: over a
+    // fullscreen window, over the lock screen, over a bar. A client copying the
+    // screen cannot cover the mark that says so, and because this is in the
+    // list handed to screencopy, the copy carries it too.
+    if let Some(buffer) = scene.capture
+        && let Some(display) = scene.layout.output(output)
+    {
+        let size = crate::indicator::SIZE;
+        let inset = crate::indicator::INSET;
+        let at = Rect::new(display.logical.w - inset - size, inset, 0, 0);
+        let pixels = ((f64::from(size) * scale.x).round() as i32).max(4);
+        match MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            to_physical(at, scale).to_f64(),
+            buffer,
+            None,
+            // Drawn at this display's scale already, so it is placed at its own
+            // size rather than scaled a second time. Same reasoning as the
+            // cursor below, and the same trap if the source is left out.
+            Some(smithay::utils::Rectangle::from_size(
+                (f64::from(pixels), f64::from(pixels)).into(),
+            )),
+            Some((pixels, pixels).into()),
+            Kind::Unspecified,
+        ) {
+            Ok(element) => out.push(IrontileElement::Image(element)),
+            Err(_) => tracing::trace!("could not build the capture indicator"),
+        }
+    }
+
     // The pointer is above everything, including a fullscreen window. The
     // hotspot is subtracted here, so the pixel the client nominated is the one
     // under the pointer rather than the image's top left corner.
@@ -126,7 +163,7 @@ where
                 Some((size.0, size.1).into()),
                 Kind::Cursor,
             ) {
-                Ok(element) => out.push(IrontileElement::Cursor(element)),
+                Ok(element) => out.push(IrontileElement::Image(element)),
                 Err(_) => tracing::trace!("could not build a cursor element"),
             }
         }

@@ -11,6 +11,7 @@ mod cursor;
 mod device;
 mod environment;
 mod focus;
+mod indicator;
 mod input;
 mod ipc;
 mod keymap;

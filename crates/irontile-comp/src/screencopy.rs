@@ -12,6 +12,7 @@
 //! nothing from the display hardware at all.
 
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -53,16 +54,39 @@ pub struct Pending {
     pub wants_damage: bool,
 }
 
+/// How long the indicator stays up after the last frame was handed over.
+///
+/// It is also the shortest time it is ever shown, which is the point of it: a
+/// screenshot is one frame and would otherwise light the indicator for a
+/// sixtieth of a second, which is the same as not showing it at all. A
+/// recorder keeps handing frames over and holds it lit.
+const INDICATE_FOR: Duration = Duration::from_millis(1500);
+
 /// The frames that have been asked for and not yet filled.
 #[derive(Debug, Default)]
 pub struct Screencopy {
     pending: Vec<Pending>,
+    /// When a copy was last actually handed to a client. Not when one was
+    /// asked for: a request that fails copies nothing and is nothing to
+    /// report.
+    last_served: Option<Instant>,
 }
 
 impl Screencopy {
     pub fn new(display: &DisplayHandle) -> Screencopy {
         display.create_global::<Irontile, ZwlrScreencopyManagerV1, _>(VERSION, ());
         Screencopy::default()
+    }
+
+    /// Whether a client has been given a picture of the screen just now.
+    ///
+    /// The compositor cannot stop a client that can reach the socket from
+    /// copying the screen, and on a desktop where nothing is sandboxed it
+    /// would be pretending to try. What it can do is refuse to let it happen
+    /// quietly.
+    pub fn capturing(&self) -> bool {
+        self.last_served
+            .is_some_and(|at| at.elapsed() < INDICATE_FOR)
     }
 
     /// Takes everything waiting on a display, so it can be filled.
@@ -341,6 +365,10 @@ pub fn serve<R>(
 
         match filled {
             Some(()) => {
+                // A picture of the screen has just left the compositor. This
+                // is the one place that is true, so it is the one place that
+                // records it.
+                screencopy.last_served = Some(Instant::now());
                 // Nothing about the copy is upside down or shuffled, which is
                 // what an empty flags means.
                 pending

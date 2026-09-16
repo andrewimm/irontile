@@ -259,6 +259,10 @@ pub struct Irontile {
     pub session_lock: Option<crate::lock::Lock>,
     /// Screenshots that have been asked for and not yet taken.
     pub screencopy: crate::screencopy::Screencopy,
+    /// The mark drawn while something is copying the screen. Held here rather
+    /// than inside `Screencopy` so the two can be borrowed at once: the copy
+    /// is served from the same element list the mark is drawn into.
+    pub indicator: crate::indicator::Indicator,
     /// Required alongside fractional scale: a client rendering at 1.5x has no
     /// way to say how large the result should be without it. Held for its
     /// global.
@@ -407,6 +411,7 @@ impl Irontile {
             ),
             session_lock: None,
             screencopy: crate::screencopy::Screencopy::new(dh),
+            indicator: crate::indicator::Indicator::default(),
             viewporter_state: smithay::wayland::viewporter::ViewporterState::new::<Self>(dh),
             popups: PopupManager::default(),
             seat,

@@ -790,6 +790,7 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         config,
         session_lock: lock,
         screencopy,
+        indicator,
         start_time,
         ..
     } = state;
@@ -848,6 +849,10 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
             }
         }),
         lock: lock.as_ref(),
+        // Asked before the copy is served, so the mark is in the element list
+        // that screencopy renders from: a recording carries the light that
+        // says it is a recording.
+        capture: screencopy.capturing().then(|| indicator.buffer(scale)),
     };
     let elements = render::elements(&scene, renderer, id, scale);
 
