@@ -36,6 +36,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     let (graphics, mut winit_loop) =
         winit::init::<GlesRenderer>().map_err(|e| anyhow::anyhow!("{e}"))?;
     let window_size = graphics.window_size();
+    let window_scale = graphics.scale_factor();
 
     let socket = super::bind_socket(options.wayland_display.as_deref())?;
     let socket_name = socket.socket_name().to_string_lossy().into_owned();
@@ -51,7 +52,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     state.advertise_dmabuf();
     state.add_keyboard()?;
     state.seat.add_pointer();
-    state.configure_outputs(&[nested_spec(window_size.to_logical(1))]);
+    state.configure_outputs(&[nested_spec(window_size, window_scale)]);
 
     let handle = event_loop.handle();
     super::insert_wayland_sources(&handle, display, socket)?;
@@ -62,8 +63,8 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         .insert_source(Timer::immediate(), move |_, _, state: &mut Irontile| {
             let mut wants_redraw = false;
             let status = winit_loop.dispatch_new_events(|event| match event {
-                WinitEvent::Resized { size, .. } => {
-                    state.configure_outputs(&[nested_spec(size.to_logical(1))]);
+                WinitEvent::Resized { size, scale_factor } => {
+                    state.configure_outputs(&[nested_spec(size, scale_factor)]);
                 }
                 WinitEvent::Input(event) => {
                     let size = state.output_size(NESTED_OUTPUT);
@@ -120,13 +121,26 @@ pub fn run(options: Options) -> anyhow::Result<()> {
 }
 
 /// The nested window is the whole display, and winit renders it flipped.
-fn nested_spec(size: smithay::utils::Size<i32, smithay::utils::Logical>) -> OutputSpec {
+///
+/// The size is the window's real pixels and the scale is the host's, and both
+/// have to be stated: a display left at a scale of one has a logical size a
+/// third too large on a 1.3333 host, so `draw` lays the scene out across more
+/// pixels than the framebuffer holds and the right and bottom of it fall off
+/// the edge. On screen that reads as a window that is merely cropped; in a
+/// screenshot it is unmistakable, which is how it was found.
+fn nested_spec(
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    scale: f64,
+) -> OutputSpec {
     let mut spec = OutputSpec::new(
         NESTED_OUTPUT,
         "irontile-nested",
-        irontile_layout::Size::new(size.w, size.h),
+        irontile_layout::Size::new(size.w.max(1), size.h.max(1)),
     );
     spec.transform = NESTED_TRANSFORM;
+    // A host that reports a nonsense scale would otherwise divide the display
+    // down to nothing.
+    spec.scale = if scale > 0.0 { scale } else { 1.0 };
     spec
 }
 
