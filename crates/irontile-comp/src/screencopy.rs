@@ -26,10 +26,16 @@ use smithay::utils::{Physical, Rectangle};
 use crate::state::Irontile;
 use irontile_layout::OutputId;
 
-/// The version of the protocol this speaks. Three adds `copy_with_damage`,
-/// which is for a client following a display rather than taking one picture;
-/// two is everything a screenshot needs.
-const VERSION: u32 = 2;
+/// The version of the protocol this speaks.
+///
+/// Two adds `copy_with_damage`, for a client following a display rather than
+/// taking one picture. Three adds `buffer_done`, which ends a list of buffer
+/// shapes the client may choose from, and an optional `linux_dmabuf` entry in
+/// that list -- optional because a compositor offers it only if it can fill
+/// one, and this fills shared memory. A screen recorder asks for three and
+/// nothing less, so two is not "everything a screenshot needs" as long as
+/// recording counts.
+const VERSION: u32 = 3;
 
 /// What a frame object is waiting for.
 #[derive(Debug)]
@@ -41,6 +47,10 @@ pub struct Pending {
     /// The part of the display asked for, in its own pixels.
     pub region: Rectangle<i32, Physical>,
     pub overlay_cursor: bool,
+    /// Set when the client asked with `copy_with_damage`, which is a client
+    /// watching a display: it is owed a `damage` event saying what moved before
+    /// it is told the copy is ready.
+    pub wants_damage: bool,
 }
 
 /// The frames that have been asked for and not yet filled.
@@ -177,6 +187,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Irontile {
             region,
             overlay_cursor,
             buffer: None,
+            wants_damage: false,
         });
     }
 }
@@ -191,6 +202,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameState> for Irontile {
         _handle: &DisplayHandle,
         _init: &mut DataInit<'_, Self>,
     ) {
+        // Read before the match, which takes the request apart.
+        let wants_damage = matches!(
+            request,
+            zwlr_screencopy_frame_v1::Request::CopyWithDamage { .. }
+        );
         match request {
             zwlr_screencopy_frame_v1::Request::Copy { buffer }
             | zwlr_screencopy_frame_v1::Request::CopyWithDamage { buffer } => {
@@ -212,6 +228,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameState> for Irontile {
                     .find(|pending| &pending.frame == frame)
                 {
                     waiting.buffer = Some(buffer);
+                    waiting.wants_damage = wants_damage;
                     // Filled on the next pass over this display.
                     state.dirty = true;
                 } else {
@@ -329,6 +346,18 @@ pub fn serve<R>(
                 pending
                     .frame
                     .flags(zwlr_screencopy_frame_v1::Flags::empty());
+                // The whole region, every time. Working out what actually
+                // changed would let a recorder skip work, but claiming less
+                // than moved would have it draw a stale frame -- and the copy
+                // itself is already a full one.
+                if pending.wants_damage {
+                    pending.frame.damage(
+                        0,
+                        0,
+                        pending.region.size.w as u32,
+                        pending.region.size.h as u32,
+                    );
+                }
                 let secs = now.as_secs();
                 pending.frame.ready(
                     (secs >> 32) as u32,
