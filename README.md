@@ -5,129 +5,28 @@ not a plugin on top of a floating one.
 
 <img width="2256" height="1504" alt="2026-09-14_180519" src="https://github.com/user-attachments/assets/f554458f-f9a5-42f4-9deb-2d639aecdabd" />
 
-## Workspace
+## Installing
 
-| Crate | What it is |
-| --- | --- |
-| `irontile-layout` | Tiling tree, desktops, and display arrangement. Pure integer geometry, no Wayland. |
-| `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
-| `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
-| `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
-| `irontile-lock` | `irontile-lock`, the lock screen. Draws, and asks PAM. |
-| `irontile-session` | `start-irontile`, the supervisor a login manager starts. |
-| `xtask` | Task runner. |
-
-## Tasks
+Packages for each release are on the
+[releases page](https://github.com/andrewimm/irontile/releases): an Arch
+package, an rpm and a deb. Each is built inside the distribution it installs
+on, and installed again in a clean container of that distribution before it is
+published, so a package that cannot be installed never reaches the page.
 
 ```
-cargo xtask run      # build and launch the compositor
-cargo xtask test     # rustfmt check, clippy with warnings denied, full test suite
+# Arch
+curl -LO https://github.com/andrewimm/irontile/releases/download/v0.2.6/irontile-0.2.6-1-x86_64.pkg.tar.zst
+sudo pacman -U irontile-0.2.6-1-x86_64.pkg.tar.zst
+
+# Fedora
+sudo dnf install ./irontile-0.2.6-1.x86_64.rpm
+
+# Debian, Ubuntu
+sudo apt install ./irontile_0.2.6-1_amd64.deb
 ```
 
-The Rust version is pinned exactly in `rust-toolchain.toml`, so rustup fetches
-the same compiler CI uses and a new Rust release cannot break the build without
-a commit that says so. `rust-version` in `Cargo.toml` is a separate promise: the
-oldest compiler the code still builds on, which the `msrv` job checks.
-
-## Running
-
-```
-cargo xtask run
-```
-
-irontile nests if `WAYLAND_DISPLAY` or `DISPLAY` is set and takes the session
-otherwise, which is what each of those situations means. `--nested`,
-`--session` and `--headless` override the choice.
-
-Nested, irontile opens as a window inside your current compositor and prints
-the Wayland socket it bound. Clients pointed at that
-socket are tiled inside it.
-
-```
-WAYLAND_DISPLAY=wayland-2 alacritty
-```
-
-`RUST_LOG=irontile=debug` logs every layout event and the cell each window is
-placed in.
-
-### Headless
-
-```
-cargo xtask run -- --headless 1920x1080,1280x1024
-```
-
-No renderer and as many displays as you ask for, driven entirely over the
-control socket. This is how the integration tests run, and it is the only way
-to exercise display arrangement, desktop transfer and hotplug without the
-hardware to do it on.
-
-### Control socket
-
-Every binding is also a command:
-
-```
-irontilectl focus left
-irontilectl workspace 3
-irontilectl send-to-output right
-
-irontilectl frame        # where every window is
-irontilectl outputs      # displays and their arrangement
-irontilectl workspaces   # desktops, and what is on them
-irontilectl layers       # panels and overlays, and what they reserve
-irontilectl layout       # the whole engine state, as JSON
-irontilectl watch        # stream events
-```
-
-`IRONTILE_SOCKET` targets a specific instance; otherwise the socket belonging to
-`WAYLAND_DISPLAY` is used. Processes irontile spawns inherit both.
-
-### On real hardware
-
-The session backend runs: it modesets, tiles, takes input and exits cleanly.
-Still test it from a **second VT** rather than by quitting the session you have,
-so that one stays there to switch back to.
-
-```
-# Ctrl+Alt+F2, log in, then:
-cd path/to/irontile
-./try-session.sh
-```
-
-That wrapper runs irontile under a timeout, so the machine comes back on its own
-whatever happens, and logs to `~/irontile-session.log` where it is readable from
-your other session afterwards.
-
-It also gives the session a D-Bus session bus of its own. A second graphical
-session for the same user otherwise shares the first one's, and a notification
-daemon can only own its name once: started without a bus of its own, swaync
-finds the name taken and exits, and `swaync-client` then reaches the instance
-belonging to the *other* session -- which draws its panel on the other VT, while
-the binding that asked for it appears to do nothing. Everything on the session
-bus behaves that way, media players found by playerctl included. A bus per
-session is what makes it a session rather than a program sharing somebody
-else's. `IRONTILE_SHARE_BUS=1` uses the outer one instead.
-
-The display goes into that environment before the bus starts, not just into the
-compositor's. A program started by D-Bus activation rather than by the
-compositor inherits the *bus daemon's* environment, and on a bare VT that has no
-`WAYLAND_DISPLAY` at all -- so a notification daemon that dies and is activated
-again has no compositor to draw on, and never appears anywhere. It works once,
-and then never again, which reads as a compositor bug and is not one. `Ctrl+Alt+F<n>` switches away at any point, and
-`pkill -x irontile` from there stops it.
-
-A compositor holding the VT in graphics mode is the only thing that can perform
-a VT switch — the kernel stops handling it — so `Ctrl+Alt+F1` through `F12` are
-bound for exactly that, outside the Super prefix everything else uses.
-
-Put something in `[startup]` before the first run. With no windows, a working
-compositor and a broken one both show a background colour:
-
-```toml
-[startup]
-exec = ["alacritty"]
-```
-
-## Installing a session
+Then pick irontile at your login manager, or run `start-irontile` from a
+virtual terminal. Both are covered below.
 
 The packages attached to a release carry build provenance, so a downloaded one
 can be tied back to the commit and workflow run that produced it:
@@ -345,6 +244,26 @@ held open, which is the only way to express a drag. The compositor draws the poi
 is the only thing that can move it -- which also means nothing else could drive
 one in a test. Everything a pointer reaches is otherwise reachable only by hand,
 which is how a bar that received no pointer events at all went unnoticed.
+
+## Control socket
+
+Every binding is also a command:
+
+```
+irontilectl focus left
+irontilectl workspace 3
+irontilectl send-to-output right
+
+irontilectl frame        # where every window is
+irontilectl outputs      # displays and their arrangement
+irontilectl workspaces   # desktops, and what is on them
+irontilectl layers       # panels and overlays, and what they reserve
+irontilectl layout       # the whole engine state, as JSON
+irontilectl watch        # stream events
+```
+
+`IRONTILE_SOCKET` targets a specific instance; otherwise the socket belonging to
+`WAYLAND_DISPLAY` is used. Processes irontile spawns inherit both.
 
 ## Bar
 
@@ -728,7 +647,7 @@ Not yet implemented: XWayland, `pointer-constraints` and `relative-pointer`.
 | headless | No renderer, displays described on the command line. What the integration tests drive over the control socket. |
 | session | Real hardware: libseat for the seat, udev for GPUs, one `DrmCompositor` per connected connector, libinput for input. |
 
-### Logging
+## Logging
 
 `RUST_LOG=irontile=debug` logs what is worth knowing when there is no other way
 to see anything: `display lit`, an `alive` heartbeat every five seconds, each
@@ -744,14 +663,116 @@ arguments and clipboard contents are not logged either.
 `vblank` in pairs. That is two lines per frame per display, so it is for
 diagnosing a stalled display rather than for leaving on.
 
-The renderer lives in the compositor state rather than in a backend's event
-loop, which is what lets a client's dmabuf be imported at the moment it is
-submitted: the import needs the renderer and the protocol handler only has the
-compositor.
+A session also writes `~/.local/state/irontile/irontile.log`, keeping the run
+before it as `irontile.log.1`. A compositor started from a virtual terminal
+writes to that terminal, and nobody reads a virtual terminal afterwards: the
+session worth reading about is usually the one whose output went with the
+reboot. Nested and headless runs do not write it -- they are started from a
+terminal somebody is already watching, and writing the same path would rotate
+away the log of the session they are nested inside.
 
-The session backend is paced by the display rather than by a timer. A frame is
-queued, a page flip completes, and that vblank asks for the next one; a display
-with nothing to draw goes quiet.
+## Building from source
+
+Everything above is about running irontile. This is what it takes to work on
+it.
+
+### Tasks
+
+```
+cargo xtask run      # build and launch the compositor
+cargo xtask test     # rustfmt check, clippy with warnings denied, full test suite
+```
+
+The Rust version is pinned exactly in `rust-toolchain.toml`, so rustup fetches
+the same compiler CI uses and a new Rust release cannot break the build without
+a commit that says so. `rust-version` in `Cargo.toml` is a separate promise: the
+oldest compiler the code still builds on, which the `msrv` job checks.
+
+### Running it
+
+irontile nests if `WAYLAND_DISPLAY` or `DISPLAY` is set and takes the session
+otherwise, which is what each of those situations means. `--nested`,
+`--session` and `--headless` override the choice.
+
+Nested, irontile opens as a window inside your current compositor and prints
+the Wayland socket it bound. Clients pointed at that
+socket are tiled inside it.
+
+```
+WAYLAND_DISPLAY=wayland-2 alacritty
+```
+
+`RUST_LOG=irontile=debug` logs every layout event and the cell each window is
+placed in.
+
+### Headless
+
+```
+cargo xtask run -- --headless 1920x1080,1280x1024
+```
+
+No renderer and as many displays as you ask for, driven entirely over the
+control socket. This is how the integration tests run, and it is the only way
+to exercise display arrangement, desktop transfer and hotplug without the
+hardware to do it on.
+
+### On real hardware
+
+The session backend runs: it modesets, tiles, takes input and exits cleanly.
+Still test it from a **second VT** rather than by quitting the session you have,
+so that one stays there to switch back to.
+
+```
+# Ctrl+Alt+F2, log in, then:
+cd path/to/irontile
+./try-session.sh
+```
+
+That wrapper runs irontile under a timeout, so the machine comes back on its own
+whatever happens, and logs to `~/irontile-session.log` where it is readable from
+your other session afterwards.
+
+It also gives the session a D-Bus session bus of its own. A second graphical
+session for the same user otherwise shares the first one's, and a notification
+daemon can only own its name once: started without a bus of its own, swaync
+finds the name taken and exits, and `swaync-client` then reaches the instance
+belonging to the *other* session -- which draws its panel on the other VT, while
+the binding that asked for it appears to do nothing. Everything on the session
+bus behaves that way, media players found by playerctl included. A bus per
+session is what makes it a session rather than a program sharing somebody
+else's. `IRONTILE_SHARE_BUS=1` uses the outer one instead.
+
+The display goes into that environment before the bus starts, not just into the
+compositor's. A program started by D-Bus activation rather than by the
+compositor inherits the *bus daemon's* environment, and on a bare VT that has no
+`WAYLAND_DISPLAY` at all -- so a notification daemon that dies and is activated
+again has no compositor to draw on, and never appears anywhere. It works once,
+and then never again, which reads as a compositor bug and is not one. `Ctrl+Alt+F<n>` switches away at any point, and
+`pkill -x irontile` from there stops it.
+
+A compositor holding the VT in graphics mode is the only thing that can perform
+a VT switch — the kernel stops handling it — so `Ctrl+Alt+F1` through `F12` are
+bound for exactly that, outside the Super prefix everything else uses.
+
+Put something in `[startup]` before the first run. With no windows, a working
+compositor and a broken one both show a background colour:
+
+```toml
+[startup]
+exec = ["alacritty"]
+```
+
+### The crates
+
+| Crate | What it is |
+| --- | --- |
+| `irontile-layout` | Tiling tree, desktops, and display arrangement. Pure integer geometry, no Wayland. |
+| `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
+| `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
+| `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
+| `irontile-lock` | `irontile-lock`, the lock screen. Draws, and asks PAM. |
+| `irontile-session` | `start-irontile`, the supervisor a login manager starts. |
+| `xtask` | Task runner. |
 
 ## Design notes
 
@@ -854,6 +875,16 @@ at scale one, so it only shows up on a second monitor.
 output ids for the life of the session, so a monitor that comes back is the same
 display as far as the layout engine is concerned — which is what makes the
 desktop that preferred it return to it.
+
+
+**The renderer lives in the compositor state**, not in a backend's event loop,
+which is what lets a client's dmabuf be imported at the moment it is submitted:
+the import needs the renderer, and the protocol handler only has the
+compositor.
+
+**The session backend is paced by the display**, not by a timer. A frame is
+queued, a page flip completes, and that vblank asks for the next one; a display
+with nothing to draw goes quiet.
 
 ## Releases
 
