@@ -19,6 +19,7 @@
 //! session and typing a password into a new lock screen.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
 use smithay::reexports::wayland_server::Resource as _;
@@ -32,7 +33,7 @@ use crate::state::Irontile;
 use irontile_layout::OutputId;
 
 /// A locked session.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Lock {
     /// One surface per display, by the display it covers.
     surfaces: HashMap<OutputId, LockSurface>,
@@ -45,21 +46,70 @@ pub struct Lock {
     /// it a lock is only as alive as its surfaces, and a client that has
     /// locked but not yet drawn has none.
     object: Option<ExtSessionLockV1>,
-    /// Set once the death has been written down, so the log gets one line
+    /// Set once the failure has been written down, so the log gets one line
     /// rather than one per pass round the event loop.
     reported_dead: bool,
+    /// When the lock was last seen covering every display, or when it was
+    /// taken out if it never has. How long ago that was is the difference
+    /// between a locker that is drawing and one that has stopped, which is
+    /// not a question its process being alive can answer.
+    covered_at: Instant,
 }
+
+/// Whether a lock is still doing its job.
+///
+/// Covering the displays is the job, so a lock that covers them is working and
+/// there is nothing else to ask. Not covering them is either a moment or a
+/// failure, and which one depends on whether anybody is still attached: a
+/// client that is gone will never draw again and can be replaced at once,
+/// while one that is still there gets [`WEDGED_AFTER`] to put a surface up
+/// before it is treated as stuck. Waiting out that grace for a client that has
+/// already died would leave a blank screen unreplaceable for no reason.
+fn still_working(covers: bool, client_alive: bool, since_covered: Duration) -> bool {
+    covers || (client_alive && since_covered < WEDGED_AFTER)
+}
+
+/// How long a lock may fail to cover the displays before it counts as wedged.
+///
+/// Long enough to sit out the moments when not covering is normal -- a display
+/// being plugged in, a mode changing, a session coming back from suspend, all
+/// of which leave a locker briefly a surface short. Short enough that somebody
+/// standing in front of a blank screen is not waiting on it.
+const WEDGED_AFTER: Duration = Duration::from_secs(10);
 
 impl Lock {
     /// Whether the locker is still there at all.
     ///
     /// Either it holds a live lock object, which covers the moment between
     /// asking for the lock and drawing anything, or one of its surfaces is
-    /// still alive. Neither is true once the process is gone, and that is the
-    /// state a new locker is allowed to replace.
+    /// still alive.
     pub fn alive(&self) -> bool {
         self.object.as_ref().is_some_and(|object| object.is_alive())
             || self.surfaces.values().any(|surface| surface.alive())
+    }
+
+    /// Whether this lock is still doing the job, given the displays there are.
+    ///
+    /// Not the same question as whether its client is alive, and asking that
+    /// one instead is how a session was lost: a locker came back from suspend
+    /// still connected, still holding the lock, and drawing nothing at all, so
+    /// every attempt to put a working lock screen up was refused on the
+    /// grounds that one was already there. From the chair it was a blank
+    /// screen that would not take a password and could not be replaced.
+    ///
+    /// A lock that has not covered the displays for [`WEDGED_AFTER`] is not
+    /// holding anything, whoever is still attached to it.
+    pub fn working(&self, outputs: &[OutputId]) -> bool {
+        still_working(
+            self.covers(outputs),
+            self.alive(),
+            self.covered_at.elapsed(),
+        )
+    }
+
+    /// Notes that the displays are covered, so the clock above starts again.
+    pub fn seen_covering(&mut self) {
+        self.covered_at = Instant::now();
     }
 
     /// Whether every display is covered by a surface that still exists.
@@ -125,17 +175,25 @@ impl Irontile {
     /// a laptop that locked itself on an idle timer, that is a virtual
     /// terminal nobody will read.
     pub fn notice_a_dead_lock(&mut self) {
+        let outputs: Vec<_> = self.arrangement.iter().map(|spec| spec.id).collect();
         let Some(lock) = &mut self.session_lock else {
             return;
         };
-        if lock.alive() || lock.reported_dead {
+        if lock.covers(&outputs) {
+            lock.seen_covering();
+            lock.reported_dead = false;
+            return;
+        }
+        if lock.working(&outputs) || lock.reported_dead {
             return;
         }
         lock.reported_dead = true;
+        let alive = lock.alive();
         tracing::warn!(
-            "the lock screen's client is gone: every display is blank and the \
-             session stays locked. Run irontile-lock again, from a virtual \
-             terminal if there is no other way in, to get a lock screen back"
+            client_alive = alive,
+            "the lock screen has stopped covering the displays: they are blank and the \
+             session stays locked. Run irontile-lock again, from a virtual terminal if \
+             there is no other way in, and it will take the lock over"
         );
     }
 }
@@ -150,8 +208,9 @@ impl SessionLockHandler for Irontile {
         // locked twice, and telling the newcomer it succeeded would hand it a
         // session somebody else is holding. Dropping the confirmation refuses
         // it.
+        let outputs: Vec<_> = self.arrangement.iter().map(|spec| spec.id).collect();
         if let Some(existing) = &self.session_lock {
-            if existing.alive() {
+            if existing.working(&outputs) {
                 tracing::warn!("refused a second lock on an already locked session");
                 return;
             }
@@ -161,7 +220,10 @@ impl SessionLockHandler for Irontile {
             // worse in every case than letting somebody else draw a lock
             // screen: the session stays locked throughout, and whoever takes
             // over still has to satisfy PAM before anything is given back.
-            tracing::warn!("the locker is gone; letting a new one take the lock");
+            tracing::warn!(
+                alive = existing.alive(),
+                "the lock screen is not covering the displays; letting a new one take over"
+            );
         }
         tracing::info!("locking the session");
         self.session_lock = Some(Lock {
@@ -169,6 +231,7 @@ impl SessionLockHandler for Irontile {
             object: Some(confirmation.ext_session_lock().clone()),
             pending: Some(confirmation),
             reported_dead: false,
+            covered_at: Instant::now(),
         });
         // Nothing else may have the keyboard from this moment, whether or not
         // the locker has drawn yet.
@@ -203,3 +266,44 @@ impl SessionLockHandler for Irontile {
 }
 
 smithay::delegate_session_lock!(Irontile);
+
+#[cfg(test)]
+mod tests {
+    use super::{WEDGED_AFTER, still_working};
+    use std::time::Duration;
+
+    #[test]
+    fn a_lock_that_covers_the_displays_is_working() {
+        assert!(still_working(true, true, Duration::from_secs(0)));
+        // Even a client that has gone: what is on screen is on screen, and
+        // nothing else may be put over it until somebody unlocks.
+        assert!(still_working(true, false, WEDGED_AFTER * 2));
+    }
+
+    #[test]
+    fn a_locker_that_died_is_replaceable_at_once() {
+        // No grace for a client that will never draw again: waiting would
+        // leave a blank screen that cannot be replaced, for nothing.
+        assert!(!still_working(false, false, Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn a_live_locker_gets_a_moment_before_it_counts_as_stuck() {
+        // Coming back from suspend, or a display being plugged in, leaves a
+        // locker briefly a surface short. That is not a wedged session.
+        assert!(still_working(false, true, Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_live_locker_that_never_draws_again_is_still_a_blank_screen() {
+        // The failure this exists for: a locker came back from suspend still
+        // connected, still holding the lock, and drawing nothing, so every
+        // attempt to put a working lock screen up was refused because one was
+        // supposedly already there.
+        assert!(!still_working(
+            false,
+            true,
+            WEDGED_AFTER + Duration::from_secs(1)
+        ));
+    }
+}

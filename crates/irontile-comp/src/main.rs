@@ -241,8 +241,38 @@ fn init_tracing(to_file: bool) {
         .with(terminal)
         .with(file)
         .init();
+
+    // A panic prints to standard error, which for a session is the virtual
+    // terminal it was started from -- the one place nobody reads afterwards,
+    // and exactly where the reason a session died would have gone. Routing it
+    // through tracing puts it in the file as well, which is the whole point of
+    // there being a file.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(
+            at = info.location().map(|at| at.to_string()),
+            "the compositor panicked: {}",
+            panic_message(info)
+        );
+        previous(info);
+    }));
     if missing {
         tracing::warn!("no log file; this session's output lives only in this terminal");
+    }
+}
+
+/// What a panic was about, as far as it can be got at.
+///
+/// A payload is usually a string; anything else is reported as unknown rather
+/// than guessed at, because a panic with no message still says where it was.
+fn panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "no message".to_string()
     }
 }
 
