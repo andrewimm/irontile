@@ -624,3 +624,67 @@ fn a_child_surface_with_no_buffer_does_not_unmap_its_window() {
         "every window should still hold the cell it had"
     );
 }
+
+#[test]
+fn a_client_can_ask_for_a_window_to_be_focused() {
+    // What the protocol is for: a link handed to a browser that is already
+    // running should bring that browser forward rather than doing nothing
+    // visible.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+
+    let first = client.map_window("one");
+    let second = client.map_window("two");
+    compositor.wait_for_windows(2);
+    assert!(
+        client.configured(second).activated,
+        "the newest window should start focused"
+    );
+
+    client.activate(first);
+    client.wait_for(|c| c.configured(first).activated);
+    assert!(client.configured(first).activated);
+    assert!(
+        !client.configured(second).activated,
+        "two windows both believed they had the keyboard"
+    );
+}
+
+#[test]
+fn activating_a_window_brings_its_desktop_with_it() {
+    // The case that makes the protocol worth having. A browser handed a link
+    // is rarely on the desktop being looked at, and a compositor that focuses
+    // it without showing it has moved the keyboard somewhere invisible --
+    // which is worse than having done nothing.
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+
+    let away = client.map_window("on the other desktop");
+    compositor.wait_for_windows(1);
+
+    compositor
+        .client
+        .action(irontile_ipc::Action::Workspace(2))
+        .expect("switching desktop");
+    let here = client.map_window("on this one");
+    // Not `wait_for_windows(2)`: the frame reports what is on screen, and the
+    // first window is on a desktop that is not.
+    client.wait_for(|c| c.configured(here).activated);
+
+    client.activate(away);
+    client.wait_for(|c| c.configured(away).activated);
+
+    let showing = match compositor.client.query(irontile_ipc::Query::Workspaces) {
+        Ok(irontile_ipc::ResponsePayload::Workspaces(w)) => w,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    let focused = showing
+        .iter()
+        .find(|w| w.focused)
+        .expect("something has to be focused");
+    assert_eq!(
+        focused.name.as_deref(),
+        Some("1"),
+        "the window was focused on a desktop nobody was shown"
+    );
+}

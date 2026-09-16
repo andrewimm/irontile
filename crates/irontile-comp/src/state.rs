@@ -52,6 +52,9 @@ use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::xdg_activation::{
+    XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+};
 use smithay::{
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
 };
@@ -223,6 +226,11 @@ pub struct Irontile {
     pub output_manager_state: OutputManagerState,
     pub seat_state: SeatState<Self>,
     pub data_device_state: DataDeviceState,
+    /// Lets a client ask for a window to be brought to the front -- the
+    /// protocol behind a link opened in a terminal raising the browser that
+    /// handles it, and behind an application started twice focusing the copy
+    /// that is already running instead of opening another.
+    pub xdg_activation_state: XdgActivationState,
     /// Middle-click paste. Held for its global.
     #[allow(dead_code)]
     pub primary_selection_state: PrimarySelectionState,
@@ -386,6 +394,7 @@ impl Irontile {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(dh),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
+            xdg_activation_state: XdgActivationState::new::<Self>(dh),
             primary_selection_state,
             wlr_data_control_state,
             ext_data_control_state,
@@ -1998,6 +2007,41 @@ impl SeatHandler for Irontile {
     }
 }
 
+impl XdgActivationHandler for Irontile {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    /// A client has asked for a window to be focused.
+    ///
+    /// Honoured, including across desktops: the layout engine shows the
+    /// desktop the window is on before focusing it, which is what somebody
+    /// opening a link from a terminal means by it. The alternative -- marking
+    /// the window and waiting to be asked -- needs somewhere to show the mark,
+    /// and there is nowhere yet.
+    ///
+    /// The token goes afterwards. A token is meant for one activation, and the
+    /// pool would otherwise grow for as long as the session lasts.
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        match self.windows.id_of(&surface) {
+            Some(window) => {
+                tracing::debug!(app_id = ?data.app_id, "activating a window");
+                self.apply(Command::FocusWindow { window });
+            }
+            // A surface that is not a managed window: a layer surface, or a
+            // window that closed between asking and being answered. Neither is
+            // a fault, and neither is something to focus.
+            None => tracing::debug!(app_id = ?data.app_id, "activation named no window"),
+        }
+        self.xdg_activation_state.remove_token(&token);
+    }
+}
+
 impl smithay::wayland::output::OutputHandler for Irontile {}
 
 impl smithay::wayland::idle_notify::IdleNotifierHandler for Irontile {
@@ -2084,6 +2128,7 @@ smithay::delegate_idle_notify!(Irontile);
 smithay::delegate_idle_inhibit!(Irontile);
 smithay::delegate_viewporter!(Irontile);
 smithay::delegate_primary_selection!(Irontile);
+smithay::delegate_xdg_activation!(Irontile);
 smithay::delegate_data_control!(Irontile);
 smithay::delegate_ext_data_control!(Irontile);
 smithay::delegate_cursor_shape!(Irontile);

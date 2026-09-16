@@ -41,6 +41,10 @@ use wayland_protocols::wp::idle_inhibit::zv1::client::{
     zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1, zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
 };
 use wayland_protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use wayland_protocols::xdg::activation::v1::client::{
+    xdg_activation_token_v1::{self, XdgActivationTokenV1},
+    xdg_activation_v1::XdgActivationV1,
+};
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
     zxdg_toplevel_decoration_v1::{self, ZxdgToplevelDecorationV1},
@@ -107,6 +111,7 @@ struct Globals {
     /// its displays in.
     outputs: Vec<wayland_client::protocol::wl_output::WlOutput>,
     session_lock: Option<ExtSessionLockManagerV1>,
+    activation: Option<XdgActivationV1>,
     idle_notifier: Option<ExtIdleNotifierV1>,
     idle_inhibit: Option<ZwpIdleInhibitManagerV1>,
     screencopy: Option<ZwlrScreencopyManagerV1>,
@@ -122,6 +127,8 @@ struct State {
     keyboard_focus: Option<WlSurface>,
     keymap: Option<String>,
     idled: bool,
+    /// The last token the compositor handed out, from `done`.
+    activation_token: Option<String>,
     /// Where the pointer is and on which of our surfaces, if any.
     pointer: Option<(WlSurface, (f64, f64))>,
     /// The session lock, while this client holds one.
@@ -216,6 +223,7 @@ impl TestClient {
                 keyboard_focus: None,
                 keymap: None,
                 idled: false,
+                activation_token: None,
                 pointer: None,
                 lock: None,
                 locks: Vec::new(),
@@ -645,6 +653,39 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Asks the compositor to focus a window, the way a browser being handed a
+    /// link does: take a token, then spend it on a surface.
+    pub fn activate(&mut self, id: WindowId) {
+        let handle = self.queue.handle();
+        let activation = self
+            .state
+            .globals
+            .activation
+            .clone()
+            .expect("the compositor advertised no xdg-activation");
+        let surface = self.state.windows[id.0].surface.clone();
+
+        self.state.activation_token = None;
+        let token = activation.get_activation_token(&handle, ());
+        token.set_surface(&surface);
+        token.commit();
+        // The token is minted asynchronously; it cannot be spent until it
+        // arrives.
+        for _ in 0..20 {
+            self.roundtrip();
+            if self.state.activation_token.is_some() {
+                break;
+            }
+        }
+        let minted = self
+            .state
+            .activation_token
+            .clone()
+            .expect("the compositor never handed over a token");
+        activation.activate(minted, &surface);
+        self.roundtrip();
+    }
+
     pub fn roundtrip(&mut self) {
         self.queue
             .roundtrip(&mut self.state)
@@ -1025,6 +1066,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
             "ext_session_lock_manager_v1" => {
                 state.globals.session_lock = Some(registry.bind(name, version.min(1), handle, ()));
             }
+            "xdg_activation_v1" => {
+                state.globals.activation = Some(registry.bind(name, version.min(1), handle, ()));
+            }
             "ext_idle_notifier_v1" => {
                 state.globals.idle_notifier = Some(registry.bind(name, version.min(1), handle, ()));
             }
@@ -1221,6 +1265,22 @@ impl Dispatch<ExtIdleNotificationV1, ()> for State {
     }
 }
 delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
+delegate_noop!(State: ignore XdgActivationV1);
+
+impl Dispatch<XdgActivationTokenV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &XdgActivationTokenV1,
+        event: xdg_activation_token_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let xdg_activation_token_v1::Event::Done { token } = event {
+            state.activation_token = Some(token);
+        }
+    }
+}
 
 impl Dispatch<WpFractionalScaleV1, usize> for State {
     fn event(
