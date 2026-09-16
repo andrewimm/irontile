@@ -21,7 +21,17 @@ pub fn commit() -> Option<&'static str> {
 /// with changes in it -- which is worth saying out loud, because a dirty build
 /// is one nobody else can reproduce.
 pub fn line(program: &str, version: &str) -> String {
-    match commit() {
+    describe(program, version, commit())
+}
+
+/// The same line, told what the commit is rather than looking it up.
+///
+/// Split out so the shape can be tested without the test depending on how the
+/// machine running it was checked out. A build from a tarball has no commit and
+/// is not a broken build, so a test that demands one is a test that fails on
+/// the machines least able to explain why.
+fn describe(program: &str, version: &str, commit: Option<&str>) -> String {
+    match commit {
         Some(commit) => format!("{program} {version} ({commit})"),
         None => format!("{program} {version}"),
     }
@@ -29,21 +39,33 @@ pub fn line(program: &str, version: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::line;
+    use super::{describe, line};
 
     #[test]
-    fn the_line_names_the_program_and_its_version() {
-        let text = line("irontile", "0.2.6");
-        assert!(text.starts_with("irontile 0.2.6"), "{text}");
+    fn a_commit_is_shown_in_brackets() {
+        assert_eq!(
+            describe("irontile", "0.2.7", Some("468dceb0")),
+            "irontile 0.2.7 (468dceb0)"
+        );
     }
 
     #[test]
-    fn a_commit_is_shown_in_brackets_when_there_is_one() {
-        // This test runs from a checkout, so there is one.
-        let text = line("irontile", "0.2.6");
-        assert!(
-            text.contains('(') && text.ends_with(')'),
-            "built from a checkout but said nothing about the commit: {text}"
-        );
+    fn a_build_with_no_commit_still_names_itself() {
+        // A source tarball, or anywhere else git could not be asked. Saying
+        // less is right; saying nothing, or refusing to build, is not.
+        assert_eq!(describe("irontile", "0.2.7", None), "irontile 0.2.7");
+    }
+
+    #[test]
+    fn a_dirty_tree_says_so_where_it_can_be_seen() {
+        let text = describe("irontile", "0.2.7", Some("468dceb0-dirty"));
+        assert!(text.ends_with("-dirty)"), "{text}");
+    }
+
+    #[test]
+    fn the_real_line_names_the_program_and_its_version() {
+        // Whatever this machine turned out to have: the version is always
+        // there, and the commit is not this test's business.
+        assert!(line("irontile", "0.2.7").starts_with("irontile 0.2.7"));
     }
 }
