@@ -689,7 +689,8 @@ otherwise stop the clock in front of somebody.
 | `xdg_shell` | Toplevels and popups, with grabs, so menus dismiss |
 | `xdg-decoration` | Every request is answered server-side; clients never draw their own titlebars |
 | `wlr-layer-shell` | Bars and panels; exclusive zones shrink the work area windows tile into |
-| `wl_data_device`, `primary-selection` | Clipboard and middle-click paste |
+| `wl_data_device`, `primary-selection` | Clipboard and middle-click paste. Both hand the selection to whichever client holds keyboard focus, and to no other |
+| `wlr-data-control`, `ext-data-control` | The clipboard without focus, for the tools that have no window to focus: a clipboard manager watching for changes, or a paste helper asked for the contents. Given the choice they use this; without it they map a one-pixel window to take the focus instead, which a tiling compositor dutifully tiles. Any client may use it. The filter could gate on a client's pid, but that is a thin fence: pids are reused, a script's is its interpreter's, and anything the user can run could be named. Telling a sandboxed application from the user's own clipboard manager properly wants `security-context`, which is not implemented here |
 | `cursor-shape` | Clients name a cursor and the compositor supplies the image, from an XCursor theme |
 | `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
 | `wlr-screencopy` | Copies a display to a client. Screenshots today, screen sharing once a portal sits on top |

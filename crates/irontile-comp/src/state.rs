@@ -39,8 +39,14 @@ use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
     set_data_device_focus,
 };
+use smithay::wayland::selection::ext_data_control::{
+    DataControlHandler as ExtDataControlHandler, DataControlState as ExtDataControlState,
+};
 use smithay::wayland::selection::primary_selection::{
     PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
+};
+use smithay::wayland::selection::wlr_data_control::{
+    DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
 };
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
@@ -220,6 +226,16 @@ pub struct Irontile {
     /// Middle-click paste. Held for its global.
     #[allow(dead_code)]
     pub primary_selection_state: PrimarySelectionState,
+    /// Reading and setting the clipboard without holding focus, which is the
+    /// only way a clipboard manager or a paste helper can work: the ordinary
+    /// data device only ever offers the selection to the focused client, so
+    /// anything else has to take the focus to read it, and taking the focus
+    /// means mapping a window. Both spellings, old and new, because a client
+    /// picks whichever it finds and `wl-paste` looks for each in turn.
+    #[allow(dead_code)]
+    pub wlr_data_control_state: WlrDataControlState,
+    #[allow(dead_code)]
+    pub ext_data_control_state: ExtDataControlState,
     /// Tells clients how long the seat has been idle, which is what an idle
     /// daemon waits on before dimming, locking or suspending.
     pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Irontile>,
@@ -333,6 +349,23 @@ impl Irontile {
         let layout_config = config.layout;
         let config_cursor = config.cursor.clone();
 
+        // Built before the rest because both data-control globals are told
+        // about it: without it they would carry the clipboard and not the
+        // middle-click selection, and a paste helper would quietly get one of
+        // the two.
+        let primary_selection_state = PrimarySelectionState::new::<Self>(dh);
+        // Every client, which is what this protocol is for and worth saying
+        // out loud: it hands any client the clipboard without focus and
+        // without the user doing anything. There is no way to offer it to
+        // clipboard managers alone -- a compositor cannot tell one from
+        // anything else that asks -- so the choice is this or no clipboard
+        // manager, no paste helper, and a blank window every time something
+        // reaches for the clipboard.
+        let wlr_data_control_state =
+            WlrDataControlState::new::<Self, _>(dh, Some(&primary_selection_state), |_| true);
+        let ext_data_control_state =
+            ExtDataControlState::new::<Self, _>(dh, Some(&primary_selection_state), |_| true);
+
         Self {
             display_handle: display_handle.clone(),
             start_time: Instant::now(),
@@ -349,7 +382,9 @@ impl Irontile {
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(dh),
             seat_state,
             data_device_state: DataDeviceState::new::<Self>(dh),
-            primary_selection_state: PrimarySelectionState::new::<Self>(dh),
+            primary_selection_state,
+            wlr_data_control_state,
+            ext_data_control_state,
             idle_notifier: smithay::wayland::idle_notify::IdleNotifierState::new(
                 dh,
                 loop_handle.clone(),
@@ -1984,6 +2019,21 @@ impl PrimarySelectionHandler for Irontile {
     }
 }
 
+/// The wlroots spelling, which is what everything in use today asks for first.
+impl WlrDataControlHandler for Irontile {
+    fn data_control_state(&self) -> &WlrDataControlState {
+        &self.wlr_data_control_state
+    }
+}
+
+/// The standardised spelling that replaces it. Both are offered because a
+/// client binds whichever it finds, and the old one will be around for years.
+impl ExtDataControlHandler for Irontile {
+    fn data_control_state(&self) -> &ExtDataControlState {
+        &self.ext_data_control_state
+    }
+}
+
 impl ClientDndGrabHandler for Irontile {}
 
 impl ServerDndGrabHandler for Irontile {
@@ -1997,6 +2047,8 @@ smithay::delegate_idle_notify!(Irontile);
 smithay::delegate_idle_inhibit!(Irontile);
 smithay::delegate_viewporter!(Irontile);
 smithay::delegate_primary_selection!(Irontile);
+smithay::delegate_data_control!(Irontile);
+smithay::delegate_ext_data_control!(Irontile);
 smithay::delegate_cursor_shape!(Irontile);
 delegate_shm!(Irontile);
 delegate_seat!(Irontile);
