@@ -45,6 +45,9 @@ pub struct Lock {
     /// it a lock is only as alive as its surfaces, and a client that has
     /// locked but not yet drawn has none.
     object: Option<ExtSessionLockV1>,
+    /// Set once the death has been written down, so the log gets one line
+    /// rather than one per pass round the event loop.
+    reported_dead: bool,
 }
 
 impl Lock {
@@ -111,6 +114,32 @@ impl Lock {
     }
 }
 
+impl Irontile {
+    /// Writes down the moment a locked session loses the thing drawing it.
+    ///
+    /// From the chair that moment is a screen that goes blank and a keyboard
+    /// that stops going anywhere, which is indistinguishable from the machine
+    /// having hung -- and the first question afterwards is whether the locker
+    /// died or the compositor broke. Nothing else answers it: the locker's own
+    /// output goes whichever way the thing that started it was pointed, and on
+    /// a laptop that locked itself on an idle timer, that is a virtual
+    /// terminal nobody will read.
+    pub fn notice_a_dead_lock(&mut self) {
+        let Some(lock) = &mut self.session_lock else {
+            return;
+        };
+        if lock.alive() || lock.reported_dead {
+            return;
+        }
+        lock.reported_dead = true;
+        tracing::warn!(
+            "the lock screen's client is gone: every display is blank and the \
+             session stays locked. Run irontile-lock again, from a virtual \
+             terminal if there is no other way in, to get a lock screen back"
+        );
+    }
+}
+
 impl SessionLockHandler for Irontile {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
         &mut self.session_lock_state
@@ -139,6 +168,7 @@ impl SessionLockHandler for Irontile {
             surfaces: HashMap::new(),
             object: Some(confirmation.ext_session_lock().clone()),
             pending: Some(confirmation),
+            reported_dead: false,
         });
         // Nothing else may have the keyboard from this moment, whether or not
         // the locker has drawn yet.

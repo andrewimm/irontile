@@ -49,8 +49,45 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("irontile-lock: {err}");
+            record(&err);
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// Appends why this stopped to `~/.local/state/irontile/irontile-lock.log`.
+///
+/// Standard error goes wherever whatever started this was pointed, and what
+/// starts a lock screen is an idle daemon on a machine whose owner has walked
+/// away -- so on the one occasion the reason matters, it has been written to a
+/// virtual terminal nobody will ever read. A locker that dies leaves every
+/// display blank until somebody runs another one, and "why" is then the only
+/// question worth answering.
+///
+/// Appended rather than rotated: these are one line each and rare, and losing
+/// the line before is how the last one got away.
+fn record(why: &str) {
+    let Some(state) = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+    else {
+        return;
+    };
+    let state = state.join("irontile");
+    if std::fs::create_dir_all(&state).is_err() {
+        return;
+    }
+    let when = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%z");
+    let line = format!("{when} irontile-lock: {why}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.join("irontile-lock.log"))
+    {
+        use std::io::Write as _;
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

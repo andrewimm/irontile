@@ -349,6 +349,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             render_all(state);
         }
         state.popups.cleanup();
+        state.notice_a_dead_lock();
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(%err, "failed to flush clients");
         }

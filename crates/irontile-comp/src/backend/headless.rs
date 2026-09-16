@@ -75,6 +75,7 @@ pub fn run(outputs: Vec<OutputSpec>, options: Options) -> anyhow::Result<()> {
             return;
         }
         state.popups.cleanup();
+        state.notice_a_dead_lock();
         if let Err(err) = state.display_handle.flush_clients() {
             tracing::warn!(%err, "failed to flush clients");
         }

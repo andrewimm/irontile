@@ -243,7 +243,17 @@ fn init_tracing(to_file: bool) {
     }
 }
 
-/// Opens the log, keeping the previous run's as `irontile.log.1`.
+/// How many previous runs to keep beside the current one.
+///
+/// More than one, because getting back into a wedged session takes more than
+/// one attempt: a compositor that cannot take the display still starts, still
+/// rotates the log, and the run worth reading is then two or three starts back
+/// rather than one. Keeping a single previous run meant the first restart
+/// destroyed the evidence of what it was restarting from, which is exactly
+/// what happened the first time this was needed.
+const KEPT_LOGS: usize = 5;
+
+/// Opens the log, shuffling previous runs down to `irontile.log.5`.
 ///
 /// `None` rather than a failure: a compositor that would not start because it
 /// could not write a log would be a worse compositor than one that starts
@@ -256,11 +266,27 @@ fn log_file() -> Option<std::fs::File> {
         })?
         .join("irontile");
     std::fs::create_dir_all(&state).ok()?;
+    open_log_in(&state)
+}
 
+/// The rotation itself, given somewhere to do it.
+///
+/// Separate from finding the directory so that what shuffles the files can be
+/// tested on a directory of its own. This is the part that decides whether the
+/// run worth reading is still there, and it was wrong the first time.
+fn open_log_in(state: &std::path::Path) -> Option<std::fs::File> {
     let path = state.join("irontile.log");
-    // Renamed rather than appended to, so the file is one run and its size is
+    // Renamed rather than appended to, so a file is one run and its size is
     // that run's. An append would grow without bound across a year of logins.
     if path.exists() {
+        // Oldest first, or each rename would overwrite the one it is about to
+        // move.
+        for n in (1..KEPT_LOGS).rev() {
+            let older = state.join(format!("irontile.log.{n}"));
+            if older.exists() {
+                let _ = std::fs::rename(&older, state.join(format!("irontile.log.{}", n + 1)));
+            }
+        }
         let _ = std::fs::rename(&path, state.join("irontile.log.1"));
     }
     std::fs::File::create(&path).ok()
@@ -299,5 +325,68 @@ mod tests {
                 "{spec:?} should not parse"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod log_tests {
+    use super::{KEPT_LOGS, open_log_in};
+    use std::io::Write as _;
+
+    /// A directory of its own, removed when the test ends.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("irontile-log-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory to write in");
+        dir
+    }
+
+    /// Starts the compositor again, writing a line that says which run it was.
+    fn run_once(dir: &std::path::Path, marker: &str) {
+        let mut file = open_log_in(dir).expect("a log to write to");
+        writeln!(file, "{marker}").expect("a line to land");
+    }
+
+    #[test]
+    fn the_run_that_went_wrong_survives_the_restarts_it_takes_to_recover() {
+        // The failure that made this necessary: a wedged session took two
+        // restarts to get back into, and keeping one previous run meant the
+        // first restart destroyed the log of the thing it was restarting from.
+        let dir = scratch("recover");
+        run_once(&dir, "the run that went wrong");
+        run_once(&dir, "first attempt at getting back in");
+        run_once(&dir, "second attempt, which worked");
+
+        let two_back = std::fs::read_to_string(dir.join("irontile.log.2")).expect("two runs back");
+        assert!(
+            two_back.contains("the run that went wrong"),
+            "the interesting run was rotated away by the recovery: {two_back:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_shuffle_keeps_them_in_order_and_stops_at_the_last() {
+        let dir = scratch("order");
+        for run in 0..KEPT_LOGS + 3 {
+            run_once(&dir, &format!("run {run}"));
+        }
+
+        // The newest previous run is .1 and they get older as they go.
+        let last = KEPT_LOGS + 2;
+        for back in 1..=KEPT_LOGS {
+            let body = std::fs::read_to_string(dir.join(format!("irontile.log.{back}")))
+                .unwrap_or_else(|_| panic!("irontile.log.{back} should exist"));
+            assert!(
+                body.contains(&format!("run {}", last - back)),
+                "irontile.log.{back} held {body:?}"
+            );
+        }
+        assert!(
+            !dir.join(format!("irontile.log.{}", KEPT_LOGS + 1)).exists(),
+            "kept more runs than it promised to"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
