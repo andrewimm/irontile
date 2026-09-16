@@ -642,8 +642,9 @@ enum AxisName {
     Vertical,
 }
 
-/// Parses what a key does: `"focus left"`, or `{ action = "...", repeat = true }`
-/// when holding it down should keep firing.
+/// Parses what a key does: `"focus left"`, or a table when holding it down
+/// should keep firing (`repeat`) or it should still work at the lock screen
+/// (`locked`).
 fn parse_bind(key: &str, value: &toml::Value) -> Result<Option<Bind>, ParseFailure> {
     let fail = |message: String| ParseFailure::Binding {
         key: key.to_owned(),
@@ -659,9 +660,10 @@ fn parse_bind(key: &str, value: &toml::Value) -> Result<Option<Bind>, ParseFailu
         toml::Value::String(text) => Ok(Some(Bind::new(action(text)?))),
         toml::Value::Table(table) => {
             for name in table.keys() {
-                if name != "action" && name != "repeat" {
+                if name != "action" && name != "repeat" && name != "locked" {
                     return Err(fail(format!(
-                        "unknown setting {name:?}; a binding takes `action` and `repeat`"
+                        "unknown setting {name:?}; a binding takes `action`, `repeat` \
+                         and `locked`"
                     )));
                 }
             }
@@ -676,11 +678,16 @@ fn parse_bind(key: &str, value: &toml::Value) -> Result<Option<Bind>, ParseFailu
                     .as_bool()
                     .ok_or_else(|| fail("`repeat` must be true or false".into()))?;
             }
+            if let Some(locked) = table.get("locked") {
+                bind.locked = locked
+                    .as_bool()
+                    .ok_or_else(|| fail("`locked` must be true or false".into()))?;
+            }
             Ok(Some(bind))
         }
         other => Err(fail(format!(
             "expected an action like \"focus left\", `false` to unbind, or a table of \
-             `action` and `repeat`, not {}",
+             `action`, `repeat` and `locked`, not {}",
             other.type_str()
         ))),
     }
@@ -982,6 +989,32 @@ mod tests {
     }
 
     #[test]
+    fn a_binding_may_say_it_still_works_at_the_lock_screen() {
+        let config = Config::parse(
+            r#"
+            [binds]
+            "XF86AudioMute" = { action = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle", locked = true }
+            "Super+Return" = "spawn kitty"
+            "#,
+        )
+        .unwrap();
+        let bind = |text: &str| {
+            let combo = parse_combo(text).unwrap();
+            config
+                .keymap
+                .binds()
+                .find(|(c, _)| **c == combo)
+                .map(|(_, b)| b.clone())
+                .unwrap_or_else(|| panic!("no binding for {text}"))
+        };
+        assert!(bind("XF86AudioMute").locked);
+        assert!(
+            !bind("Super+Return").locked,
+            "a binding is off at the lock screen unless it says otherwise"
+        );
+    }
+
+    #[test]
     fn a_binding_that_is_written_wrong_names_the_key() {
         for (text, expected) in [
             (r#""Super+q" = { act = "close" }"#, "act"),
@@ -989,6 +1022,10 @@ mod tests {
             (
                 r#""Super+q" = { action = "close", repeat = "yes" }"#,
                 "repeat",
+            ),
+            (
+                r#""Super+q" = { action = "close", locked = "yes" }"#,
+                "locked",
             ),
             (r#""Super+q" = 7"#, "action"),
             (r#""Super+q" = "nonsense""#, "nonsense"),

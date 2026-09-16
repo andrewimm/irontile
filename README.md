@@ -179,7 +179,21 @@ focus_follows_move = true
 # resize -- keep going; everything else fires once however long it is held.
 "XF86AudioRaiseVolume" = { action = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+", repeat = true }
 "XF86AudioMute" = "spawn wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
+
+# `locked` keeps a binding working while the screen is locked. Off for
+# everything by default: the keyboard at a lock screen belongs to the lock
+# screen, and a binding that fires anyway can spawn a program behind it.
+# Volume and brightness are what this is for.
+"XF86AudioLowerVolume" = { action = "spawn wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-", repeat = true, locked = true }
 ```
+
+**No binding fires while the session is locked** unless it says `locked = true`,
+with two exceptions decided in code rather than configuration. Switching virtual
+terminal always works: the terminal switched to asks for a login of its own, and
+it is the last way out of a session whose lock screen has stopped answering.
+Quitting the compositor never works, whatever the file says -- a session started
+from a virtual terminal leaves an authenticated shell behind it, so quitting at
+the lock screen would hand the machine to whoever pressed the key.
 
 A `spawn` honours quotes, so `spawn sh -c "grim -g \"$(slurp)\""` reaches the
 shell as one argument rather than five words. Splitting on spaces alone hands

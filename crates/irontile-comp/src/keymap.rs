@@ -99,6 +99,14 @@ pub struct Bind {
     /// it. Everything else fires once however long it is held, because
     /// repeating "close the window" or "switch to desktop 3" means nothing.
     pub repeat: bool,
+    /// Whether the binding still fires while the session is locked.
+    ///
+    /// Off for everything by default, because a lock screen that leaves the
+    /// bindings working is not a lock screen: the keyboard belongs to the
+    /// locker and nothing else, or somebody standing at a locked machine can
+    /// spawn a terminal behind it. A volume or brightness key is the case
+    /// worth opting back in, and this is how.
+    pub locked: bool,
 }
 
 impl Bind {
@@ -106,6 +114,7 @@ impl Bind {
     pub fn new(action: Action) -> Self {
         Bind {
             repeat: ramps(&action),
+            locked: false,
             action,
         }
     }

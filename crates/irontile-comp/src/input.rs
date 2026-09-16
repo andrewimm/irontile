@@ -168,6 +168,20 @@ fn keyboard<B: InputBackend>(state: &mut Irontile, event: B::KeyboardKeyEvent) {
             }
 
             match matched {
+                // While the session is locked the keyboard is the lock
+                // screen's. A binding that fires anyway is a hole straight
+                // through it -- most of them merely rearrange a desktop
+                // nobody can see, but `spawn` runs a program behind it and
+                // quitting hands back the terminal the session was started
+                // from. Forwarding rather than swallowing, so the keystroke
+                // reaches the lock screen and counts towards the password
+                // somebody is typing.
+                Some(bind)
+                    if state.session_lock.is_some()
+                        && !crate::action::fires_while_locked(&bind.action, bind.locked) =>
+                {
+                    FilterResult::Forward
+                }
                 // Intercepting means the client never sees the key, which is what
                 // keeps a compositor binding from also typing into the window.
                 Some(bind) => FilterResult::Intercept(bind),

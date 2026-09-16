@@ -9,6 +9,30 @@ use irontile_layout::{Command, Event};
 use crate::state::Irontile;
 
 /// Carries out an action, reporting whatever the layout engine did.
+/// Whether a binding may fire while the session is locked.
+///
+/// A locked session means the keyboard belongs to the lock screen and to
+/// nothing else. Leaving the bindings live undoes that completely: `spawn`
+/// starts a program behind the lock screen, `close` destroys windows nobody
+/// can see, and quitting the compositor hands back the terminal the session
+/// was started from -- which on a machine launched from a virtual terminal is
+/// an authenticated shell, and the whole lock defeated by one keypress.
+///
+/// Two exceptions in opposite directions. Switching virtual terminal always
+/// works: a compositor holding the VT is the only thing that can perform the
+/// switch, the terminal switched to asks for a login of its own, and taking it
+/// away would remove the last way out of a session that has gone wrong.
+/// Quitting never works, whatever a configuration file says, because there is
+/// no arrangement in which ending the session from its lock screen is what
+/// somebody meant.
+pub fn fires_while_locked(action: &Action, opted_in: bool) -> bool {
+    match action {
+        Action::SwitchVt(_) => true,
+        Action::Quit => false,
+        _ => opted_in,
+    }
+}
+
 pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
     match action {
         Action::Focus(dir) => state.apply(Command::FocusDirection { dir: *dir }),
@@ -104,5 +128,53 @@ pub fn perform(state: &mut Irontile, action: &Action) -> Vec<Event> {
             tracing::warn!(action = %other, "unsupported action");
             Vec::new()
         }
+    }
+}
+
+#[cfg(test)]
+mod locked_tests {
+    use super::fires_while_locked;
+    use irontile_ipc::{Action, Direction};
+
+    #[test]
+    fn quitting_the_compositor_is_never_a_thing_a_lock_screen_does() {
+        // The hole this was written for: a session started from a virtual
+        // terminal leaves an authenticated shell behind it, so quitting at the
+        // lock screen hands the machine to whoever pressed the key. Opting in
+        // must not buy it back.
+        assert!(!fires_while_locked(&Action::Quit, false));
+        assert!(!fires_while_locked(&Action::Quit, true));
+    }
+
+    #[test]
+    fn switching_terminal_always_works_because_it_is_the_way_out() {
+        // The terminal switched to asks for a login of its own, so this gives
+        // nothing away -- and it is the last way into a session whose lock
+        // screen has stopped answering.
+        assert!(fires_while_locked(&Action::SwitchVt(2), false));
+    }
+
+    #[test]
+    fn nothing_else_fires_unless_it_was_asked_to() {
+        for action in [
+            Action::Spawn(vec!["kitty".to_string()]),
+            Action::Close,
+            Action::Workspace(3),
+            Action::Focus(Direction::Left),
+            Action::Reload,
+        ] {
+            assert!(
+                !fires_while_locked(&action, false),
+                "{action:?} fired at a locked screen without being asked to"
+            );
+        }
+    }
+
+    #[test]
+    fn a_volume_key_can_be_asked_to_keep_working() {
+        // What the opt-in is for: the keys somebody expects to work while the
+        // screen is locked are the ones that change nothing about the session.
+        let volume = Action::Spawn(vec!["wpctl".to_string(), "set-volume".to_string()]);
+        assert!(fires_while_locked(&volume, true));
     }
 }
