@@ -88,7 +88,10 @@ fn run(args: &[String]) -> anyhow::Result<()> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("irontile {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{}",
+                    irontile_version::line("irontile", env!("CARGO_PKG_VERSION"))
+                );
                 return Ok(());
             }
             "--print-config" => {

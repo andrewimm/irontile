@@ -75,7 +75,10 @@ fn run(args: &[String]) -> Result<ExitCode, String> {
                 return Ok(ExitCode::SUCCESS);
             }
             "--version" | "-V" => {
-                println!("start-irontile {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{}",
+                    irontile_version::line("start-irontile", env!("CARGO_PKG_VERSION"))
+                );
                 return Ok(ExitCode::SUCCESS);
             }
             "--path" => {

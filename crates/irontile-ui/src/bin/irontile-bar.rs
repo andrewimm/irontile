@@ -56,7 +56,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("irontile-bar {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{}",
+                    irontile_version::line("irontile-bar", env!("CARGO_PKG_VERSION"))
+                );
                 return Ok(());
             }
             "--config" => config_file = Some(std::path::PathBuf::from(need(iter.next(), arg)?)),

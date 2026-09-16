@@ -325,6 +325,14 @@ fn query_reply(state: &mut Irontile, query: Query) -> ResponsePayload {
         Query::Windows => ResponsePayload::Windows(state.window_infos()),
         Query::Layout => ResponsePayload::Layout(Box::new(state.layout.clone())),
         Query::Layers => ResponsePayload::Layers(state.layer_infos()),
+        // Answered from this binary's own constants, so it describes the
+        // process actually holding the displays rather than whatever is
+        // installed under the same name.
+        Query::Version => ResponsePayload::Version {
+            name: "irontile".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: irontile_version::commit().map(str::to_string),
+        },
         // The protocol is `#[non_exhaustive]`; an unknown query is an error
         // rather than a panic.
         other => ResponsePayload::Error {

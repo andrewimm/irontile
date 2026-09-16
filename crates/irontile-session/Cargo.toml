@@ -12,6 +12,7 @@ name = "start-irontile"
 path = "src/main.rs"
 
 [dependencies]
+irontile-version.workspace = true
 rustix = { workspace = true, features = ["process"] }
 signal-hook.workspace = true
 

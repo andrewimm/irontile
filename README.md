@@ -92,8 +92,31 @@ Without a login manager, a TTY works the same way:
 exec start-irontile
 ```
 
-Each binary answers `--version`, which is the quickest way to tell what a
-package actually installed.
+Each binary answers `--version` with the commit it was built from, because a
+version number alone cannot tell a release from a package built out of a
+working tree that happens to carry the same number:
+
+```
+$ irontile --version
+irontile 0.2.6 (e8e57c26)
+```
+
+A `-dirty` on the end means it was built from a tree with uncommitted changes
+in it, and so from something nobody else can reproduce. The commit is missing
+where there was no git to ask, which is better than inventing one.
+
+`irontilectl version` answers a different question -- what is *running*:
+
+```
+$ irontilectl version
+irontilectl 0.2.6 (e8e57c26)
+irontile    0.2.5 (b1b3cc7a)
+```
+
+Two lines because they are two binaries. Installing a package replaces both on
+disk and neither in memory, so a session keeps running whatever it started as
+until it is restarted, and those numbers can disagree for days. The second line
+is the one that describes the compositor holding your windows.
 
 ## Configuration
 

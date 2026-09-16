@@ -1,0 +1,11 @@
+[package]
+name = "irontile-version"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "What build this is: the version, and the commit it was built from"
+
+[lints]
+workspace = true

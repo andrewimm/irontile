@@ -16,6 +16,7 @@ name = "irontile-lock"
 path = "src/main.rs"
 
 [dependencies]
+irontile-version.workspace = true
 pam.workspace = true
 libc.workspace = true
 rustix = { workspace = true, features = ["termios"] }

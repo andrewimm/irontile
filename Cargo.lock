@@ -1108,6 +1108,7 @@ dependencies = [
  "anyhow",
  "irontile-ipc",
  "irontile-layout",
+ "irontile-version",
  "libc",
  "rustix 1.1.4",
  "serde",
@@ -1129,6 +1130,7 @@ name = "irontile-ipc"
 version = "0.2.6"
 dependencies = [
  "irontile-layout",
+ "irontile-version",
  "serde",
  "serde_json",
 ]
@@ -1149,6 +1151,7 @@ dependencies = [
  "chrono",
  "cosmic-text",
  "irontile-power",
+ "irontile-version",
  "libc",
  "pam",
  "rustix 1.1.4",
@@ -1166,6 +1169,7 @@ version = "0.2.6"
 name = "irontile-session"
 version = "0.2.6"
 dependencies = [
+ "irontile-version",
  "rustix 1.1.4",
  "signal-hook",
 ]
@@ -1178,6 +1182,7 @@ dependencies = [
  "cosmic-text",
  "irontile-ipc",
  "irontile-power",
+ "irontile-version",
  "libpulse-binding",
  "resvg",
  "rustix 1.1.4",
@@ -1190,6 +1195,10 @@ dependencies = [
  "wayland-protocols-wlr",
  "zbus",
 ]
+
+[[package]]
+name = "irontile-version"
+version = "0.2.6"
 
 [[package]]
 name = "itertools"

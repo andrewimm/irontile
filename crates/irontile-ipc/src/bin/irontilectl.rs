@@ -42,6 +42,46 @@ fn main() -> ExitCode {
     }
 }
 
+/// Asks the compositor on the other end of the socket what build it is.
+///
+/// Separate from this binary's own version on purpose: the number printed
+/// above comes from the file on disk, and the session was started from
+/// whatever was on disk at the time, which an upgrade since has replaced
+/// without touching the running process.
+///
+/// Never an error, because "what is running" still has an answer when the
+/// answer is "nothing" or "something too old to say" -- and a version command
+/// that fails is a version command nobody can put in a bug report.
+fn running_compositor() -> String {
+    let mut client = match Client::connect_default() {
+        Ok(client) => client,
+        Err(why) => return format!("irontile    nothing to ask: {why}"),
+    };
+    match client.query(Query::Version) {
+        Ok(ResponsePayload::Version {
+            name,
+            version,
+            commit,
+        }) => match commit {
+            Some(commit) => format!("{name}    {version} ({commit})"),
+            None => format!("{name}    {version}"),
+        },
+        Ok(ResponsePayload::Error { message }) => {
+            format!("irontile    would not say: {message}")
+        }
+        Ok(other) => format!("irontile    answered something else: {other:?}"),
+        // A compositor from before this question existed cannot parse it and
+        // drops the connection rather than replying, so a closed connection
+        // here means an older session rather than a broken one. Saying which
+        // is the whole point: an old compositor is exactly what somebody
+        // checking versions is trying to find out about.
+        Err(why) => format!(
+            "irontile    did not answer ({why}); \
+             a session older than this question cannot be asked"
+        ),
+    }
+}
+
 fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let Some(first) = args.first() else {
         print!("{HELP}");
@@ -49,7 +89,16 @@ fn run(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     if matches!(first.as_str(), "version" | "-V" | "--version") {
-        println!("irontilectl {}", env!("CARGO_PKG_VERSION"));
+        // This binary first, because it answers even with nothing running --
+        // and then the compositor, which is the one somebody actually wanted.
+        // They are separate binaries and routinely not from the same build:
+        // installing a package replaces both on disk and neither in memory,
+        // so the session keeps running whatever it started as.
+        println!(
+            "{}",
+            irontile_version::line("irontilectl", env!("CARGO_PKG_VERSION"))
+        );
+        println!("{}", running_compositor());
         return Ok(());
     }
 

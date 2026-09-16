@@ -109,7 +109,10 @@ fn run() -> Result<(), String> {
                 return Ok(());
             }
             "--version" | "-V" => {
-                println!("irontile-lock {}", env!("CARGO_PKG_VERSION"));
+                println!(
+                    "{}",
+                    irontile_version::line("irontile-lock", env!("CARGO_PKG_VERSION"))
+                );
                 return Ok(());
             }
             "--service" => {

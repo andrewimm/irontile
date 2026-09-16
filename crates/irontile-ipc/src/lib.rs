@@ -71,6 +71,10 @@ pub enum Query {
     Layout,
     /// Every panel and overlay on screen.
     Layers,
+    /// What build the compositor is, which is not what build the thing asking
+    /// is: a control tool and the compositor it is talking to are separate
+    /// binaries and are often not from the same build at all.
+    Version,
 }
 
 /// A single compositor-to-client message.
@@ -95,6 +99,13 @@ pub enum ResponsePayload {
     /// Boxed because it is much larger than every other variant.
     Layout(Box<Layout>),
     Layers(Vec<LayerInfo>),
+    /// The compositor's own build, as `name`, `version` and the commit behind
+    /// it when there is one.
+    Version {
+        name: String,
+        version: String,
+        commit: Option<String>,
+    },
     /// Pushed to subscribers, carrying the id of their `Subscribe` request.
     Event(Event),
     Error {

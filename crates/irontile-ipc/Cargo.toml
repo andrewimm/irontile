@@ -13,6 +13,7 @@ path = "src/bin/irontilectl.rs"
 
 [dependencies]
 irontile-layout.workspace = true
+irontile-version.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
