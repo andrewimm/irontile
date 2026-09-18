@@ -1,6 +1,6 @@
 # Maintainer: Andrew Imm <aimm22@gmail.com>
 pkgname=irontile
-pkgver=0.2.7
+pkgver=0.2.8
 pkgrel=1
 pkgdesc="A Wayland tiling compositor with a split-container tree as its native model"
 arch=('x86_64')
