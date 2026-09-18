@@ -65,7 +65,20 @@ pub struct Lock {
 /// while one that is still there gets [`WEDGED_AFTER`] to put a surface up
 /// before it is treated as stuck. Waiting out that grace for a client that has
 /// already died would leave a blank screen unreplaceable for no reason.
-fn still_working(covers: bool, client_alive: bool, since_covered: Duration) -> bool {
+fn still_working(
+    covers: bool,
+    client_alive: bool,
+    surfaces_all_dead: bool,
+    since_covered: Duration,
+) -> bool {
+    if surfaces_all_dead {
+        // Every surface it had is gone. Waiting out the grace buys nothing: a
+        // dead surface never draws again, and the only thing that could help
+        // is a new surface, which is what the locker asking to take over is
+        // offering. This is the case that cost two recoveries: both attempts
+        // landed inside a ten second wait for a corpse to move.
+        return false;
+    }
     covers || (client_alive && since_covered < WEDGED_AFTER)
 }
 
@@ -100,9 +113,11 @@ impl Lock {
     /// A lock that has not covered the displays for [`WEDGED_AFTER`] is not
     /// holding anything, whoever is still attached to it.
     pub fn working(&self, outputs: &[OutputId]) -> bool {
+        let (surfaces, alive, _) = self.tally();
         still_working(
             self.covers(outputs),
             self.alive(),
+            surfaces > 0 && alive == 0,
             self.covered_at.elapsed(),
         )
     }
@@ -163,6 +178,23 @@ impl Lock {
 
     pub fn surfaces(&self) -> impl Iterator<Item = (&OutputId, &LockSurface)> {
         self.surfaces.iter()
+    }
+
+    /// Whether a surface came from the client this lock belongs to.
+    ///
+    /// Compared by client rather than by lock object because the surface does
+    /// not carry the object it was made from; a client with a stale lock is
+    /// still a different client, which is the case worth catching.
+    pub fn belongs_to(&self, surface: &LockSurface) -> bool {
+        let holder = self.object.as_ref().and_then(|object| object.client());
+        let sender = surface.wl_surface().client();
+        match (holder, sender) {
+            (Some(holder), Some(sender)) => holder.id() == sender.id(),
+            // No holder recorded: nothing to compare against, so take it. This
+            // is the moment between asking for the lock and drawing.
+            (None, _) => true,
+            (_, None) => false,
+        }
     }
 
     /// Whether a surface belongs to this lock.
@@ -246,6 +278,14 @@ impl SessionLockHandler for Irontile {
                 alive = existing.alive(),
                 "the lock screen is not covering the displays; letting a new one take over"
             );
+            // Told, rather than left to wonder. A locker whose lock has been
+            // taken has nothing left to do, and one that is never told sits
+            // connected for the rest of the session holding a lock object it
+            // can still make surfaces with -- which is how a stale locker
+            // reached the map above in the first place.
+            if let Some(object) = &existing.object {
+                object.finished();
+            }
         }
         tracing::info!("locking the session");
         self.session_lock = Some(Lock {
@@ -280,9 +320,21 @@ impl SessionLockHandler for Irontile {
         });
         surface.send_configure();
 
-        if let Some(lock) = &mut self.session_lock {
-            lock.surfaces.insert(id, surface);
+        let Some(lock) = &mut self.session_lock else {
+            return;
+        };
+        // Only from the client that holds the lock. A locker whose lock has
+        // ended does not always go away -- nothing tells it to -- and it keeps
+        // a live lock object it can still make surfaces with. One of those
+        // arriving here used to replace the surface the *current* locker had
+        // drawn, under the same display, and the screen went blank with a
+        // healthy locker sitting behind it wondering why it was never asked to
+        // draw again.
+        if !lock.belongs_to(&surface) {
+            tracing::warn!("ignored a lock surface from a client that does not hold the lock");
+            return;
         }
+        lock.surfaces.insert(id, surface);
         self.dirty = true;
     }
 }
@@ -294,38 +346,48 @@ mod tests {
     use super::{WEDGED_AFTER, still_working};
     use std::time::Duration;
 
+    /// The arguments in the order they are asked about, for readability.
+    fn working(covers: bool, client_alive: bool, all_dead: bool, since: Duration) -> bool {
+        still_working(covers, client_alive, all_dead, since)
+    }
+
     #[test]
     fn a_lock_that_covers_the_displays_is_working() {
-        assert!(still_working(true, true, Duration::from_secs(0)));
+        assert!(working(true, true, false, Duration::from_secs(0)));
         // Even a client that has gone: what is on screen is on screen, and
         // nothing else may be put over it until somebody unlocks.
-        assert!(still_working(true, false, WEDGED_AFTER * 2));
+        assert!(working(true, false, false, WEDGED_AFTER * 2));
     }
 
     #[test]
     fn a_locker_that_died_is_replaceable_at_once() {
-        // No grace for a client that will never draw again: waiting would
-        // leave a blank screen that cannot be replaced, for nothing.
-        assert!(!still_working(false, false, Duration::from_secs(0)));
+        assert!(!working(false, false, false, Duration::from_secs(0)));
     }
 
     #[test]
     fn a_live_locker_gets_a_moment_before_it_counts_as_stuck() {
         // Coming back from suspend, or a display being plugged in, leaves a
         // locker briefly a surface short. That is not a wedged session.
-        assert!(still_working(false, true, Duration::from_secs(1)));
+        assert!(working(false, true, false, Duration::from_secs(1)));
     }
 
     #[test]
     fn a_live_locker_that_never_draws_again_is_still_a_blank_screen() {
-        // The failure this exists for: a locker came back from suspend still
-        // connected, still holding the lock, and drawing nothing, so every
-        // attempt to put a working lock screen up was refused because one was
-        // supposedly already there.
-        assert!(!still_working(
+        assert!(!working(
             false,
             true,
+            false,
             WEDGED_AFTER + Duration::from_secs(1)
         ));
+    }
+
+    #[test]
+    fn surfaces_that_have_all_died_are_not_worth_waiting_for() {
+        // What the logs finally showed: surfaces=1 alive=0, a connected client,
+        // and two recovery attempts refused inside the grace. A dead surface
+        // never draws again, so there is nothing to wait for and the wait is
+        // the whole problem.
+        assert!(!working(false, true, true, Duration::from_secs(0)));
+        assert!(!working(false, true, true, Duration::from_millis(1)));
     }
 }
