@@ -98,7 +98,7 @@ pub fn verify(service: &str, user: &str, password: &str) -> Result<(), Denied> {
 /// Both directories, because a distribution ships its defaults in
 /// `/usr/lib/pam.d` and leaves `/etc/pam.d` for the administrator to override
 /// them; a file in either is a service that exists.
-fn service_exists(service: &str) -> bool {
+pub fn service_exists(service: &str) -> bool {
     // A name with a slash in it would reach outside the directory, and no real
     // service has one.
     if service.is_empty() || service.contains('/') {

@@ -38,6 +38,10 @@ pub struct Screen {
     /// What the battery is doing, or `None` on a machine without one, which
     /// draws nothing rather than a zero.
     pub battery: Option<Battery>,
+    /// Set when a finger will also open this screen, so that the one line
+    /// telling somebody what to do tells them both ways. A way in that nothing
+    /// mentions is a way in nobody uses.
+    pub finger: bool,
 }
 
 /// Colours, named for what they are rather than where they are used.
@@ -343,6 +347,27 @@ fn circle(pixmap: &mut PixmapMut<'_>, cx: f32, cy: f32, r: f32, paint: &Paint<'_
     }
 }
 
+/// The line under the field, and the colour to say it in.
+///
+/// Kept out of the drawing so that what the screen says can be checked without
+/// rendering it: on a machine with no fonts installed every message draws as
+/// nothing, and a test comparing pictures would pass whatever the words were.
+fn message_for(status: &Status, finger: bool, palette: &Palette) -> (String, Color) {
+    match status {
+        // Both ways in, when there are two. A way in that nothing mentions is
+        // a way in nobody uses.
+        Status::Typing(0) if finger => (
+            "enter password, or touch the reader".to_string(),
+            palette.muted,
+        ),
+        Status::Typing(0) => ("enter password".to_string(), palette.muted),
+        Status::Typing(_) => (String::new(), palette.muted),
+        Status::Checking => ("checking".to_string(), palette.muted),
+        Status::Denied(why) => (why.clone(), palette.bad),
+        Status::Accepted => ("unlocked".to_string(), palette.warm_near),
+    }
+}
+
 /// Renders the whole screen at `scale`, which is the display's.
 ///
 /// Every measurement below is in logical pixels and multiplied here, so the
@@ -524,13 +549,7 @@ pub fn draw(
         }
     }
 
-    let (message, colour) = match &screen.status {
-        Status::Typing(0) => ("enter password".to_string(), palette.muted),
-        Status::Typing(_) => (String::new(), palette.muted),
-        Status::Checking => ("checking".to_string(), palette.muted),
-        Status::Denied(why) => (why.clone(), palette.bad),
-        Status::Accepted => ("unlocked".to_string(), palette.warm_near),
-    };
+    let (message, colour) = message_for(&screen.status, screen.finger, palette);
     if !message.is_empty() {
         text.centred(
             pixmap,
@@ -645,6 +664,7 @@ mod battery_tests {
             status: Status::Typing(0),
             caps: false,
             battery,
+            finger: false,
         };
         let mut text = Text::new(&[]);
         draw(
@@ -742,5 +762,45 @@ mod battery_tests {
     #[allow(dead_code)]
     fn types_line_up(power: Power) -> Battery {
         power
+    }
+}
+
+#[cfg(test)]
+mod message_tests {
+    use super::{Palette, Status, message_for};
+
+    #[test]
+    fn the_reader_is_only_offered_when_there_is_one() {
+        let palette = Palette::default();
+        let (with, _) = message_for(&Status::Typing(0), true, &palette);
+        let (without, _) = message_for(&Status::Typing(0), false, &palette);
+        assert!(with.contains("reader"), "{with}");
+        assert!(
+            !without.contains("reader"),
+            "offered a fingerprint reader on a machine that has none set up: {without}"
+        );
+    }
+
+    #[test]
+    fn typing_says_nothing_either_way() {
+        // The line is advice for somebody who has not started. Once they have,
+        // it would be repeating itself over their shoulder.
+        let palette = Palette::default();
+        for finger in [true, false] {
+            let (text, _) = message_for(&Status::Typing(3), finger, &palette);
+            assert!(text.is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_says_why_whatever_else_is_on_offer() {
+        let palette = Palette::default();
+        let (text, colour) = message_for(
+            &Status::Denied("wrong password".to_string()),
+            true,
+            &palette,
+        );
+        assert_eq!(text, "wrong password");
+        assert_eq!(colour, palette.bad);
     }
 }

@@ -212,6 +212,9 @@ fn render_to_png(
             caps: matches!(status, Status::Denied(_)),
             status,
             battery,
+            // The real answer, like everything else on this sheet: whether a
+            // finger opens this machine is a fact about the machine.
+            finger: auth::service_exists("irontile-lock-fprint"),
         };
         paint::draw(&mut tile.as_mut(), &screen, &mut text, &palette, scale);
         sheet.draw_pixmap(

@@ -58,6 +58,27 @@ The desktop entry is the whole of what makes irontile selectable in GDM, SDDM,
 greetd or anything else that reads the directory. Without it the binaries are
 installed and nothing offers to start them.
 
+A fingerprint can open it too, if you set one up. `irontile-lock` asks a second
+service, `irontile-lock-fprint`, on a thread of its own while the screen sits
+there, so a finger and a password are two ways into the same lock and neither
+waits for the other. Create the file to turn it on:
+
+```
+# /etc/pam.d/irontile-lock-fprint
+auth    required  pam_fprintd.so
+account include   login
+```
+
+Nothing installs that file and deleting it turns the reader off again -- a lock
+screen that opens to a fingerprint is not something anybody should acquire by
+upgrading. **Put nothing else in it.** The fingerprint attempt is made with an
+empty password, so a stack that falls through to the password database is a
+stack being asked whether an empty password will do.
+
+Refusals from the reader are not shown: it is asked over and over while the
+screen waits, and most of those attempts are nobody presenting a finger. A
+password refusal still says so.
+
 The PAM file decides what unlocking the screen requires, which is the
 administrator's to change rather than this program's to assume. There is one per
 distribution because the stack a graphical locker should defer to is named

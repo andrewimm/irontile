@@ -67,8 +67,40 @@ const FRAME_BACKSTOP: Duration = Duration::from_secs(2);
 /// compositor until it says otherwise.
 const SLOTS: usize = 2;
 
-/// What the authentication thread sends back.
-struct Verdict(Result<(), crate::auth::Denied>);
+/// The service a fingerprint attempt authenticates against.
+///
+/// Its own file rather than a line in the main stack. `pam_fprintd` waits for a
+/// finger, and a stack that waits would hold up the password somebody has
+/// already typed: every unlock would sit through the reader's timeout before
+/// anyone looked at what was typed. Two services asked side by side cost
+/// nothing and cannot delay each other.
+///
+/// Not installed by any package. The file existing is how this is turned on,
+/// and deleting it is how it is turned off -- there is no setting to find,
+/// because a lock screen that opens to a fingerprint is not something anybody
+/// should acquire by upgrading.
+const FINGER_SERVICE: &str = "irontile-lock-fprint";
+
+/// How long to wait before asking the reader again after it says no.
+const FINGER_RETRY: Duration = Duration::from_secs(1);
+
+/// An attempt that comes back faster than this never waited for a finger, so
+/// something is wrong with the stack rather than with the person at the
+/// keyboard. Enough of those in a row and the reader is left alone.
+const FINGER_TOO_FAST: Duration = Duration::from_millis(250);
+const FINGER_GIVE_UP_AFTER: u32 = 5;
+
+/// What an authentication thread sends back.
+struct Verdict {
+    outcome: Result<(), crate::auth::Denied>,
+    /// Set when this came from the reader rather than from something typed.
+    ///
+    /// A refusal from the reader is not worth putting on screen: nobody asked
+    /// for it, it happens every time a finger is not presented, and a password
+    /// field that starts announcing failures nobody caused is a lock screen
+    /// that cannot be trusted to mean anything.
+    from_finger: bool,
+}
 
 /// One display's lock surface.
 struct Panel {
@@ -231,6 +263,10 @@ struct State {
     /// Last read from the kernel, so a repaint mid-keystroke does not go to
     /// sysfs. Refreshed once a second alongside the clock.
     battery: Option<irontile_power::Battery>,
+    /// Whether a fingerprint will also open this screen. Asked once: it is a
+    /// file on disk, and one does not appear while somebody stands at a locked
+    /// machine.
+    finger: bool,
     user: String,
     host: String,
     service: String,
@@ -295,6 +331,7 @@ pub fn run(service: &str, user: &str, ready: Option<OwnedFd>) -> Result<(), Stri
         finished: false,
         unlocked: false,
         battery: irontile_power::battery(),
+        finger: crate::auth::service_exists(FINGER_SERVICE),
         clock: String::new(),
         text: Text::new(&["Anonymous Pro".to_string()]),
         palette: Palette::default(),
@@ -317,6 +354,9 @@ pub fn run(service: &str, user: &str, ready: Option<OwnedFd>) -> Result<(), Stri
     let lock = manager.lock(&handle, ());
     state.lock = Some(lock.clone());
     state.cover_outputs(&handle);
+    // Started once the screens are being covered, because that is the moment
+    // the reader is worth asking: before it, there is nothing to unlock.
+    state.watch_for_a_finger();
 
     while !state.finished {
         state.redraw(&handle);
@@ -439,6 +479,7 @@ impl State {
             status: self.status.clone(),
             caps: self.xkb.caps(),
             battery: self.battery,
+            finger: self.finger,
         }
     }
 
@@ -571,8 +612,11 @@ impl State {
         let password = std::mem::take(&mut self.entry);
         let answers = self.answers.clone();
         std::thread::spawn(move || {
-            let verdict = crate::auth::verify(&service, &user, &password);
-            let _ = answers.send(Verdict(verdict));
+            let outcome = crate::auth::verify(&service, &user, &password);
+            let _ = answers.send(Verdict {
+                outcome,
+                from_finger: false,
+            });
             // The loop is asleep in poll, and an answer arriving is something
             // happening.
             let _ = std::fs::File::from(waker).write_all(b"1");
@@ -580,21 +624,78 @@ impl State {
     }
 
     fn collect(&mut self) {
-        while let Ok(Verdict(result)) = self.verdicts.try_recv() {
-            self.checking = false;
-            self.dirty = true;
-            match result {
+        while let Ok(verdict) = self.verdicts.try_recv() {
+            match verdict.outcome {
                 Ok(()) => {
+                    self.checking = false;
+                    self.dirty = true;
                     self.status = Status::Accepted;
                     self.unlocked = true;
                     self.finished = true;
                 }
+                // The reader saw a finger that was not yours, or saw nothing
+                // and gave up waiting. Neither is an answer to a question
+                // anybody asked, so the screen says nothing and the thread
+                // asks again.
+                Err(_) if verdict.from_finger => {}
                 Err(why) => {
+                    self.checking = false;
+                    self.dirty = true;
                     self.status = Status::Denied(why.to_string());
                     self.denied_at = Some(Instant::now());
                 }
             }
         }
+    }
+
+    /// Asks the reader for a finger, over and over, for as long as this runs.
+    ///
+    /// Started once and left alone. `pam_fprintd` blocks until a finger
+    /// arrives or it times out, so this thread spends its life asleep rather
+    /// than spinning, and the password path never waits on it.
+    fn watch_for_a_finger(&self) {
+        let Ok(waker) = self.waker.try_clone() else {
+            eprintln!("irontile-lock: could not watch the fingerprint reader");
+            return;
+        };
+        let user = self.user.clone();
+        let answers = self.answers.clone();
+        std::thread::spawn(move || {
+            let mut hurried = 0;
+            loop {
+                let started = Instant::now();
+                let outcome = crate::auth::verify(FINGER_SERVICE, &user, "");
+                let hurry = started.elapsed() < FINGER_TOO_FAST;
+                let done = outcome.is_ok();
+
+                if matches!(outcome, Err(crate::auth::Denied::NoService(_))) {
+                    // No service file: fingerprint unlocking is not set up on
+                    // this machine, which is not a failure and not worth
+                    // saying anything about.
+                    return;
+                }
+                let _ = answers.send(Verdict {
+                    outcome,
+                    from_finger: true,
+                });
+                let _ = rustix::io::write(&waker, b"1");
+                if done {
+                    return;
+                }
+
+                // A stack that answers instantly is not asking the reader
+                // anything -- no device, or a module that will not load.
+                hurried = if hurry { hurried + 1 } else { 0 };
+                if hurried >= FINGER_GIVE_UP_AFTER {
+                    eprintln!(
+                        "irontile-lock: the fingerprint service answers without waiting; \
+                         leaving the reader alone"
+                    );
+                    return;
+                }
+                std::thread::sleep(FINGER_RETRY);
+            }
+        });
     }
 
     /// How long the refusal on screen has left, if there is one.
