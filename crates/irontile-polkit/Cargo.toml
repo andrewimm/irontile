@@ -10,6 +10,12 @@ description = "The authentication agent irontile's session registers with polkit
 [dependencies]
 irontile-version.workspace = true
 zbus.workspace = true
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+xkbcommon.workspace = true
+tiny-skia.workspace = true
+cosmic-text.workspace = true
+rustix = { workspace = true, features = ["shm"] }
 
 [lints]
 workspace = true
