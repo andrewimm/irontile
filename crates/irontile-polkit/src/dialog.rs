@@ -27,6 +27,13 @@ use wayland_client::protocol::{
     wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
+use wayland_protocols::wp::fractional_scale::v1::client::{
+    wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+    wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+};
+use wayland_protocols::wp::viewporter::client::{
+    wp_viewport::WpViewport, wp_viewporter::WpViewporter,
+};
 use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, ZwlrLayerShellV1},
     zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
@@ -43,6 +50,15 @@ const HEIGHT: i32 = 200;
 /// one without bound.
 const MAX_PASSWORD: usize = 256;
 
+/// How many buffers to cycle through.
+///
+/// Two, for the reason the lock screen and the bar use two: a buffer handed
+/// over belongs to the compositor until it says otherwise, so a surface with
+/// one buffer draws its first frame and then waits forever for a release that
+/// only arrives when something else is attached. That is a dialog that takes
+/// the keyboard and never shows a single keystroke.
+const SLOTS: usize = 2;
+
 /// What the person did with the dialog.
 pub enum Outcome {
     /// A password to try.
@@ -56,6 +72,8 @@ struct Globals {
     compositor: Option<WlCompositor>,
     shm: Option<WlShm>,
     layer_shell: Option<ZwlrLayerShellV1>,
+    viewporter: Option<WpViewporter>,
+    fractional: Option<WpFractionalScaleManagerV1>,
 }
 
 struct State {
@@ -73,15 +91,59 @@ struct State {
     done: Option<Outcome>,
     xkb: Option<xkb::State>,
     context: xkb::Context,
-    buffer: Option<Buffer>,
+    pool: Option<Pool>,
+    /// Scale in 120ths, which is how the fractional-scale protocol counts. A
+    /// display that never says otherwise stays at one.
+    scale_120: u32,
+    viewport: Option<WpViewport>,
 }
 
-/// One shared-memory buffer, and whether the compositor still has it.
-struct Buffer {
-    buffer: WlBuffer,
+impl State {
+    fn scale(&self) -> f32 {
+        self.scale_120 as f32 / 120.0
+    }
+
+    /// The buffer size in real pixels, which is the logical size scaled.
+    fn pixels(&self) -> (i32, i32) {
+        in_pixels(self.size, self.scale_120)
+    }
+}
+
+/// A logical size in real pixels, at a scale counted in 120ths.
+///
+/// Free-standing because the sum is the whole of the scaling: getting it wrong
+/// is a dialog that comes out three-quarter size and soft, and that is worth a
+/// test that needs no compositor to run.
+fn in_pixels(size: (i32, i32), scale_120: u32) -> (i32, i32) {
+    let scale = (scale_120 as f32 / 120.0).max(f32::MIN_POSITIVE);
+    (
+        ((size.0 as f32 * scale).round() as i32).max(1),
+        ((size.1 as f32 * scale).round() as i32).max(1),
+    )
+}
+
+/// The shared memory this surface draws into, cut into slots.
+struct Pool {
     file: std::fs::File,
-    busy: Arc<AtomicBool>,
+    slots: [Slot; SLOTS],
+    /// The pixel size the slots are cut for. A different one means starting
+    /// over, which is what a scale change looks like.
     size: (i32, i32),
+}
+
+struct Slot {
+    buffer: WlBuffer,
+    busy: Arc<AtomicBool>,
+    offset: u64,
+}
+
+impl Pool {
+    /// The first slot the compositor is not still reading from.
+    fn free(&self) -> Option<&Slot> {
+        self.slots
+            .iter()
+            .find(|slot| !slot.busy.load(Ordering::Acquire))
+    }
 }
 
 /// Shows the dialog and waits for an answer.
@@ -105,7 +167,9 @@ pub fn ask(prompt: Prompt, families: &[String]) -> Result<Outcome, String> {
         done: None,
         xkb: None,
         context: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-        buffer: None,
+        pool: None,
+        scale_120: 120,
+        viewport: None,
     };
 
     queue
@@ -132,6 +196,19 @@ pub fn ask(prompt: Prompt, families: &[String]) -> Result<Outcome, String> {
         &handle,
         (),
     );
+    // A viewport and the scale that goes with it. Without them the buffer is
+    // taken as logical pixels, so on a display at four thirds the dialog comes
+    // out three quarters the size it asked for and soft at the edges.
+    let viewport = state
+        .globals
+        .viewporter
+        .as_ref()
+        .map(|viewporter| viewporter.get_viewport(&surface, &handle, ()));
+    if let Some(fractional) = &state.globals.fractional {
+        fractional.get_fractional_scale(&surface, &handle, ());
+    }
+    state.viewport = viewport;
+
     layer.set_size(WIDTH as u32, HEIGHT as u32);
     // No anchors: a surface anchored to nothing is centred, which is where a
     // question belongs.
@@ -182,67 +259,38 @@ fn draw(state: &mut State, surface: &WlSurface, handle: &QueueHandle<State>) {
     let Some(shm) = state.globals.shm.clone() else {
         return;
     };
-    let (w, h) = state.size;
-    let stride = w * 4;
-    let total = (stride * h) as usize;
+    let (w, h) = state.pixels();
 
-    // Made once and kept, unless the compositor changed its mind about the
-    // size. A dialog redraws on keystrokes, which is slow enough that one
-    // buffer is plenty -- but it must not be scribbled on while the compositor
-    // is reading it.
-    let stale = state
-        .buffer
-        .as_ref()
-        .is_none_or(|buffer| buffer.size != (w, h));
+    // Cut again whenever the size changes, which is a scale change or the
+    // compositor settling on something other than what was asked for.
+    let stale = state.pool.as_ref().is_none_or(|pool| pool.size != (w, h));
     if stale {
-        let Ok(file) =
-            rustix::fs::memfd_create(c"irontile-polkit", rustix::fs::MemfdFlags::CLOEXEC)
-        else {
+        let Some(pool) = Pool::new(&shm, handle, (w, h)) else {
             return;
         };
-        if rustix::fs::ftruncate(&file, total as u64).is_err() {
-            return;
-        }
-        let file = std::fs::File::from(file);
-        let pool = shm.create_pool(file.as_fd(), total as i32, handle, ());
-        let busy = Arc::new(AtomicBool::new(false));
-        let buffer = pool.create_buffer(
-            0,
-            w,
-            h,
-            stride,
-            wl_shm::Format::Argb8888,
-            handle,
-            Arc::clone(&busy),
-        );
-        pool.destroy();
-        state.buffer = Some(Buffer {
-            buffer,
-            file,
-            busy,
-            size: (w, h),
-        });
+        state.pool = Some(pool);
     }
 
-    let Some(held) = &state.buffer else {
+    let Some(pool) = &state.pool else { return };
+    let Some(slot) = pool.free() else {
+        // Both are still out. Whatever asked for this redraw still wants it,
+        // and the release that is coming will bring the loop back here.
         return;
     };
-    if held.busy.load(Ordering::Acquire) {
-        // Still on screen. Whatever asked for this redraw still wants it.
-        return;
-    }
 
     let Some(mut canvas) = tiny_skia::Pixmap::new(w as u32, h as u32) else {
         return;
     };
     state.prompt.typed = state.entry.chars().count();
-    paint::draw(
-        &mut canvas.as_mut(),
-        &state.prompt,
-        &mut state.text,
-        &state.palette,
-        1.0,
-    );
+    // Read before the drawing borrows the rest of the state.
+    let scale = state.scale();
+    let State {
+        prompt,
+        text,
+        palette,
+        ..
+    } = state;
+    paint::draw(&mut canvas.as_mut(), prompt, text, palette, scale);
 
     // tiny-skia stores premultiplied RGBA; wayland's Argb8888 is little-endian
     // BGRA, so the two outer channels swap.
@@ -250,15 +298,63 @@ fn draw(state: &mut State, surface: &WlSurface, handle: &QueueHandle<State>) {
     for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
-    if held.file.write_all_at(bytes, 0).is_err() {
+    if pool.file.write_all_at(bytes, slot.offset).is_err() {
         return;
     }
 
-    held.busy.store(true, Ordering::Release);
-    surface.attach(Some(&held.buffer), 0, 0);
+    slot.busy.store(true, Ordering::Release);
+    // What the buffer is in pixels and what it means on screen are two
+    // different numbers whenever the scale is not one, and only the viewport
+    // can hold a fraction between them.
+    if let Some(viewport) = &state.viewport {
+        viewport.set_destination(state.size.0.max(1), state.size.1.max(1));
+    }
+    surface.attach(Some(&slot.buffer), 0, 0);
     surface.damage_buffer(0, 0, w, h);
     surface.commit();
     state.dirty = false;
+}
+
+impl Pool {
+    /// Cuts a fresh pool into slots of `size` pixels.
+    fn new(shm: &WlShm, handle: &QueueHandle<State>, size: (i32, i32)) -> Option<Pool> {
+        let (w, h) = size;
+        let stride = w.checked_mul(4)?;
+        let slot = i64::from(stride) * i64::from(h);
+        let total = i32::try_from(slot * SLOTS as i64).ok()?;
+        if total <= 0 {
+            return None;
+        }
+
+        let file =
+            rustix::fs::memfd_create(c"irontile-polkit", rustix::fs::MemfdFlags::CLOEXEC).ok()?;
+        rustix::fs::ftruncate(&file, total as u64).ok()?;
+        let file = std::fs::File::from(file);
+        let pool = shm.create_pool(file.as_fd(), total, handle, ());
+
+        let slots = std::array::from_fn(|i| {
+            let busy = Arc::new(AtomicBool::new(false));
+            let offset = slot * i as i64;
+            let buffer = pool.create_buffer(
+                i32::try_from(offset).unwrap_or(0),
+                w,
+                h,
+                stride,
+                wl_shm::Format::Argb8888,
+                handle,
+                Arc::clone(&busy),
+            );
+            Slot {
+                buffer,
+                busy,
+                offset: offset as u64,
+            }
+        });
+        // The buffers are cut from it and outlive it, so the pool itself is
+        // not needed once they exist.
+        pool.destroy();
+        Some(Pool { file, slots, size })
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for State {
@@ -283,6 +379,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for State {
                 state.globals.compositor = Some(registry.bind(name, version.min(4), handle, ()));
             }
             "wl_shm" => state.globals.shm = Some(registry.bind(name, version.min(1), handle, ())),
+            "wp_viewporter" => {
+                state.globals.viewporter = Some(registry.bind(name, version.min(1), handle, ()));
+            }
+            "wp_fractional_scale_manager_v1" => {
+                state.globals.fractional = Some(registry.bind(name, version.min(1), handle, ()));
+            }
             "zwlr_layer_shell_v1" => {
                 state.globals.layer_shell = Some(registry.bind(name, version.min(4), handle, ()));
             }
@@ -439,9 +541,57 @@ impl Dispatch<WlBuffer, Arc<AtomicBool>> for State {
     }
 }
 
+impl Dispatch<WpFractionalScaleV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
+            && scale > 0
+            && state.scale_120 != scale
+        {
+            state.scale_120 = scale;
+            state.dirty = true;
+        }
+    }
+}
+
+delegate_noop!(State: ignore WpViewporter);
+delegate_noop!(State: ignore WpViewport);
+delegate_noop!(State: ignore WpFractionalScaleManagerV1);
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ignore WlShmPool);
 delegate_noop!(State: ignore WlSurface);
 delegate_noop!(State: ignore WlSeat);
 delegate_noop!(State: ignore ZwlrLayerShellV1);
+
+#[cfg(test)]
+mod tests {
+    use super::{HEIGHT, WIDTH, in_pixels};
+
+    #[test]
+    fn a_display_at_one_asks_for_the_size_it_was_given() {
+        assert_eq!(in_pixels((WIDTH, HEIGHT), 120), (WIDTH, HEIGHT));
+    }
+
+    #[test]
+    fn a_fractional_display_asks_for_more_pixels_than_the_dialog_is_wide() {
+        // 1.3333, the scale a 1080p panel gets from a 4K-ish desktop. Drawing
+        // 460 pixels here and letting the compositor stretch them is the
+        // difference between crisp text and soft text.
+        let (w, h) = in_pixels((460, 200), 160);
+        assert_eq!((w, h), (613, 267));
+    }
+
+    #[test]
+    fn a_scale_of_nothing_still_leaves_something_to_draw_on() {
+        // A compositor should never send this, and a zero-sized buffer is a
+        // protocol error rather than a small dialog.
+        assert_eq!(in_pixels((460, 200), 0), (1, 1));
+    }
+}

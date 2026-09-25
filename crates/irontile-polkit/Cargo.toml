@@ -11,6 +11,7 @@ description = "The authentication agent irontile's session registers with polkit
 irontile-version.workspace = true
 zbus.workspace = true
 wayland-client.workspace = true
+wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 xkbcommon.workspace = true
 tiny-skia.workspace = true
