@@ -107,10 +107,9 @@ fn run() -> Result<(), String> {
 
 /// Asks in a window, which is what this is for.
 ///
-/// One attempt per call. polkit's own agents loop here and offer another go
-/// after a wrong password; this does not yet, so a mistyped password ends the
-/// attempt and whatever asked has to ask again.
-fn ask_in_a_window(request: &agent::Request) -> agent::Answer {
+/// Called once per attempt, and told whether the last one was refused so the
+/// second dialog does not look identical to the first.
+fn ask_in_a_window(request: &agent::Request, refused: bool) -> agent::Answer {
     let who = request
         .identities
         .iter()
@@ -120,7 +119,7 @@ fn ask_in_a_window(request: &agent::Request) -> agent::Answer {
         action: request.action_id.clone(),
         user: who.clone(),
         typed: 0,
-        refused: false,
+        refused,
     };
     let families = vec!["Anonymous Pro".to_string(), "Noto Sans".to_string()];
     match dialog::ask(prompt, &families) {
@@ -131,7 +130,7 @@ fn ask_in_a_window(request: &agent::Request) -> agent::Answer {
             // appears: something asked for an administrator and nobody was
             // told.
             eprintln!("irontile-polkit: could not open a dialog: {err}");
-            ask_on_the_terminal(request)
+            ask_on_the_terminal(request, refused)
         }
     }
 }
@@ -141,12 +140,15 @@ fn ask_in_a_window(request: &agent::Request) -> agent::Answer {
 /// The first thing to work, and the thing to fall back to: an agent that can
 /// only ask through a window is one that cannot be used to fix a broken
 /// window.
-fn ask_on_the_terminal(request: &agent::Request) -> Option<(String, String)> {
+fn ask_on_the_terminal(request: &agent::Request, refused: bool) -> agent::Answer {
     let who = request
         .identities
         .iter()
         .find_map(|identity| identity.name())?;
 
+    if refused {
+        eprintln!("irontile-polkit: that was not the password");
+    }
     eprintln!("\nirontile-polkit: {}", request.message);
     eprintln!("irontile-polkit: action {}", request.action_id);
     eprint!("irontile-polkit: password for {who}: ");
