@@ -9,9 +9,10 @@ license=('MIT')
 # Resolved from the sonames the binaries actually carry, rather than from what
 # the compositor happens to use: mesa for gbm, libglvnd for the EGL that is
 # opened by name at runtime, wayland for the two wayland client libraries that
-# are opened the same way.
+# are opened the same way. polkit is not linked at all: the agent talks to its
+# helper over a socket, and without polkit there is nobody for it to answer for.
 depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse' 'pam'
-         'libglvnd' 'wayland')
+         'libglvnd' 'wayland' 'polkit')
 # clang, because pam-sys generates its bindings with bindgen at build time and
 # bindgen loads libclang. Arch ships the PAM headers in `pam` itself, which is
 # already a runtime dependency, so there is nothing else to add for the locker.
@@ -83,6 +84,7 @@ package() {
     install -Dm755 target/release/irontile-bar "$pkgdir/usr/bin/irontile-bar"
     install -Dm755 target/release/irontilectl "$pkgdir/usr/bin/irontilectl"
     install -Dm755 target/release/irontile-lock "$pkgdir/usr/bin/irontile-lock"
+    install -Dm755 target/release/irontile-polkit "$pkgdir/usr/bin/irontile-polkit"
     install -Dm755 target/release/start-irontile "$pkgdir/usr/bin/start-irontile"
     # What makes irontile appear in a login manager's session list.
     install -Dm644 assets/irontile.desktop \

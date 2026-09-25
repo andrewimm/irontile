@@ -42,13 +42,14 @@ bad one; the certificate behind the attestation lives for minutes and there is
 nothing to leak. This is also why `pacman -U` on a release URL asks for a
 `.sig` and does not find one: download the package first and install the file.
 
-Five binaries, a desktop entry and a PAM service:
+Six binaries, a desktop entry and a PAM service:
 
 | File | Where it goes |
 | --- | --- |
 | `irontile` | `/usr/bin` |
 | `irontile-bar` | `/usr/bin` |
 | `irontile-lock` | `/usr/bin` |
+| `irontile-polkit` | `/usr/bin` |
 | `irontilectl` | `/usr/bin` |
 | `start-irontile` | `/usr/bin` |
 | `assets/irontile.desktop` | `/usr/share/wayland-sessions/` |
@@ -672,6 +673,55 @@ A backstop redraws anyway if no frame is asked for within a couple of seconds,
 because a compositor going quiet without turning the displays off would
 otherwise stop the clock in front of somebody.
 
+## Authentication agent
+
+`irontile-polkit` is the agent polkit asks when something wants an
+administrator. polkit decides whether an action is allowed; an agent is the part
+that asks the person at the keyboard. A session with none registered gets no
+prompt at all -- mounting a disk, changing the time or restarting a service
+simply fails -- which from the chair looks like a button that does nothing.
+
+Start it with the session and leave it running: an agent that exits is an agent
+that unregisters.
+
+```toml
+[startup]
+exec = [
+  "irontile-polkit",
+]
+```
+
+Only one agent can hold a session, so it has to be the only one. Desktops that
+ship their own -- `polkit-gnome`, `polkit-kde`, `lxpolkit` -- will take the
+registration if they start first, and whichever loses is a silent no-op.
+`pkttyagent --fallback`, which `pkexec` and `systemctl` start for themselves in
+a terminal, registers for one process rather than for the session and does not
+collide.
+
+**Nothing here is privileged, and the password never leaves the dialog for this
+process's own use.** It goes to `polkit-agent-helper-1`, the setuid helper
+polkit ships for exactly this, which does the checking and tells the authority.
+The agent learns whether the answer was accepted and nothing else. It holds no
+secret it could leak, and a bug in it cannot grant anything.
+
+**Three attempts, as sudo allows.** A refusal redraws the dialog saying so
+rather than closing it, because a prompt that vanishes on a typo is a prompt
+that makes people type it again into whatever appears next.
+
+**The dialog is drawn the way the lock screen is**: the same font stack, the
+same pips that say a key registered without saying how many have landed, and the
+same hairline rule. It is a layer surface taking keyboard focus exclusively, so
+the keystrokes cannot land in the window behind it, and it is drawn at the
+display's fractional scale rather than being stretched from logical pixels.
+
+`--dump PATH` renders its states to a PNG, and `--try` shows it against a
+running compositor with a made-up request: both exist because a prompt that only
+appears when something wants an administrator is a prompt nobody can look at.
+
+With no compositor to draw on it asks on the terminal instead. That is not a
+nicety -- an agent that can only ask through a window is an agent that cannot be
+used to fix a broken window.
+
 ## Protocols
 
 | Protocol | Notes |
@@ -830,6 +880,7 @@ exec = ["alacritty"]
 | `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
 | `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
 | `irontile-lock` | `irontile-lock`, the lock screen. Draws, and asks PAM. |
+| `irontile-polkit` | `irontile-polkit`, the polkit authentication agent. Draws, and asks polkit's helper. |
 | `irontile-session` | `start-irontile`, the supervisor a login manager starts. |
 | `xtask` | Task runner. |
 

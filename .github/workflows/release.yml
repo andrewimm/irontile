@@ -146,6 +146,7 @@ jobs:
           irontile-bar --version
           irontilectl --version
           irontile-lock --version
+          irontile-polkit --version
           start-irontile --version
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
@@ -166,6 +167,7 @@ jobs:
           irontile-bar --version
           irontilectl --version
           irontile-lock --version
+          irontile-polkit --version
           start-irontile --version
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
@@ -187,6 +189,7 @@ jobs:
           irontile-bar --version
           irontilectl --version
           irontile-lock --version
+          irontile-polkit --version
           start-irontile --version
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.

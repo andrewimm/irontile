@@ -66,7 +66,10 @@ rather than a plugin on top of a floating one."""
 # $auto reads ELF headers, so it finds everything the binaries link and nothing
 # they open by name at runtime. EGL and both wayland client libraries are
 # dlopened, so they are named here or they are missed.
-depends = "$auto, libegl1, libwayland-client0, libwayland-egl1"
+# polkitd is not linked either: the authentication agent talks to polkit's helper
+# over a socket, and an agent with no polkit behind it is a prompt that never
+# appears for an action that then fails.
+depends = "$auto, libegl1, libwayland-client0, libwayland-egl1, polkitd"
 # Only the nested backend touches X, and that is for development rather than
 # for running a session, so these are offered rather than pulled in.
 suggests = "libxcb1, libx11-xcb1, libxcursor1"
@@ -79,6 +82,7 @@ assets = [
     ["../../target/release/irontile-bar", "usr/bin/", "755"],
     ["../../target/release/irontilectl", "usr/bin/", "755"],
     ["../../target/release/irontile-lock", "usr/bin/", "755"],
+    ["../../target/release/irontile-polkit", "usr/bin/", "755"],
     ["../../target/release/start-irontile", "usr/bin/", "755"],
     ["../../assets/irontile.desktop", "usr/share/wayland-sessions/", "644"],
     ["../../assets/pam/debian", "etc/pam.d/irontile-lock", "644"],
@@ -101,6 +105,7 @@ assets = [
     { source = "target/release/irontile-bar", dest = "/usr/bin/irontile-bar", mode = "755" },
     { source = "target/release/irontilectl", dest = "/usr/bin/irontilectl", mode = "755" },
     { source = "target/release/irontile-lock", dest = "/usr/bin/irontile-lock", mode = "755" },
+    { source = "target/release/irontile-polkit", dest = "/usr/bin/irontile-polkit", mode = "755" },
     { source = "target/release/start-irontile", dest = "/usr/bin/start-irontile", mode = "755" },
     { source = "assets/irontile.desktop", dest = "/usr/share/wayland-sessions/irontile.desktop", mode = "644" },
     # noreplace rather than a plain config: rpm's default moves an edited file
@@ -120,3 +125,6 @@ assets = [
 "libEGL.so.1()(64bit)" = "*"
 "libwayland-client.so.0()(64bit)" = "*"
 "libwayland-egl.so.1()(64bit)" = "*"
+# Not a library at all: the authentication agent reaches polkit's helper over a
+# socket, so nothing in the binaries names it and find-requires cannot know.
+"polkit" = "*"
