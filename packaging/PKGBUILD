@@ -11,17 +11,19 @@ license=('MIT')
 # opened by name at runtime, wayland for the two wayland client libraries that
 # are opened the same way. polkit is not linked at all: the agent talks to its
 # helper over a socket, and without polkit there is nobody for it to answer for.
+# ttf-font is any font at all: the bar, the lock screen and the polkit dialog all
+# shape text, and on a machine with an empty font database that is not a bar
+# without text but a panic -- a lock screen that cannot lock.
 depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse' 'pam'
-         'libglvnd' 'wayland' 'polkit')
+         'libglvnd' 'wayland' 'polkit' 'ttf-font')
 # clang, because pam-sys generates its bindings with bindgen at build time and
 # bindgen loads libclang. Arch ships the PAM headers in `pam` itself, which is
 # already a runtime dependency, so there is nothing else to add for the locker.
 makedepends=('cargo' 'clang')
-# check() renders text and resolves icon names, so it needs a font and an icon
-# theme to be present. Neither is a runtime dependency of the compositor -- a
-# bar with no font is the user's arrangement to make -- but a test suite that
-# asserts what those look up cannot run without them, and a base image has
-# nothing at all: no fonts, and no /usr/share/icons.
+# check() asserts which font and which icons particular names resolve to, so the
+# two it names have to be the ones installed. The font is a runtime dependency
+# now as well; the icon theme is not, because a bar draws its text and skips the
+# icons it cannot find.
 checkdepends=('noto-fonts' 'hicolor-icon-theme')
 # Whether a separate -debug package is split out is a property of whichever
 # makepkg.conf is in front of you -- Arch's default has it on, a stock container
@@ -33,7 +35,8 @@ options=(!debug)
 backup=('etc/pam.d/irontile-lock')
 # Only the nested backend reaches for X, and that is for development rather than
 # for running a session.
-optdepends=('libxcb: running nested inside another compositor'
+optdepends=('adwaita-icon-theme: icons in the bar, which draws its text either way'
+            'libxcb: running nested inside another compositor'
             'libx11: running nested inside another compositor'
             'libxcursor: running nested inside another compositor')
 

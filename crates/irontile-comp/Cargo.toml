@@ -69,10 +69,16 @@ rather than a plugin on top of a floating one."""
 # polkitd is not linked either: the authentication agent talks to polkit's helper
 # over a socket, and an agent with no polkit behind it is a prompt that never
 # appears for an action that then fails.
-depends = "$auto, libegl1, libwayland-client0, libwayland-egl1, polkitd"
+# fonts-noto-core because everything that draws text names Noto Sans first, and
+# because an empty font database is not text missing from a bar: cosmic-text
+# panics, so a fresh install would have a lock screen that cannot lock.
+depends = "$auto, libegl1, libwayland-client0, libwayland-egl1, polkitd, fonts-noto-core"
 # Only the nested backend touches X, and that is for development rather than
 # for running a session, so these are offered rather than pulled in.
-suggests = "libxcb1, libx11-xcb1, libxcursor1"
+# adwaita-icon-theme is a suggestion rather than a dependency because the bar
+# draws its text and skips the icons it cannot find, which is a bar with fewer
+# pictures rather than a broken one.
+suggests = "libxcb1, libx11-xcb1, libxcursor1, adwaita-icon-theme"
 # Paths are relative to this manifest, which is what cargo-deb resolves against.
 # It will warn that they are not recognised as build artifacts; that is correct
 # and expected, because the workspace is built first and packaged with
@@ -128,3 +134,11 @@ assets = [
 # Not a library at all: the authentication agent reaches polkit's helper over a
 # socket, so nothing in the binaries names it and find-requires cannot know.
 "polkit" = "*"
+# Named rather than found: nothing links a font, and an empty font database is
+# not a bar without text but a panic out of the text shaper.
+"google-noto-sans-fonts" = "*"
+
+# The bar draws its text and skips the icons it cannot find, so this improves a
+# bar rather than fixing one.
+[package.metadata.generate-rpm.recommends]
+"adwaita-icon-theme" = "*"

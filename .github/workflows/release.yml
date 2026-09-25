@@ -151,6 +151,15 @@ jobs:
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
           test -f /etc/pam.d/irontile-lock
+          # Printing a version needs no font; drawing does. Every piece that
+          # draws text -- the bar, the lock screen, the polkit dialog -- shapes
+          # it through cosmic-text, which panics rather than degrades when the
+          # font database is empty, and a container has no fonts unless the
+          # package pulls some in. So this is the step that catches a package
+          # which installs perfectly and then cannot lock the screen.
+          irontile-lock --user root --dump /tmp/lock.png
+          irontile-bar --dump /tmp/bar.png
+          irontile-polkit --dump /tmp/polkit.png
 
   verify-rpm:
     name: install rpm
@@ -172,6 +181,15 @@ jobs:
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
           test -f /etc/pam.d/irontile-lock
+          # Printing a version needs no font; drawing does. Every piece that
+          # draws text -- the bar, the lock screen, the polkit dialog -- shapes
+          # it through cosmic-text, which panics rather than degrades when the
+          # font database is empty, and a container has no fonts unless the
+          # package pulls some in. So this is the step that catches a package
+          # which installs perfectly and then cannot lock the screen.
+          irontile-lock --user root --dump /tmp/lock.png
+          irontile-bar --dump /tmp/bar.png
+          irontile-polkit --dump /tmp/polkit.png
 
   verify-arch:
     name: install arch package
@@ -194,6 +212,15 @@ jobs:
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
           test -f /etc/pam.d/irontile-lock
+          # Printing a version needs no font; drawing does. Every piece that
+          # draws text -- the bar, the lock screen, the polkit dialog -- shapes
+          # it through cosmic-text, which panics rather than degrades when the
+          # font database is empty, and a container has no fonts unless the
+          # package pulls some in. So this is the step that catches a package
+          # which installs perfectly and then cannot lock the screen.
+          irontile-lock --user root --dump /tmp/lock.png
+          irontile-bar --dump /tmp/bar.png
+          irontile-polkit --dump /tmp/polkit.png
 
   publish:
     name: attach to the release
