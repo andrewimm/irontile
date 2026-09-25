@@ -1,0 +1,106 @@
+# Maintainer: Andrew Imm <aimm22@gmail.com>
+#
+# The template `cargo xtask aur` fills in. Two placeholders, and everything else
+# is the recipe as it will be published.
+#
+# This is the other way round from packaging/PKGBUILD in the same repository:
+# that one packages the checkout it sits in, so the release workflow builds
+# exactly what was tagged. This one fetches the tarball GitHub makes from a tag,
+# because that is what an AUR package is -- a recipe anybody can run against a
+# release they never cloned.
+#
+# So the two cannot be one file, and this one cannot be finished here: a
+# tarball's checksum cannot be known before the tarball exists, and the tag is
+# what makes it exist. `cargo xtask aur` is run after the tag is pushed and
+# writes the pair to publish into target/aur.
+pkgname=irontile
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc="A Wayland tiling compositor with a split-container tree as its native model"
+arch=('x86_64')
+url="https://github.com/andrewimm/irontile"
+license=('MIT')
+# Resolved from the sonames the binaries actually carry, rather than from what
+# the compositor happens to use: mesa for gbm, libglvnd for the EGL that is
+# opened by name at runtime, wayland for the two wayland client libraries that
+# are opened the same way. polkit is not linked at all: the agent talks to its
+# helper over a socket, and without polkit there is nobody for it to answer for.
+# ttf-font is any font at all: the bar, the lock screen and the polkit dialog all
+# shape text, and on a machine with an empty font database that is not a bar
+# without text but a panic -- a lock screen that cannot lock.
+depends=('mesa' 'libinput' 'seatd' 'systemd-libs' 'libxkbcommon' 'libpulse' 'pam'
+         'libglvnd' 'wayland' 'polkit' 'ttf-font')
+# clang, because pam-sys generates its bindings with bindgen at build time and
+# bindgen loads libclang. Arch ships the PAM headers in `pam` itself, which is
+# already a runtime dependency, so there is nothing else to add for the locker.
+makedepends=('cargo' 'clang')
+# check() asserts which font and which icons particular names resolve to, so the
+# two it names have to be the ones installed.
+checkdepends=('noto-fonts' 'hicolor-icon-theme')
+# Whether a separate -debug package is split out is a property of whichever
+# makepkg.conf is in front of you, so a build produces one package on one
+# machine and two on another. Said here instead.
+options=(!debug)
+# An upgrade leaves an edited PAM stack in place: what the lock screen asks for
+# is the administrator's decision, and overwriting it could lock somebody out.
+backup=('etc/pam.d/irontile-lock')
+optdepends=('adwaita-icon-theme: icons in the bar, which draws its text either way'
+            'libxcb: running nested inside another compositor'
+            'libx11: running nested inside another compositor'
+            'libxcursor: running nested inside another compositor')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('@SHA256@')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    # RUSTUP_TOOLCHAIN is not boilerplate here: the tarball carries a
+    # rust-toolchain.toml, which outranks whichever toolchain is default and
+    # would otherwise decide the build on its own -- and on a machine with
+    # rustup it would try to install that exact version rather than use the
+    # compiler Arch ships.
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --all-features
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo test --frozen --all-features
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 target/release/irontile "$pkgdir/usr/bin/irontile"
+    install -Dm755 target/release/irontile-bar "$pkgdir/usr/bin/irontile-bar"
+    install -Dm755 target/release/irontilectl "$pkgdir/usr/bin/irontilectl"
+    install -Dm755 target/release/irontile-lock "$pkgdir/usr/bin/irontile-lock"
+    install -Dm755 target/release/irontile-polkit "$pkgdir/usr/bin/irontile-polkit"
+    install -Dm755 target/release/start-irontile "$pkgdir/usr/bin/start-irontile"
+    # What makes irontile appear in a login manager's session list.
+    install -Dm644 assets/irontile.desktop \
+        "$pkgdir/usr/share/wayland-sessions/irontile.desktop"
+    # Without this the lock screen authenticates nothing, which is the safe way
+    # round for a file that decides who gets back into the session.
+    install -Dm644 assets/pam/arch "$pkgdir/etc/pam.d/irontile-lock"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    # makepkg compresses these itself, so they are installed as written.
+    for page in assets/man/*.1; do
+        install -Dm644 "$page" "$pkgdir/usr/share/man/man1/$(basename "$page")"
+    done
+    # Three shells, three conventions, all of them read the directory without
+    # being told to.
+    install -Dm644 assets/completions/irontilectl.bash \
+        "$pkgdir/usr/share/bash-completion/completions/irontilectl"
+    install -Dm644 assets/completions/_irontilectl \
+        "$pkgdir/usr/share/zsh/site-functions/_irontilectl"
+    install -Dm644 assets/completions/irontilectl.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/irontilectl.fish"
+}

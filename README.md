@@ -1014,6 +1014,38 @@ Versions are the workspace `version` in `Cargo.toml`, and a release is that
 version tagged `v0.1.0`. The tag is the thing packaging builds from, so it moves
 only forward and never moves once pushed.
 
+Pushing the tag is what starts everything: a deb, an rpm and an Arch package
+are each built inside the oldest distribution they are meant to install on,
+each is installed in a clean container of that distribution and made to draw
+something, and what survives is attested and attached to the release.
+
+### The AUR
+
+The AUR package is the one thing not published by that workflow, because it is
+the one thing that needs a person: pushing to the AUR is a git push over SSH
+with a key belonging to an account, and a key that could do it from CI would be
+a key living in this repository's secrets.
+
+The recipe is `packaging/aur/PKGBUILD.in`, and it is a template for a reason
+rather than out of taste. An AUR package fetches the release tarball and
+verifies its checksum, and that checksum cannot be known until the tarball
+exists, which is not until the tag is pushed. So it is filled in afterwards:
+
+```
+cargo xtask aur v0.2.9
+```
+
+That fetches the tarball GitHub made from the tag, writes the checksum into a
+`PKGBUILD` and a matching `.SRCINFO` under `target/aur`, and prints the clone,
+copy and push to run. Everything up to the push is reproducible by anyone; the
+push wants your key.
+
+`packaging/PKGBUILD` is the other recipe and stays where it is. It packages the
+checkout it sits in, which is how the release workflow builds exactly what was
+tagged rather than something fetched back afterwards. What the two ask for and
+what they install are the same thing said twice, so a test compares them and
+fails when only one of them learns about a new dependency.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

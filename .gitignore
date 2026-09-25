@@ -7,3 +7,8 @@
 /packaging/pkg/
 /packaging/*.tar.gz
 /packaging/*.pkg.tar.zst
+# and again where the AUR recipe is tried out
+/packaging/aur/src/
+/packaging/aur/pkg/
+/packaging/aur/*.tar.gz
+/packaging/aur/*.pkg.tar.zst
