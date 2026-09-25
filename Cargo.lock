@@ -1162,6 +1162,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "irontile-polkit"
+version = "0.2.8"
+dependencies = [
+ "irontile-version",
+ "zbus",
+]
+
+[[package]]
 name = "irontile-power"
 version = "0.2.8"
 

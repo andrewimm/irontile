@@ -1,0 +1,15 @@
+[package]
+name = "irontile-polkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The authentication agent irontile's session registers with polkit"
+
+[dependencies]
+irontile-version.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true
