@@ -153,3 +153,102 @@ fn watch(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 }
+
+#[cfg(test)]
+mod man_page {
+    /// Every option the help lists is in the man page.
+    ///
+    /// Two places that say the same thing drift, and the drift that actually
+    /// happens is a new flag added here and forgotten there -- not a man page
+    /// inventing an option, which is a mistake somebody makes once. Comparing
+    /// them costs nothing and the failure names the flag.
+    #[test]
+    fn every_option_is_in_the_man_page() {
+        let page = include_str!("../../../../assets/man/irontilectl.1");
+        for word in super::HELP.split_whitespace() {
+            if !word.starts_with("--") {
+                continue;
+            }
+            let flag = word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+            // roff escapes a leading hyphen, and every hyphen in a flag is one.
+            let roff = flag.replace('-', "\\-");
+            assert!(
+                page.contains(&roff),
+                "{flag} is in --help but not in assets/man/irontilectl.1"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod completions {
+    const BASH: &str = include_str!("../../../../assets/completions/irontilectl.bash");
+    const ZSH: &str = include_str!("../../../../assets/completions/_irontilectl");
+    const FISH: &str = include_str!("../../../../assets/completions/irontilectl.fish");
+
+    /// The words in a completion file, ignoring what the comments say.
+    ///
+    /// A word here is what a shell would offer: hyphens belong to it, so
+    /// `send-to-output` is one word and does not answer for `output`.
+    fn words(text: &str) -> Vec<&str> {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .flat_map(|line| line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')))
+            .collect()
+    }
+
+    fn shells() -> [(&'static str, Vec<&'static str>); 3] {
+        [
+            ("bash", words(BASH)),
+            ("zsh", words(ZSH)),
+            ("fish", words(FISH)),
+        ]
+    }
+
+    /// Every action the binary takes is offered by every shell.
+    ///
+    /// The completions write their word lists out rather than asking the
+    /// binary, because one that runs the program completes nothing on a
+    /// machine where the program is broken. The price of writing them out is
+    /// that they can fall behind the vocabulary, and this is what stops them:
+    /// a verb added to `VERBS` and to nothing else fails here, named.
+    #[test]
+    fn every_action_is_offered_by_every_shell() {
+        for verb in super::VERBS {
+            let word = verb.split_whitespace().next().expect("a verb is not empty");
+            for (shell, words) in shells() {
+                assert!(
+                    words.contains(&word),
+                    "the {shell} completion does not offer {word}"
+                );
+            }
+        }
+    }
+
+    /// And every subcommand, which the help is the list of.
+    #[test]
+    fn every_subcommand_is_offered_by_every_shell() {
+        let listed = super::HELP
+            .lines()
+            .skip_while(|line| !line.starts_with("SUBCOMMANDS:"))
+            .skip(1)
+            .take_while(|line| line.starts_with("    "))
+            .filter_map(|line| line.split_whitespace().next());
+        let mut counted = 0;
+        for name in listed {
+            counted += 1;
+            for (shell, words) in shells() {
+                assert!(
+                    words.contains(&name),
+                    "the {shell} completion does not offer {name}"
+                );
+            }
+        }
+        // Without this the test passes by finding nothing, which is what it
+        // would do if the help were ever reshaped.
+        assert!(
+            counted >= 8,
+            "only {counted} subcommands were found in the help"
+        );
+    }
+}

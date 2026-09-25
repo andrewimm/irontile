@@ -226,3 +226,29 @@ fn try_the_dialog() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod man_page {
+    /// Every option the help lists is in the man page.
+    ///
+    /// Two places that say the same thing drift, and the drift that actually
+    /// happens is a new flag added here and forgotten there -- not a man page
+    /// inventing an option, which is a mistake somebody makes once. Comparing
+    /// them costs nothing and the failure names the flag.
+    #[test]
+    fn every_option_is_in_the_man_page() {
+        let page = include_str!("../../../assets/man/irontile-polkit.1");
+        for word in super::HELP.split_whitespace() {
+            if !word.starts_with("--") {
+                continue;
+            }
+            let flag = word.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+            // roff escapes a leading hyphen, and every hyphen in a flag is one.
+            let roff = flag.replace('-', "\\-");
+            assert!(
+                page.contains(&roff),
+                "{flag} is in --help but not in assets/man/irontile-polkit.1"
+            );
+        }
+    }
+}

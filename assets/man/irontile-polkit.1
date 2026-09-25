@@ -1,0 +1,69 @@
+.\" No version in the title line: see the note in irontile.1.
+.TH IRONTILE-POLKIT 1 "" "irontile" "irontile"
+.SH NAME
+irontile\-polkit \- the authentication agent irontile's session registers with polkit
+.SH SYNOPSIS
+.B irontile\-polkit
+.br
+.B irontile\-polkit \-\-dump
+.I PATH
+.br
+.B irontile\-polkit \-\-try
+.SH DESCRIPTION
+polkit decides whether something may be done; an agent is what asks the person
+at the keyboard.
+.B irontile\-polkit
+registers as that agent for the session. Without one, every action that needs
+an administrator fails with nobody to ask \(em which from the chair looks like a
+button that does nothing.
+.PP
+Start it with the session and leave it running: an agent that exits is an agent
+that unregisters.
+.PP
+.EX
+[startup]
+exec = [
+  "irontile\-polkit",
+]
+.EE
+.PP
+Only one agent can hold a session. A desktop that ships its own will take the
+registration if it starts first, and whichever loses is a silent no\-op.
+.B pkttyagent \-\-fallback,
+which
+.BR pkexec (1)
+starts for itself in a terminal, registers for one process rather than for the
+session and does not collide.
+.PP
+Nothing here is privileged. The password goes to
+.BR polkit\-agent\-helper\-1 ,
+the setuid helper polkit ships for exactly this, which does the checking and
+tells the authority; the agent learns whether the answer was accepted and
+nothing else. Three attempts are offered, as sudo allows, and a refusal redraws
+the dialog rather than closing it.
+.PP
+With no compositor to draw on it asks on the terminal instead. That is not a
+nicety: an agent that can only ask through a window is an agent that cannot be
+used to fix a broken window.
+.SH OPTIONS
+.TP
+.BI \-\-dump " PATH"
+Render the dialog to a PNG and exit, without waiting for anything to ask. A
+prompt that only appears when something wants an administrator is a prompt
+nobody can look at.
+.TP
+.B \-\-try
+Show the dialog with a made\-up request and print how long the answer was. For
+looking at it on a real display without waiting for something to want an
+administrator.
+.TP
+.B \-\-version
+Show the version and exit.
+.TP
+.B \-\-help
+Show a usage message and exit.
+.SH SEE ALSO
+.BR irontile (1),
+.BR polkit (8),
+.BR pkexec (1),
+.BR pkttyagent (1)

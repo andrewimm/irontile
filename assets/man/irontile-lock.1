@@ -1,0 +1,104 @@
+.\" No version in the title line: see the note in irontile.1.
+.TH IRONTILE-LOCK 1 "" "irontile" "irontile"
+.SH NAME
+irontile\-lock \- lock the session until a password says otherwise
+.SH SYNOPSIS
+.B irontile\-lock
+.RB [ \-f | \-\-daemonize ]
+.RB [ \-\-service
+.IR NAME ]
+.RB [ \-\-user
+.IR NAME ]
+.br
+.B irontile\-lock \-\-verify
+.br
+.B irontile\-lock \-\-dump
+.I PATH
+.RB [ \-\-size
+.IR WxH ]
+.RB [ \-\-scale
+.IR N ]
+.SH DESCRIPTION
+.B irontile\-lock
+is an ordinary
+.B ext\-session\-lock
+client with no privileges of its own: it covers every display, asks PAM about a
+password, and unlocks. Bind it, or hand it to an idle daemon.
+.PP
+PAM runs on a thread of its own, because it takes a couple of seconds to refuse
+and that is deliberate: it is what makes guessing expensive. Asking it on the
+loop that draws would stop the clock and the keyboard for that whole time, in
+front of somebody who is already anxious about it.
+.PP
+The field shows a fixed number of pips and never grows. A track that grew as
+the password was typed would tell anyone watching how long it is.
+.SH OPTIONS
+.TP
+.BI \-\-service " NAME"
+The file in
+.I /etc/pam.d
+to authenticate against. Default:
+.BR irontile\-lock .
+.TP
+.BI \-\-user " NAME"
+Who to authenticate as. Default:
+.BR $USER .
+.TP
+.BR \-f ", " \-\-daemonize
+Fork once the screen is actually locked, so that whatever started this can
+carry on. An idle daemon told to lock before suspending waits for its lock
+command to finish \(em that wait is the whole guarantee \(em and without this it
+would wait until somebody unlocked, leaving a machine awake on a lock screen
+with the lid shut.
+.TP
+.B \-\-verify
+Ask for a password on the terminal instead of locking anything, and say how
+long PAM took to answer.
+.TP
+.BI \-\-dump " PATH"
+Render one lock screen to a PNG and exit, without locking anything. The only
+way to look at a lock screen while working on it.
+.TP
+.BI \-\-size " WxH"
+What to render for
+.BR \-\-dump .
+Default 1692x1128.
+.TP
+.BI \-\-scale " N"
+Display scale for
+.BR \-\-dump .
+Default 1.
+.TP
+.B \-\-version
+Show the version and exit.
+.TP
+.B \-\-help
+Show a usage message and exit.
+.SH FILES
+.TP
+.I /etc/pam.d/irontile\-lock
+The PAM service this authenticates against. Installed by the package and left
+alone on upgrade: what unlocking the screen requires is the administrator's to
+decide. Without it nothing here will authenticate, which is the safe way round.
+.TP
+.I /etc/pam.d/irontile\-lock\-fprint
+A second service, asked on a thread of its own while the screen waits, so that
+a finger and a password are two ways into the same lock and neither waits for
+the other. Nothing installs this file and deleting it turns the reader off: a
+lock screen that opens to a fingerprint is not something anybody should acquire
+by upgrading. Put nothing in it but
+.B pam_fprintd
+and an account check \(em the fingerprint attempt is made with an empty
+password, so a stack that falls through to the password database is a stack
+being asked whether an empty password will do.
+.SH EXAMPLES
+Lock before suspending, and make the idle daemon wait for the screen to be
+covered first:
+.PP
+.EX
+swayidle \-w before\-sleep 'irontile\-lock \-f'
+.EE
+.SH SEE ALSO
+.BR irontile (1),
+.BR pam (8),
+.BR pam_fprintd (8)

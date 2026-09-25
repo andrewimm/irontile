@@ -1,0 +1,78 @@
+.\" No version in the title line: see the note in irontile.1.
+.TH IRONTILE-BAR 1 "" "irontile" "irontile"
+.SH NAME
+irontile\-bar \- a status bar for irontile
+.SH SYNOPSIS
+.B irontile\-bar
+.RB [ \-\-config
+.IR PATH ]
+.br
+.B irontile\-bar \-\-dump
+.I PATH
+.RB [ \-\-width
+.IR N ]
+.RB [ \-\-scale
+.IR N ]
+.RB [ \-\-tooltip
+.IR TEXT ]
+.SH DESCRIPTION
+.B irontile\-bar
+is an ordinary layer\-shell client with no special access to the compositor: it
+opens one bar per display, reserves the space it occupies, and reads everything
+it shows from the places anything else could read them. It is not started by
+the compositor; put it in
+.B [startup]
+in the configuration file.
+.PP
+Its configuration follows waybar's shape, because that is what people are
+porting from: three regions naming modules, and a table per module carrying its
+format string, icons and thresholds.
+.SH OPTIONS
+.TP
+.BI \-\-config " PATH"
+Read configuration from
+.I PATH
+instead of the usual place.
+.TP
+.BI \-\-dump " PATH"
+Render one bar to a PNG and exit, without a compositor. The quickest way to see
+what a configuration looks like.
+.TP
+.BI \-\-width " N"
+Width to render for
+.BR \-\-dump .
+Default 1200.
+.TP
+.BI \-\-scale " N"
+Display scale to render for
+.BR \-\-dump .
+Default 1.
+.TP
+.BI \-\-tooltip " TEXT"
+Render a tooltip saying
+.I TEXT
+rather than a bar, so the
+.B [tooltip]
+settings can be seen. Newlines are written
+.BR \en .
+.TP
+.B \-\-version
+Show the version and exit.
+.TP
+.B \-\-help
+Show a usage message and exit.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/irontile/bar.toml
+Configuration. Falls back to
+.IR ~/.config/irontile/bar.toml .
+A missing file means the defaults.
+.SH NOTES
+Icons are named by the freedesktop specification and resolved against an
+installed icon theme, so the names hold still across releases in a way a font's
+codepoints do not. With no theme installed the bar draws its text and skips the
+icons; with no font installed at all it cannot draw anything, which is why the
+packages depend on one.
+.SH SEE ALSO
+.BR irontile (1),
+.BR irontilectl (1)

@@ -96,4 +96,16 @@ package() {
     # round for a file that decides who gets back into the session.
     install -Dm644 assets/pam/arch "$pkgdir/etc/pam.d/irontile-lock"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    # makepkg compresses these itself, so they are installed as written.
+    for page in assets/man/*.1; do
+        install -Dm644 "$page" "$pkgdir/usr/share/man/man1/$(basename "$page")"
+    done
+    # Three shells, three conventions, all of them read the directory without
+    # being told to.
+    install -Dm644 assets/completions/irontilectl.bash \
+        "$pkgdir/usr/share/bash-completion/completions/irontilectl"
+    install -Dm644 assets/completions/_irontilectl \
+        "$pkgdir/usr/share/zsh/site-functions/_irontilectl"
+    install -Dm644 assets/completions/irontilectl.fish \
+        "$pkgdir/usr/share/fish/vendor_completions.d/irontilectl.fish"
 }

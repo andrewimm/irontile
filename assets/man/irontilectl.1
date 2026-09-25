@@ -1,0 +1,139 @@
+.\" No version in the title line: see the note in irontile.1.
+.TH IRONTILECTL 1 "" "irontile" "irontile"
+.SH NAME
+irontilectl \- control a running irontile
+.SH SYNOPSIS
+.B irontilectl
+.I ACTION...
+.br
+.B irontilectl
+.I SUBCOMMAND
+.SH DESCRIPTION
+Every binding is also a command.
+.B irontilectl
+connects to a running compositor's control socket and asks it either to do
+something \(em anything the configuration file accepts as a binding \(em or to
+say what it currently has.
+.PP
+Words are joined, so both
+.B irontilectl focus left
+and
+.B "irontilectl \(dqfocus left\(dq"
+work.
+.SH SUBCOMMANDS
+.TP
+.B frame
+Where every window is right now.
+.TP
+.B outputs
+Connected displays and their arrangement.
+.TP
+.B workspaces
+Every desktop, and what is on it.
+.TP
+.B windows
+Every window, with its title and application id.
+.TP
+.B layers
+Panels and overlays on screen, and what they reserve.
+.TP
+.B layout
+The whole layout engine state, as JSON.
+.TP
+.B watch
+Stream events until interrupted.
+.TP
+.B version
+Show the version and exit. This asks the compositor that is running, which is
+not always the one installed.
+.TP
+.B help
+Show a usage message, including every action, and exit.
+.SH ACTIONS
+.TP
+.BI focus " direction"
+Move the keyboard focus. A direction is
+.BR left ", " right ", " up ", " down ,
+or any of their other spellings.
+.TP
+.BI move " direction"
+Move the focused window within the tree.
+.TP
+.BI resize " direction"
+Grow or shrink the focused window.
+.TP
+.BI output " direction"
+Focus the display in that direction.
+.TP
+.BI send\-to\-output " direction"
+Send the focused desktop to the display in that direction.
+.TP
+.B split horizontal|vertical|toggle
+How the next window splits the container the focus is in.
+.TP
+.B equalize
+Give every sibling in the container the same share.
+.TP
+.B float
+Take the focused window out of the tree, or put it back.
+.TP
+.B fullscreen
+Fill the display with the focused window, or stop.
+.TP
+.B close
+Ask the focused window to close.
+.TP
+.BI workspace " n"
+Show that desktop.
+.B workspace next
+and
+.B workspace prev
+step between them. Desktops are numbered without limit, so stepping past the
+last one makes the next rather than stopping.
+.TP
+.BI move\-to\-workspace " n"
+Send the focused window to that desktop.
+.TP
+.BI spawn " program " [ args... ]
+Run a program. Everything after the program name is passed to it.
+.TP
+.BI vt " n"
+Switch to that virtual terminal. This one fires even while the screen is
+locked, because a machine with no way out of a wedged compositor is a machine
+that has to be held down.
+.TP
+.BI warp " x y"
+Put the pointer at that point in the space the displays share.
+.TP
+.B click|press|release [1|2|3]
+Synthesize a pointer button where the pointer is: 1 is left, 2 middle, 3 right.
+It does everything a real one does \(em focuses the
+window under it, starts a drag, reaches the client.
+.TP
+.B reload
+Read the configuration file again.
+.TP
+.B quit
+End the session. This one never fires while the screen is locked.
+.SH ENVIRONMENT
+.TP
+.B IRONTILE_SOCKET
+The socket to connect to, for targeting a specific instance. Otherwise the one
+belonging to
+.BR WAYLAND_DISPLAY .
+.SH FILES
+.TP
+.I $XDG_RUNTIME_DIR/irontile/<display>.sock
+Where the compositor listens, keyed by Wayland display name so that two
+compositors on one machine do not collide \(em which is exactly what happens
+when a nested instance is run for development from inside a session.
+.SH EXAMPLES
+.EX
+irontilectl focus left
+irontilectl workspace 3
+irontilectl send\-to\-output right
+irontilectl spawn kitty
+irontilectl watch
+.EE
+.SH SEE ALSO
+.BR irontile (1)

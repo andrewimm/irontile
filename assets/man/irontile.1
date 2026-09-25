@@ -1,0 +1,111 @@
+.\" No version in the title line. A man page that names one has to be edited at
+.\" every release for a line nobody reads, and the version that matters is the
+.\" one the binary prints.
+.TH IRONTILE 1 "" "irontile" "irontile"
+.SH NAME
+irontile \- a Wayland tiling compositor
+.SH SYNOPSIS
+.B irontile
+.RB [ \-\-session | \-\-nested | \-\-headless
+.RI [ SPEC ]]
+.RB [ \-\-wayland\-display
+.IR NAME ]
+.RB [ \-\-config
+.IR PATH ]
+.br
+.B irontile \-\-print\-config
+.SH DESCRIPTION
+.B irontile
+is a Wayland compositor whose native model is a tree of split containers rather
+than a floating desktop with tiling bolted on. Windows are placed by the tree;
+nothing overlaps unless it is asked to float.
+.PP
+It is normally started by a login manager through the session entry, which runs
+.BR start\-irontile (1)
+rather than this binary directly, so that a crash is restarted instead of
+ending the session.
+.PP
+With no backend named, irontile nests if
+.B WAYLAND_DISPLAY
+or
+.B DISPLAY
+is set and takes the session otherwise, which is what each of those situations
+means.
+.SH OPTIONS
+.TP
+.B \-\-session
+Drive real hardware through DRM. The default when there is no compositor
+already running to nest in.
+.TP
+.B \-\-nested
+Run as a window inside the compositor already running. The default when there
+is one.
+.TP
+.BR \-\-headless " [" \fISPEC\fR ]
+Run without a renderer, with displays described by
+.IR SPEC :
+a comma\-separated list of
+.I WxH
+or
+.IR WxH+X+Y ,
+defaulting to one 1920x1080 display. For tests, and for driving irontile purely
+over its control socket.
+.TP
+.BI \-\-wayland\-display " NAME"
+Bind this Wayland socket name instead of picking the first free one. Useful
+when the name has to be known in advance, such as on a machine where another
+compositor already holds
+.BR wayland\-1 .
+.TP
+.BI \-\-config " PATH"
+Read configuration from
+.I PATH
+instead of the usual place.
+.TP
+.B \-\-print\-config
+Write the default configuration to standard output and exit. Every default
+binding, as the text a user would write.
+.TP
+.B \-\-version
+Show the version and exit. A running compositor is asked its own version by
+.BR "irontilectl version" ,
+which is not always the one installed.
+.TP
+.B \-\-help
+Show a usage message and exit.
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/irontile/irontile.toml
+Configuration. Falls back to
+.IR ~/.config/irontile/irontile.toml .
+A missing file is not an error: it means the defaults.
+.TP
+.I $XDG_RUNTIME_DIR/irontile/<display>.sock
+The control socket, keyed by Wayland display name so that two compositors on
+one machine do not collide. See
+.BR irontilectl (1).
+.TP
+.I ~/.local/state/irontile/irontile.log
+What a session wrote, with the run before it kept as
+.IR irontile.log.1 ,
+five deep. Nested and headless runs do not write it: they are started from a
+terminal somebody is already watching.
+.SH ENVIRONMENT
+.TP
+.B RUST_LOG
+.B irontile=debug
+logs displays lighting, each reflow's placements, and keypresses that hold a
+modifier or fire a binding.
+.B irontile=trace
+adds the page\-flip cycle, which is two lines per frame per display. Plain
+typing is never logged at any level, and neither are window titles, spawn
+arguments or clipboard contents: turning on debug logging must not turn the
+compositor into a keylogger.
+.SH SEE ALSO
+.BR start\-irontile (1),
+.BR irontilectl (1),
+.BR irontile\-bar (1),
+.BR irontile\-lock (1),
+.BR irontile\-polkit (1)
+.PP
+The README in the source distribution is the long form of all of this.

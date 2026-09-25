@@ -42,7 +42,8 @@ bad one; the certificate behind the attestation lives for minutes and there is
 nothing to leak. This is also why `pacman -U` on a release URL asks for a
 `.sig` and does not find one: download the package first and install the file.
 
-Six binaries, a desktop entry and a PAM service:
+Six binaries, a desktop entry, a PAM service, a man page each and completions
+for `irontilectl`:
 
 | File | Where it goes |
 | --- | --- |
@@ -54,10 +55,21 @@ Six binaries, a desktop entry and a PAM service:
 | `start-irontile` | `/usr/bin` |
 | `assets/irontile.desktop` | `/usr/share/wayland-sessions/` |
 | `assets/pam/<distribution>` | `/etc/pam.d/irontile-lock` |
+| `assets/man/*.1` | `/usr/share/man/man1/` |
+| `assets/completions/irontilectl.bash` | `/usr/share/bash-completion/completions/irontilectl` |
+| `assets/completions/_irontilectl` | zsh's site or vendor completions |
+| `assets/completions/irontilectl.fish` | `/usr/share/fish/vendor_completions.d/` |
 
 The desktop entry is the whole of what makes irontile selectable in GDM, SDDM,
 greetd or anything else that reads the directory. Without it the binaries are
 installed and nothing offers to start them.
+
+Each binary has a man page, and `irontilectl` completes in bash, zsh and fish.
+The completions carry their own word lists rather than asking the binary --
+one that shells out completes nothing on a machine where the program is
+broken -- and a test checks those lists against the vocabulary the binary
+actually accepts, as another checks that every option in a `--help` appears in
+the man page. Both fail the suite rather than the user.
 
 A fingerprint can open it too, if you set one up. `irontile-lock` asks a second
 service, `irontile-lock-fprint`, on a thread of its own while the screen sits

@@ -1,0 +1,54 @@
+.\" No version in the title line: see the note in irontile.1.
+.TH START-IRONTILE 1 "" "irontile" "irontile"
+.SH NAME
+start\-irontile \- run irontile under a supervisor that restarts it if it crashes
+.SH SYNOPSIS
+.B start\-irontile
+.RB [ \-\-path
+.IR PATH ]
+.RI [ \-\- " ARGS..." ]
+.SH DESCRIPTION
+.B start\-irontile
+is what the session entry runs, and what a login manager signals and waits on.
+It starts
+.BR irontile (1)
+and starts it again if it crashes, so that a fault in the compositor costs the
+windows rather than the whole session.
+.PP
+A clean exit ends the session, and so does being asked to stop: a login manager
+ending the session and Ctrl+C at a terminal both arrive as a signal, which is
+passed on to irontile and then honoured rather than treated as a crash.
+Anything else is a crash, and irontile is started again.
+.PP
+With nothing after
+.BR \-\- ,
+irontile is started with
+.BR \-\-session ,
+because a supervised session is what this exists for.
+.SH OPTIONS
+.TP
+.BI \-\-path " PATH"
+The compositor to run. Default:
+.BR irontile ,
+found on
+.BR PATH .
+.TP
+.B \-\-version
+Show the version and exit.
+.TP
+.B \-\-help
+Show a usage message and exit.
+.SH EXAMPLES
+Run the session with a configuration of your own:
+.PP
+.EX
+start\-irontile \-\- \-\-config ~/irontile.toml
+.EE
+.SH FILES
+.TP
+.I /usr/share/wayland\-sessions/irontile.desktop
+The session entry. It names this program rather than the compositor, which is
+the whole point of the two being separate.
+.SH SEE ALSO
+.BR irontile (1),
+.BR irontilectl (1)

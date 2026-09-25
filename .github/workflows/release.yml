@@ -160,6 +160,12 @@ jobs:
           irontile-lock --user root --dump /tmp/lock.png
           irontile-bar --dump /tmp/bar.png
           irontile-polkit --dump /tmp/polkit.png
+          # Files rather than behaviour: nothing would notice these missing.
+          ls /usr/share/man/man1/irontile.1* >/dev/null
+          ls /usr/share/man/man1/irontilectl.1* >/dev/null
+          test -f /usr/share/bash-completion/completions/irontilectl
+          test -f /usr/share/zsh/vendor-completions/_irontilectl
+          test -f /usr/share/fish/vendor_completions.d/irontilectl.fish
 
   verify-rpm:
     name: install rpm
@@ -171,7 +177,10 @@ jobs:
         with:
           name: rpm
       - run: |
-          dnf install -y ./irontile-*.rpm
+          # tsflags is cleared because this image sets nodocs and the man pages
+          # are %doc: without it they are correctly absent and the check below
+          # would be testing the container rather than the package.
+          dnf install -y --setopt=tsflags= ./irontile-*.rpm
           irontile --version
           irontile-bar --version
           irontilectl --version
@@ -190,6 +199,14 @@ jobs:
           irontile-lock --user root --dump /tmp/lock.png
           irontile-bar --dump /tmp/bar.png
           irontile-polkit --dump /tmp/polkit.png
+          # Files rather than behaviour: nothing would notice these missing.
+          # The man pages are %doc, and this image installs with nodocs, so the
+          # flag is cleared above rather than the check being dropped here.
+          ls /usr/share/man/man1/irontile.1* >/dev/null
+          ls /usr/share/man/man1/irontilectl.1* >/dev/null
+          test -f /usr/share/bash-completion/completions/irontilectl
+          test -f /usr/share/zsh/site-functions/_irontilectl
+          test -f /usr/share/fish/vendor_completions.d/irontilectl.fish
 
   verify-arch:
     name: install arch package
@@ -202,6 +219,10 @@ jobs:
           name: arch
       - run: |
           pacman -Syu --noconfirm
+          # This image throws man pages away on extraction, the way the Fedora
+          # one installs with nodocs. Without this the check below would be
+          # testing the container rather than the package.
+          sed -i "/NoExtract.*usr\\/share\\/man/d" /etc/pacman.conf
           pacman -U --noconfirm ./irontile-*.pkg.tar.zst
           irontile --version
           irontile-bar --version
@@ -221,6 +242,13 @@ jobs:
           irontile-lock --user root --dump /tmp/lock.png
           irontile-bar --dump /tmp/bar.png
           irontile-polkit --dump /tmp/polkit.png
+          # Files rather than behaviour: nothing would notice these missing.
+          # makepkg compresses man pages, hence the glob.
+          ls /usr/share/man/man1/irontile.1* >/dev/null
+          ls /usr/share/man/man1/irontilectl.1* >/dev/null
+          test -f /usr/share/bash-completion/completions/irontilectl
+          test -f /usr/share/zsh/site-functions/_irontilectl
+          test -f /usr/share/fish/vendor_completions.d/irontilectl.fish
 
   publish:
     name: attach to the release
