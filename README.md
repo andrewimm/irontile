@@ -55,6 +55,7 @@ for `irontilectl`:
 | `start-irontile` | `/usr/bin` |
 | `assets/irontile.desktop` | `/usr/share/wayland-sessions/` |
 | `assets/pam/<distribution>` | `/etc/pam.d/irontile-lock` |
+| `assets/portals/irontile-portals.conf` | `/usr/share/xdg-desktop-portal/` |
 | `assets/man/*.1` | `/usr/share/man/man1/` |
 | `assets/completions/irontilectl.bash` | `/usr/share/bash-completion/completions/irontilectl` |
 | `assets/completions/_irontilectl` | zsh's site or vendor completions |
@@ -429,9 +430,11 @@ nothing of the sort.
 
 Only the session backend says it -- the compositor that *is* the session is the
 one entitled to say where the session is; nested and headless share somebody
-else's bus and keep quiet. `XDG_CURRENT_DESKTOP` is deliberately not announced:
-it selects a desktop portal backend, and naming one with no backend installed
-takes away the file picker rather than improving anything.
+else's bus and keep quiet. `XDG_CURRENT_DESKTOP` goes with it, because that is
+how a portal request finds its backend -- see below. It is republished rather
+than invented: a session that arrived without one is left without one, and only
+`start-irontile` fills it in, because that is the program a login manager
+starts.
 
 ```toml
 [session]
@@ -733,6 +736,44 @@ appears when something wants an administrator is a prompt nobody can look at.
 With no compositor to draw on it asks on the terminal instead. That is not a
 nicety -- an agent that can only ask through a window is an agent that cannot be
 used to fix a broken window.
+
+## Portals
+
+`xdg-desktop-portal` is the front desk applications ask when they want
+something they cannot do themselves: pick a file, know whether you prefer dark
+mode, take a screenshot, share the screen. It implements almost none of that
+itself -- it hands each request to a *backend*, and picks the backend by the
+name of the desktop.
+
+irontile is that name, the session entry says so, and
+`/usr/share/xdg-desktop-portal/irontile-portals.conf` is what it finds:
+
+| Request | Answered by |
+| --- | --- |
+| Everything ordinary -- file pickers, settings, notifications, opening a URI | `xdg-desktop-portal-gtk` |
+| `ScreenCast`, `Screenshot` | `xdg-desktop-portal-wlr` |
+| `Inhibit` | deliberately nobody |
+
+The middle row is the one that needs a compositor, because it needs the
+compositor's frames. xdg-desktop-portal-wlr captures over `wlr-screencopy`,
+which irontile speaks, and carries the PipeWire plumbing that hands a stream to
+whatever asked -- a browser sharing a tab, a meeting, a recorder. Without it
+`org.freedesktop.portal.ScreenCast` never appears on the bus at all, and "share
+your screen" fails with nothing on screen to explain why.
+
+`Inhibit` is nobody on purpose, which is what sway does and for the same
+reason: the gtk backend's implementation asks `org.gnome.SessionManager`, which
+is not running here. With no backend for it, a program that wants the screen
+kept awake falls back to the `idle-inhibit` protocol, which irontile does
+implement -- and which is the better answer anyway, since an inhibitor attached
+to a window stops counting when that window goes away.
+
+Note what this does not do. A portal is where the question "may this program
+record the screen?" belongs, but answering it there does not stop anything:
+`wlr-screencopy` is still open to every client, which is why the capture
+indicator exists and why it cannot be turned off. Closing that door means
+gating screencopy on the portal, and that would break `grim` -- so it is a
+decision to take deliberately rather than a box to tick.
 
 ## Protocols
 

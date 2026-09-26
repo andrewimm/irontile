@@ -109,10 +109,13 @@ fn supervise(bin: &str, args: &[String]) -> Result<ExitCode, String> {
     let running = Arc::new(AtomicI32::new(0));
     forward_signals(Arc::clone(&running))?;
 
+    let desktop = desktop_name(std::env::var_os("XDG_CURRENT_DESKTOP"));
+
     let mut crashes: Vec<Instant> = Vec::new();
     loop {
         let mut child = Command::new(bin)
             .args(args)
+            .env("XDG_CURRENT_DESKTOP", &desktop)
             .spawn()
             .map_err(|err| format!("failed to start {bin}: {err}"))?;
         running.store(child.id() as i32, Ordering::SeqCst);
@@ -230,5 +233,40 @@ mod man_page {
                 "{flag} is in --help but not in assets/man/start-irontile.1"
             );
         }
+    }
+}
+
+/// What the session calls itself, for anything that asks.
+///
+/// A login manager sets this from `DesktopNames` in the session entry, and
+/// when it has, that is the answer: a session entry naming several desktops is
+/// saying something deliberate and this is not the place to second-guess it.
+/// Started from a terminal there is nobody to have set it, and an empty answer
+/// is what leaves xdg-desktop-portal with no configuration to find -- no
+/// screen sharing, for a session that is running irontile either way.
+fn desktop_name(current: Option<std::ffi::OsString>) -> String {
+    current
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "irontile".to_owned())
+}
+
+#[cfg(test)]
+mod desktop_tests {
+    use super::desktop_name;
+
+    #[test]
+    fn a_login_manager_that_said_so_is_believed() {
+        assert_eq!(desktop_name(Some("irontile".into())), "irontile");
+        // Several, which a session entry is allowed to name and which the
+        // portal reads in order.
+        assert_eq!(desktop_name(Some("sway:wlroots".into())), "sway:wlroots");
+    }
+
+    #[test]
+    fn a_session_started_by_hand_says_what_it_is() {
+        assert_eq!(desktop_name(None), "irontile");
+        assert_eq!(desktop_name(Some("".into())), "irontile");
+        assert_eq!(desktop_name(Some("   ".into())), "irontile");
     }
 }

@@ -36,6 +36,8 @@ backup=('etc/pam.d/irontile-lock')
 # Only the nested backend reaches for X, and that is for development rather than
 # for running a session.
 optdepends=('xorg-xwayland: running X11 programs'
+            'xdg-desktop-portal-wlr: screen sharing and portal screenshots'
+            'xdg-desktop-portal-gtk: file pickers and settings for portal clients'
             'adwaita-icon-theme: icons in the bar, which draws its text either way'
             'libxcb: running nested inside another compositor'
             'libx11: running nested inside another compositor'
@@ -96,6 +98,11 @@ package() {
     # Without this the lock screen authenticates nothing, which is the safe way
     # round for a file that decides who gets back into the session.
     install -Dm644 assets/pam/arch "$pkgdir/etc/pam.d/irontile-lock"
+    # Which backend answers a portal request. Installed beside the session
+    # entry because the two only make sense together: the entry names the
+    # desktop, and this is what that name finds.
+    install -Dm644 assets/portals/irontile-portals.conf \
+        "$pkgdir/usr/share/xdg-desktop-portal/irontile-portals.conf"
     install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
     # makepkg compresses these itself, so they are installed as written.
     for page in assets/man/*.1; do

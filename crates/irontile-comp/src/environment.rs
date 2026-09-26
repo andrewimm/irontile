@@ -17,10 +17,18 @@ use zbus::blocking::Connection;
 
 /// What is worth saying. Deliberately short.
 ///
-/// `XDG_CURRENT_DESKTOP` is not here on purpose: it selects a desktop portal
-/// backend, and naming one that has no backend installed takes away the file
-/// picker rather than improving anything.
-const WANTED: &[&str] = &["WAYLAND_DISPLAY", "XDG_SESSION_TYPE"];
+/// `XDG_CURRENT_DESKTOP` is here because the portal configuration is: it is
+/// how xdg-desktop-portal picks which backend answers a request, and what it
+/// picks for `irontile` is `assets/portals/irontile-portals.conf`, which the
+/// package installs beside the session entry. The two arrive together or not
+/// at all, which is why this is safe to say now and was not before -- naming a
+/// desktop with no configuration to find is how a session ends up with no file
+/// picker.
+///
+/// Only ever republished, never invented: this publishes the value the session
+/// already has, and a session started from a terminal that has none stays as
+/// it was.
+const WANTED: &[&str] = &["WAYLAND_DISPLAY", "XDG_SESSION_TYPE", "XDG_CURRENT_DESKTOP"];
 
 /// Announces this compositor's display to the session.
 ///

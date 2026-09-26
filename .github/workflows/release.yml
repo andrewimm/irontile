@@ -151,6 +151,9 @@ jobs:
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
           test -f /etc/pam.d/irontile-lock
+          # Without this the portal has no configuration to find for this
+          # desktop, and screen sharing is absent with nothing to say why.
+          test -f /usr/share/xdg-desktop-portal/irontile-portals.conf
           # Printing a version needs no font; drawing does. Every piece that
           # draws text -- the bar, the lock screen, the polkit dialog -- shapes
           # it through cosmic-text, which panics rather than degrades when the
@@ -190,6 +193,9 @@ jobs:
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
           test -f /etc/pam.d/irontile-lock
+          # Without this the portal has no configuration to find for this
+          # desktop, and screen sharing is absent with nothing to say why.
+          test -f /usr/share/xdg-desktop-portal/irontile-portals.conf
           # Printing a version needs no font; drawing does. Every piece that
           # draws text -- the bar, the lock screen, the polkit dialog -- shapes
           # it through cosmic-text, which panics rather than degrades when the
@@ -233,6 +239,9 @@ jobs:
           # Without this the lock screen authenticates nobody, and the only
           # place that would show up is a locked machine.
           test -f /etc/pam.d/irontile-lock
+          # Without this the portal has no configuration to find for this
+          # desktop, and screen sharing is absent with nothing to say why.
+          test -f /usr/share/xdg-desktop-portal/irontile-portals.conf
           # Printing a version needs no font; drawing does. Every piece that
           # draws text -- the bar, the lock screen, the polkit dialog -- shapes
           # it through cosmic-text, which panics rather than degrades when the

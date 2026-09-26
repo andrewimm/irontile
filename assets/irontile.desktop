@@ -9,8 +9,14 @@ Exec=start-irontile
 TryExec=start-irontile
 Type=Application
 Keywords=tiling;wayland;compositor;
-# DesktopNames is deliberately absent. It sets XDG_CURRENT_DESKTOP, which is
-# what xdg-desktop-portal matches against to pick a backend, and there is no
-# portal backend for irontile -- naming one would leave file pickers and screen
-# sharing with nothing to answer them. Unset, they fall back to a default
-# backend that works. Add it here on the day a portal exists.
+# What xdg-desktop-portal matches against to pick a backend: a login manager
+# turns this into XDG_CURRENT_DESKTOP, and the portal looks for a file named
+# after it. Left out until there was a configuration for it to find, because
+# naming a desktop with no portal configuration leaves file pickers and screen
+# sharing with nothing to answer them; assets/portals/irontile-portals.conf is
+# that configuration.
+#
+# desktop-file-validate rejects this key, and is wrong to: it belongs to session
+# files rather than to application entries, and every session file on the
+# machine carries it and fails the same check. sway and Hyprland included.
+DesktopNames=irontile

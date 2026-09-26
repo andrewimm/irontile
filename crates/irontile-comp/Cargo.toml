@@ -79,7 +79,10 @@ depends = "$auto, libegl1, libwayland-client0, libwayland-egl1, polkitd, fonts-n
 # still runs and X11 programs do not start at all, which is a session that works
 # until the day somebody installs one. apt pulls recommends in by default, so
 # this is "yes unless you said otherwise".
-recommends = "xwayland"
+# xdg-desktop-portal-wlr is what answers ScreenCast and Screenshot for the
+# configuration installed above; without it those two go unanswered and screen
+# sharing fails, while every other portal request still works.
+recommends = "xwayland, xdg-desktop-portal-wlr, xdg-desktop-portal-gtk"
 # adwaita-icon-theme is a suggestion rather than a dependency because the bar
 # draws its text and skips the icons it cannot find, which is a bar with fewer
 # pictures rather than a broken one.
@@ -97,6 +100,9 @@ assets = [
     ["../../target/release/start-irontile", "usr/bin/", "755"],
     ["../../assets/irontile.desktop", "usr/share/wayland-sessions/", "644"],
     ["../../assets/pam/debian", "etc/pam.d/irontile-lock", "644"],
+    # Which backend answers a portal request, installed beside the session entry
+    # because the two only make sense together.
+    ["../../assets/portals/irontile-portals.conf", "usr/share/xdg-desktop-portal/", "644"],
     # cargo-deb compresses what it puts under usr/share/man itself.
     ["../../assets/man/*.1", "usr/share/man/man1/", "644"],
     # Three shells, three conventions, all of them read the directory without
@@ -131,6 +137,9 @@ assets = [
     # asks for is not ours to change under somebody. This matches what dpkg and
     # pacman do with the same file, so the three packages behave alike.
     { source = "assets/pam/fedora", dest = "/etc/pam.d/irontile-lock", mode = "644", config = "noreplace" },
+    # Which backend answers a portal request, installed beside the session entry
+    # because the two only make sense together.
+    { source = "assets/portals/irontile-portals.conf", dest = "/usr/share/xdg-desktop-portal/irontile-portals.conf", mode = "644" },
     # rpm serves these uncompressed, which man reads just as happily. Named one
     # by one because there is no globbing here.
     { source = "assets/man/irontile.1", dest = "/usr/share/man/man1/irontile.1", mode = "644", doc = true },
@@ -171,3 +180,6 @@ assets = [
 # recommend rather than a require for the same reason as on Debian: the session
 # runs without it, and every X11 program fails to start.
 "xorg-x11-server-Xwayland" = "*"
+# What answers ScreenCast and Screenshot for the configuration installed above.
+"xdg-desktop-portal-wlr" = "*"
+"xdg-desktop-portal-gtk" = "*"
