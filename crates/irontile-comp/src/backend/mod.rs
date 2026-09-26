@@ -97,12 +97,25 @@ impl Backend {
     }
 
     /// The device clients should allocate dmabufs on, when one can be named.
-    pub fn dmabuf_main_device(&self) -> Option<libc::dev_t> {
+    pub fn dmabuf_main_device(&mut self) -> Option<libc::dev_t> {
         match self {
             Backend::Session(session) => session.render_device(),
-            // Nested, the buffers go to the host compositor, which names its
-            // own device to its own clients.
-            _ => None,
+            // Nested, the buffers still go to the host compositor -- but a
+            // client has to allocate them somewhere first, and the somewhere is
+            // whichever GPU our own EGL display ended up on. Saying so is what
+            // lets a nested session advertise version 4 of the protocol, and
+            // the difference shows up twice: Xwayland falls back to software
+            // rendering without it, and xdg-desktop-portal-wlr expects feedback
+            // badly enough to crash when there is none.
+            Backend::Nested(graphics) => {
+                use smithay::backend::egl::EGLDevice;
+                let display = graphics.renderer().egl_context().display();
+                EGLDevice::device_for_display(display)
+                    .ok()
+                    .and_then(|device| device.try_get_render_node().ok().flatten())
+                    .map(|node| node.dev_id())
+            }
+            Backend::Headless => None,
         }
     }
 

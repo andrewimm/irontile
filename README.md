@@ -768,6 +768,12 @@ kept awake falls back to the `idle-inhibit` protocol, which irontile does
 implement -- and which is the better answer anyway, since an inhibitor attached
 to a window stops counting when that window goes away.
 
+Nested, this all works too, which was not free: a nested session used to
+advertise dmabuf without feedback, and xdg-desktop-portal-wlr segfaults on a
+compositor that does that rather than doing without. Naming the render node
+fixed it, and fixed Xwayland falling back to software rendering in the same
+sessions.
+
 Note what this does not do. A portal is where the question "may this program
 record the screen?" belongs, but answering it there does not stop anything:
 `wlr-screencopy` is still open to every client, which is why the capture
@@ -787,7 +793,7 @@ decision to take deliberately rather than a box to tick.
 | `wlr-data-control`, `ext-data-control` | The clipboard without focus, for the tools that have no window to focus: a clipboard manager watching for changes, or a paste helper asked for the contents. Given the choice they use this; without it they map a one-pixel window to take the focus instead, which a tiling compositor dutifully tiles. Any client may use it. The filter could gate on a client's pid, but that is a thin fence: pids are reused, a script's is its interpreter's, and anything the user can run could be named. Telling a sandboxed application from the user's own clipboard manager properly wants `security-context`, which is not implemented here |
 | `xdg-activation` | A client asks for a window to be brought forward -- a link handed to a browser that is already running, or a second copy of an application pointing at the first. Honoured, including across desktops: the desktop the window is on is shown before it is focused, because focusing a window nobody can see moves the keyboard somewhere invisible |
 | `cursor-shape` | Clients name a cursor and the compositor supplies the image, from an XCursor theme |
-| `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. On a session it carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU |
+| `linux-dmabuf` | Clients hand over GPU buffers instead of rendering into shared memory. Advertised only when there is a renderer, so never headless. It carries feedback naming the render node, without which clients cannot pick a GPU and fall back to the CPU -- on a session that is the card being driven, and nested it is whichever GPU our own EGL display landed on, which is the one a client would have to allocate on either way |
 | `wlr-screencopy` | Copies a display to a client. Screenshots today, screen sharing once a portal sits on top. Any client may ask, so the compositor draws an orange dot in the corner of every display while copies are being served: it cannot stop something that reaches the socket from taking a picture -- anything that can is already running as you -- but it can refuse to let it happen quietly. The mark is drawn above everything, including a fullscreen window and the lock screen, so the client being marked cannot cover it, and it is in the list screencopy renders from, so a recording carries it. It is not themeable: a warning light nobody can turn off is the only kind worth having |
 | `ext-session-lock` | Locks the session: one surface per display, and nothing behind them reachable |
 | `ext-idle-notify` | How long the seat has been idle, which is what an idle daemon waits on to dim, lock or suspend |
