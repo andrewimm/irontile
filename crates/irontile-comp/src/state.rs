@@ -333,6 +333,9 @@ pub struct Irontile {
     /// where Xwayland could not be started, which is a session that runs every
     /// Wayland client and no X11 one.
     pub xwayland: Option<crate::xwayland::Xwayland>,
+    /// Surfaces whose layer surface has been destroyed and which may still
+    /// commit afterwards. See [`Irontile::new_surface`].
+    pub layer_gone: std::collections::HashSet<WlSurface>,
     /// X11 windows the tree does not place: menus, tooltips, drag icons. They
     /// are drawn where they put themselves, above everything the tree placed.
     pub unmanaged: Vec<smithay::xwayland::X11Surface>,
@@ -456,6 +459,7 @@ impl Irontile {
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             cursor_hint: None,
             xwayland: None,
+            layer_gone: std::collections::HashSet::new(),
             unmanaged: Vec::new(),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
                 dh,
@@ -1905,6 +1909,54 @@ impl CompositorHandler for Irontile {
             .get_data::<ClientState>()
             .expect("every client is one of the two kinds")
             .compositor_state
+    }
+
+    /// Every surface gets a hook, before it has any role at all.
+    ///
+    /// It is here for one thing: smithay checks a layer surface's size and
+    /// anchors in a pre-commit hook of its own, and that hook keeps running
+    /// after the layer surface has been destroyed -- by which point smithay has
+    /// reset the state it checks to zeroes, which is exactly what the check
+    /// rejects. A client that destroys its layer surface and then unmaps the
+    /// surface underneath, which is the ordinary way to take a notification off
+    /// the screen, is killed for a protocol error it did not commit. That is
+    /// what has been killing swaync a few times a day.
+    ///
+    /// Hooks run in the order they were added, so this one has to be added
+    /// before smithay's, and the only moment guaranteed to be earlier is when
+    /// the surface itself appears. It repairs the state smithay is about to
+    /// look at, and only for surfaces whose layer surface is known to be gone.
+    ///
+    /// Fixed upstream -- smithay's own hook now returns early when the layer
+    /// surface is no longer alive -- but not in a release. Remove this when
+    /// that lands in one.
+    fn new_surface(&mut self, surface: &WlSurface) {
+        smithay::wayland::compositor::add_pre_commit_hook::<Self, _>(
+            surface,
+            |state: &mut Self, _dh, surface: &WlSurface| {
+                if !state.layer_gone.contains(surface) {
+                    return;
+                }
+                smithay::wayland::compositor::with_states(surface, |states| {
+                    use smithay::wayland::shell::wlr_layer::LayerSurfaceCachedState;
+                    let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
+                    let pending = cached.pending();
+                    // Any size that is not zero passes the check. Nothing will
+                    // be drawn at it: the role is gone and the surface is on
+                    // its way out.
+                    if pending.size.w == 0 {
+                        pending.size.w = 1;
+                    }
+                    if pending.size.h == 0 {
+                        pending.size.h = 1;
+                    }
+                });
+            },
+        );
+    }
+
+    fn destroyed(&mut self, surface: &WlSurface) {
+        self.layer_gone.remove(surface);
     }
 
     fn commit(&mut self, surface: &WlSurface) {

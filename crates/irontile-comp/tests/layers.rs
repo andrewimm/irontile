@@ -371,3 +371,28 @@ fn a_panel_gets_its_frame_callbacks_back() {
     client.request_frame(bar);
     client.wait_for(|client| client.frames(bar) > before);
 }
+
+/// A notification leaving the screen must not take its client with it.
+///
+/// swaync destroys the layer surface and then unmaps the surface underneath,
+/// which is the ordinary way to take a notification down. The size and anchor
+/// check that guards a live layer surface was still running on that last
+/// commit, against state that had been reset to zeroes -- so the client was
+/// killed for a protocol error nobody committed, a few times a day, and the
+/// session lost its notifications until something restarted them.
+#[test]
+fn a_panel_may_unmap_after_its_layer_surface_is_gone() {
+    let mut compositor = Compositor::start("1920x1080");
+    let mut client = compositor.connect_client();
+
+    let notification = client.map_top_bar(BAR, BAR);
+    compositor.wait_for(|c| c.client.layout().unwrap().outputs()[0].work_area.h == 1080 - BAR);
+
+    client.close_layer_then_unmap(notification);
+
+    assert!(
+        client.still_connected(),
+        "the client was dropped for unmapping a surface whose layer surface had gone"
+    );
+    compositor.wait_for(|c| c.client.layout().unwrap().outputs()[0].work_area.h == 1080);
+}

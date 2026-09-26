@@ -55,6 +55,10 @@ impl WlrLayerShellHandler for Irontile {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        // Before anything that might return early: what matters is that the
+        // surface underneath is known to have lost its role, whether or not
+        // this one was ever mapped. See [`Irontile::new_surface`].
+        self.layer_gone.insert(surface.wl_surface().clone());
         let Some((output, layer)) = self.outputs.iter().find_map(|entry| {
             let map = layer_map_for_output(&entry.output);
             let layer = map

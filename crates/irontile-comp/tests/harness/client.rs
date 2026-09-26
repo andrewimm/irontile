@@ -686,6 +686,29 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Destroys the layer surface and then unmaps the surface underneath.
+    ///
+    /// Not the same thing as [`TestClient::close_layer`], which destroys both
+    /// at once. This is the order a notification daemon uses -- the role goes
+    /// away and then the surface it was attached to is emptied -- and it used
+    /// to be answered with a protocol error that killed the client.
+    pub fn close_layer_then_unmap(&mut self, id: LayerId) {
+        let panel = &mut self.state.layers[id.0];
+        panel.layer_surface.destroy();
+        panel.surface.attach(None, 0, 0);
+        panel.surface.commit();
+        panel.mapped = false;
+        self.roundtrip();
+    }
+
+    /// Whether the compositor is still talking to this client.
+    ///
+    /// A client killed for a protocol error cannot round-trip, so this asks
+    /// rather than asserting: a test wants to say what was expected.
+    pub fn still_connected(&mut self) -> bool {
+        self.queue.roundtrip(&mut self.state).is_ok()
+    }
+
     pub fn roundtrip(&mut self) {
         self.queue
             .roundtrip(&mut self.state)
