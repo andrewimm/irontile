@@ -797,7 +797,6 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         session_lock: lock,
         screencopy,
         indicator,
-        start_time,
         ..
     } = state;
     let Backend::Session(session) = backend else {
@@ -892,7 +891,6 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
                 .unwrap_or(smithay::utils::Transform::Normal),
             clear: config.theme.background,
         },
-        start_time.elapsed(),
     );
 
     match surface

@@ -253,9 +253,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameState> for Irontile {
                 {
                     waiting.buffer = Some(buffer);
                     waiting.wants_damage = wants_damage;
+                    tracing::debug!(
+                        output = waiting.output.0,
+                        damage = wants_damage,
+                        "a copy of the screen was asked for"
+                    );
                     // Filled on the next pass over this display.
                     state.dirty = true;
                 } else {
+                    tracing::debug!("a copy was asked for on a frame nobody is holding");
                     frame.failed();
                 }
             }
@@ -300,12 +306,25 @@ pub struct Display {
 ///
 /// Rendered fresh rather than read back from the hardware: the same code on
 /// every backend, and nothing asked of the display controller.
+/// The clock the `ready` timestamp is measured on.
+///
+/// CLOCK_MONOTONIC, not the compositor's own uptime. A client that paces
+/// itself -- a screen recorder deciding when to ask for the next frame --
+/// compares this against the same clock the rest of the system reads, and a
+/// timestamp measured from when the compositor started is days or decades
+/// adrift of it. wlr-screencopy shares its clock with presentation-time, which
+/// says so outright.
+fn presentation_now() -> std::time::Duration {
+    smithay::utils::Clock::<smithay::utils::Monotonic>::new()
+        .now()
+        .into()
+}
+
 pub fn serve<R>(
     screencopy: &mut Screencopy,
     renderer: &mut R,
     elements: &[crate::render::IrontileElement<R>],
     display: Display,
-    now: std::time::Duration,
 ) where
     R: smithay::backend::renderer::Renderer
         + smithay::backend::renderer::ImportAll
@@ -325,6 +344,7 @@ pub fn serve<R>(
         transform,
         clear,
     } = display;
+    let now = presentation_now();
     let waiting = screencopy.take_for(id);
     if waiting.is_empty() {
         return;
@@ -386,6 +406,11 @@ pub fn serve<R>(
                         pending.region.size.h as u32,
                     );
                 }
+                tracing::debug!(
+                    output = id.0,
+                    damage = pending.wants_damage,
+                    "served a copy"
+                );
                 let secs = now.as_secs();
                 pending.frame.ready(
                     (secs >> 32) as u32,
@@ -393,7 +418,10 @@ pub fn serve<R>(
                     now.subsec_nanos(),
                 );
             }
-            None => pending.frame.failed(),
+            None => {
+                tracing::debug!(output = id.0, "a copy could not be filled");
+                pending.frame.failed()
+            }
         }
     }
 }

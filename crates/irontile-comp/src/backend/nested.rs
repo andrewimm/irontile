@@ -163,7 +163,6 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         session_lock: lock,
         screencopy,
         indicator,
-        start_time,
         ..
     } = state;
     let Backend::Nested(graphics) = backend else {
@@ -204,7 +203,6 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
             transform: NESTED_TRANSFORM,
             clear: config.theme.background,
         },
-        start_time.elapsed(),
     );
 
     let mut frame = renderer
