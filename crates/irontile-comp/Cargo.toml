@@ -75,6 +75,11 @@ rather than a plugin on top of a floating one."""
 depends = "$auto, libegl1, libwayland-client0, libwayland-egl1, polkitd, fonts-noto-core"
 # Only the nested backend touches X, and that is for development rather than
 # for running a session, so these are offered rather than pulled in.
+# xwayland is recommended rather than required: without it every Wayland client
+# still runs and X11 programs do not start at all, which is a session that works
+# until the day somebody installs one. apt pulls recommends in by default, so
+# this is "yes unless you said otherwise".
+recommends = "xwayland"
 # adwaita-icon-theme is a suggestion rather than a dependency because the bar
 # draws its text and skips the icons it cannot find, which is a bar with fewer
 # pictures rather than a broken one.
@@ -162,3 +167,7 @@ assets = [
 # bar rather than fixing one.
 [package.metadata.generate-rpm.recommends]
 "adwaita-icon-theme" = "*"
+# Spawned by name, so nothing links it and find-requires cannot see it. A
+# recommend rather than a require for the same reason as on Debian: the session
+# runs without it, and every X11 program fails to start.
+"xorg-x11-server-Xwayland" = "*"

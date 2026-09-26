@@ -31,15 +31,21 @@ pub enum KeyboardFocus {
 }
 
 impl KeyboardFocus {
-    pub fn surface(&self) -> WlSurface {
+    /// The surface events are delivered to.
+    ///
+    /// An option, because an X11 window exists before Xwayland has made it a
+    /// surface: the window manager is told about it the moment the client
+    /// creates it, and the surface follows a beat later. Returning `None`
+    /// there rather than asserting is the difference between a keystroke going
+    /// nowhere for one frame and the session ending in a panic.
+    pub fn surface(&self) -> Option<WlSurface> {
         match self {
-            KeyboardFocus::Window(window) => window
-                .toplevel()
-                .map(|t| t.wl_surface().clone())
-                .expect("a managed window is always a wayland toplevel"),
-            KeyboardFocus::Popup(popup) => popup.wl_surface().clone(),
-            KeyboardFocus::Layer(layer) => layer.wl_surface().clone(),
-            KeyboardFocus::Lock(lock) => lock.wl_surface().clone(),
+            KeyboardFocus::Window(window) => {
+                window.wl_surface().map(|surface| surface.into_owned())
+            }
+            KeyboardFocus::Popup(popup) => Some(popup.wl_surface().clone()),
+            KeyboardFocus::Layer(layer) => Some(layer.wl_surface().clone()),
+            KeyboardFocus::Lock(lock) => Some(lock.wl_surface().clone()),
         }
     }
 }
@@ -67,7 +73,8 @@ impl WaylandFocus for KeyboardFocus {
 
     fn same_client_as(&self, object_id: &ObjectId) -> bool {
         use smithay::reexports::wayland_server::Resource;
-        self.surface().id().same_client_as(object_id)
+        self.surface()
+            .is_some_and(|surface| surface.id().same_client_as(object_id))
     }
 }
 
@@ -79,14 +86,22 @@ impl From<PopupKind> for KeyboardFocus {
 
 /// Pointer focus stays a plain surface: the pointer cares only about which
 /// surface is under it, never about what role that surface plays.
+///
+/// smithay needs this conversion to be infallible for popup grabs, and only
+/// for those. A popup is created by a client that already has a window on
+/// screen, and an X11 popup never comes this way -- it is an
+/// override-redirect window, which takes no grab and holds no focus.
 impl From<KeyboardFocus> for WlSurface {
     fn from(focus: KeyboardFocus) -> Self {
-        focus.surface()
+        focus
+            .surface()
+            .expect("a window taking a popup grab has a surface")
     }
 }
 
 /// Every variant ultimately delivers to a `wl_surface`, so each method hands
-/// off to the surface's own implementation.
+/// off to the surface's own implementation -- and does nothing at all while
+/// there is no surface yet, which is a state only an X11 window is ever in.
 impl KeyboardTarget<Irontile> for KeyboardFocus {
     fn enter(
         &self,
@@ -95,11 +110,17 @@ impl KeyboardTarget<Irontile> for KeyboardFocus {
         keys: Vec<KeysymHandle<'_>>,
         serial: Serial,
     ) {
-        KeyboardTarget::enter(&self.surface(), seat, data, keys, serial);
+        let Some(surface) = self.surface() else {
+            return;
+        };
+        KeyboardTarget::enter(&surface, seat, data, keys, serial);
     }
 
     fn leave(&self, seat: &Seat<Irontile>, data: &mut Irontile, serial: Serial) {
-        KeyboardTarget::leave(&self.surface(), seat, data, serial);
+        let Some(surface) = self.surface() else {
+            return;
+        };
+        KeyboardTarget::leave(&surface, seat, data, serial);
     }
 
     fn key(
@@ -111,7 +132,10 @@ impl KeyboardTarget<Irontile> for KeyboardFocus {
         serial: Serial,
         time: u32,
     ) {
-        KeyboardTarget::key(&self.surface(), seat, data, key, state, serial, time);
+        let Some(surface) = self.surface() else {
+            return;
+        };
+        KeyboardTarget::key(&surface, seat, data, key, state, serial, time);
     }
 
     fn modifiers(
@@ -121,6 +145,9 @@ impl KeyboardTarget<Irontile> for KeyboardFocus {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
-        KeyboardTarget::modifiers(&self.surface(), seat, data, modifiers, serial);
+        let Some(surface) = self.surface() else {
+            return;
+        };
+        KeyboardTarget::modifiers(&surface, seat, data, modifiers, serial);
     }
 }

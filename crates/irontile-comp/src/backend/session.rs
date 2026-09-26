@@ -318,6 +318,10 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     if state.config.session.announce {
         crate::environment::publish(&socket_name, state.config.session.announce_to_systemd);
     }
+    // Before the startup commands, so that anything they start is told where
+    // the X server is. It is not listening yet -- a client that connects waits
+    // a moment -- but the socket it will answer on exists from here.
+    crate::xwayland::start(&mut state);
     state.run_startup_commands();
 
     let signal = event_loop.get_signal();
@@ -786,6 +790,7 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         backend,
         placements,
         windows,
+        unmanaged,
         outputs,
         layout,
         config,
@@ -854,6 +859,7 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         // that screencopy renders from: a recording carries the light that
         // says it is a recording.
         capture: screencopy.capturing().then(|| indicator.buffer(scale)),
+        unmanaged,
     };
     let elements = render::elements(&scene, renderer, id, scale);
 

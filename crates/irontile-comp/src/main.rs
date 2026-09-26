@@ -23,6 +23,7 @@ mod screencopy;
 mod shell;
 mod state;
 mod theme;
+mod xwayland;
 
 use std::process::ExitCode;
 

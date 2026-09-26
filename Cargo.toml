@@ -38,6 +38,7 @@ smithay = { version = "0.7", default-features = false, features = [
     "desktop",
     "renderer_gl",
     "wayland_frontend",
+    "xwayland",
 ] }
 smithay-drm-extras = { version = "0.1", default-features = false }
 anyhow = "1"

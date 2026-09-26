@@ -12,6 +12,7 @@ use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::desktop::Window;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::wayland::compositor::get_parent;
+use smithay::wayland::seat::WaylandFocus;
 
 #[derive(Debug)]
 pub struct Entry {
@@ -118,11 +119,14 @@ impl Registry {
     pub fn find(&self, surface: &WlSurface) -> Option<(WindowId, &Window)> {
         let mut current = surface.clone();
         loop {
-            if let Some((&id, entry)) = self.entries.iter().find(|(_, e)| {
-                e.window
-                    .toplevel()
-                    .is_some_and(|t| t.wl_surface() == &current)
-            }) {
+            // The window's own surface, whichever kind of window it is: an X11
+            // window has a wl_surface too, made for it by Xwayland, and asking
+            // for a toplevel would find nothing for every one of them.
+            if let Some((&id, entry)) = self
+                .entries
+                .iter()
+                .find(|(_, e)| e.window.wl_surface().as_deref() == Some(&current))
+            {
                 return Some((id, &entry.window));
             }
             current = get_parent(&current)?;

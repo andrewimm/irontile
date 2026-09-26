@@ -758,7 +758,38 @@ will. A client that supplies its own cursor surface gets that; one that names a
 shape gets it from an XCursor theme; and a built-in arrow covers the case where
 no theme is installed, which is what a fresh machine looks like.
 
-Not yet implemented: XWayland, `pointer-constraints` and `relative-pointer`.
+Not yet implemented: `pointer-constraints` and `relative-pointer`.
+
+## X11 programs
+
+An X11 program cannot speak Wayland, so something has to be an X server for it
+and a Wayland client on its behalf. That is Xwayland, which irontile starts
+with the session and then acts as the window manager for: X11 expects its
+window manager to be a separate program, and here that program is the
+compositor.
+
+What comes out is a window like any other. The tree places it, the border goes
+round it, `irontilectl windows` lists it with its title and its class as the
+app id, and closing it is the same binding as everything else. The layout
+engine is never told which kind of window it placed, because a tiling
+compositor with two answers to every question would be two compositors.
+
+Xwayland itself is a separate program and a separate package -- `xorg-xwayland`,
+`xwayland`, `xorg-x11-server-Xwayland`, depending on the distribution. The deb
+and the rpm recommend it, which both package managers install by default; on
+Arch it is an optional dependency, because Arch asks rather than assumes.
+
+`DISPLAY` is set for everything the compositor starts, from the first startup
+command onwards. The socket exists before the server is listening, so a program
+started in the same breath as the session connects and waits rather than
+failing to find a server and having to be started again.
+
+Menus, tooltips and drag icons are the exception, and deliberately: X11 calls
+them override-redirect windows and they carry their own position. They are
+drawn where they put themselves, above the tiled windows and below the panels,
+because a menu that appeared behind the window it dropped out of is a menu
+nobody can use.
+
 
 ## Backends
 

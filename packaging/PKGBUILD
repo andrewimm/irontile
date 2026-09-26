@@ -35,7 +35,8 @@ options=(!debug)
 backup=('etc/pam.d/irontile-lock')
 # Only the nested backend reaches for X, and that is for development rather than
 # for running a session.
-optdepends=('adwaita-icon-theme: icons in the bar, which draws its text either way'
+optdepends=('xorg-xwayland: running X11 programs'
+            'adwaita-icon-theme: icons in the bar, which draws its text either way'
             'libxcb: running nested inside another compositor'
             'libx11: running nested inside another compositor'
             'libxcursor: running nested inside another compositor')

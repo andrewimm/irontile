@@ -103,6 +103,10 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     // The first frame has to be asked for; after that each one is requested
     // when something changes.
     state.backend.request_redraw();
+    // Before the startup commands, so that anything they start is told where
+    // the X server is. It is not listening yet -- a client that connects waits
+    // a moment -- but the socket it will answer on exists from here.
+    crate::xwayland::start(&mut state);
     state.run_startup_commands();
 
     let signal = event_loop.get_signal();
@@ -152,6 +156,7 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         backend,
         placements,
         windows,
+        unmanaged,
         outputs,
         layout,
         config,
@@ -183,6 +188,7 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
         // that screencopy renders from: a recording carries the light that
         // says it is a recording.
         capture: screencopy.capturing().then(|| indicator.buffer(scale)),
+        unmanaged,
     };
     let elements = render::elements(&scene, renderer, NESTED_OUTPUT, scale);
 

@@ -34,6 +34,7 @@ use smithay::wayland::fractional_scale::{
     FractionalScaleHandler, FractionalScaleManagerState, with_fractional_scale,
 };
 use smithay::wayland::output::OutputManagerState;
+use smithay::wayland::seat::WaylandFocus as _;
 use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -328,6 +329,17 @@ pub struct Irontile {
     /// gap between two windows there is no client to ask. Set while the pointer
     /// is on an edge it could grab, and for as long as a drag lasts.
     pub cursor_hint: Option<smithay::input::pointer::CursorIcon>,
+    /// The X server and its window manager, once started. `None` on a session
+    /// where Xwayland could not be started, which is a session that runs every
+    /// Wayland client and no X11 one.
+    pub xwayland: Option<crate::xwayland::Xwayland>,
+    /// X11 windows the tree does not place: menus, tooltips, drag icons. They
+    /// are drawn where they put themselves, above everything the tree placed.
+    pub unmanaged: Vec<smithay::xwayland::X11Surface>,
+    /// Held for its global, which is how Xwayland associates an X11 window with
+    /// the wl_surface it made for it.
+    #[allow(dead_code)]
+    pub xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
 }
 
 /// Hand-written because much of the protocol state smithay holds is not
@@ -443,6 +455,11 @@ impl Irontile {
             cursor: crate::cursor::CursorSource::new(&config_cursor.theme, config_cursor.size),
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             cursor_hint: None,
+            xwayland: None,
+            unmanaged: Vec::new(),
+            xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<Self>(
+                dh,
+            ),
         }
     }
 
@@ -891,6 +908,7 @@ impl Irontile {
         self.sync_borders();
         self.sync_surface_outputs();
         self.refresh_keyboard_focus();
+        self.raise_focused_x11();
         // What is on screen decides which inhibitors count, so this belongs
         // wherever that changes rather than only where one is created.
         self.refresh_idle_inhibit();
@@ -898,36 +916,55 @@ impl Irontile {
 
     /// Tells one client the cell it has been given.
     fn configure(&self, placement: &irontile_layout::Placement) {
-        {
-            let Some(window) = self.windows.window(placement.window) else {
-                return;
-            };
-            let Some(toplevel) = window.toplevel() else {
-                return;
-            };
-            let content = self.content_rect(placement.rect, placement.kind);
-            let fullscreen = placement.kind == PlacementKind::Fullscreen;
-            toplevel.with_pending_state(|state| {
-                use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
-                state.size = Some((content.w.max(1), content.h.max(1)).into());
-                // Every edge is tiled: the client is not free to resize itself
-                // and should square off its corners.
-                state.states.set(State::TiledLeft);
-                state.states.set(State::TiledRight);
-                state.states.set(State::TiledTop);
-                state.states.set(State::TiledBottom);
-                if fullscreen {
-                    state.states.set(State::Fullscreen);
-                } else {
-                    state.states.unset(State::Fullscreen);
+        let Some(window) = self.windows.window(placement.window) else {
+            return;
+        };
+        let content = self.content_rect(placement.rect, placement.kind);
+        let fullscreen = placement.kind == PlacementKind::Fullscreen;
+        match window.underlying_surface() {
+            smithay::desktop::WindowSurface::Wayland(toplevel) => {
+                toplevel.with_pending_state(|state| {
+                    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State;
+                    state.size = Some((content.w.max(1), content.h.max(1)).into());
+                    // Every edge is tiled: the client is not free to resize itself
+                    // and should square off its corners.
+                    state.states.set(State::TiledLeft);
+                    state.states.set(State::TiledRight);
+                    state.states.set(State::TiledTop);
+                    state.states.set(State::TiledBottom);
+                    if fullscreen {
+                        state.states.set(State::Fullscreen);
+                    } else {
+                        state.states.unset(State::Fullscreen);
+                    }
+                    if placement.focused {
+                        state.states.set(State::Activated);
+                    } else {
+                        state.states.unset(State::Activated);
+                    }
+                });
+                toplevel.send_pending_configure();
+            }
+            // X11 has no configure to hold pending and no double buffering of
+            // it: each of these is a request on the wire, sent now. The
+            // position goes with the size, because an X11 window is placed in
+            // the one coordinate space every screen shares rather than being
+            // told a size and positioned by the compositor.
+            smithay::desktop::WindowSurface::X11(surface) => {
+                let rect = smithay::utils::Rectangle::new(
+                    (content.x, content.y).into(),
+                    (content.w.max(1), content.h.max(1)).into(),
+                );
+                if surface.is_fullscreen() != fullscreen {
+                    let _ = surface.set_fullscreen(fullscreen);
                 }
-                if placement.focused {
-                    state.states.set(State::Activated);
-                } else {
-                    state.states.unset(State::Activated);
+                if surface.is_activated() != placement.focused {
+                    let _ = surface.set_activated(placement.focused);
                 }
-            });
-            toplevel.send_pending_configure();
+                if surface.geometry() != rect {
+                    let _ = surface.configure(Some(rect));
+                }
+            }
         }
     }
 
@@ -1192,6 +1229,12 @@ impl Irontile {
                 self.placements
                     .focused
                     .and_then(|id| self.windows.window(id))
+                    // A window with no surface yet cannot be sent a
+                    // keystroke. Only an X11 window is ever in that state:
+                    // the window manager hears about it when the client
+                    // creates it, and Xwayland gives it a surface a beat
+                    // later. It takes focus on the reflow after that.
+                    .filter(|window| window.wl_surface().is_some())
                     .cloned()
                     .map(crate::focus::KeyboardFocus::Window)
             });
@@ -1619,10 +1662,21 @@ impl Irontile {
         let Some(id) = self.layout.focused_window() else {
             return;
         };
-        if let Some(window) = self.windows.window(id)
-            && let Some(toplevel) = window.toplevel()
-        {
-            toplevel.send_close();
+        let Some(window) = self.windows.window(id) else {
+            return;
+        };
+        match window.underlying_surface() {
+            smithay::desktop::WindowSurface::Wayland(toplevel) => toplevel.send_close(),
+            // The same request under an older name: X11 calls it
+            // WM_DELETE_WINDOW, and a client that does not answer it is killed
+            // by smithay rather than left on screen. Without this branch the
+            // binding that closes a window silently does nothing for every X11
+            // program, which reads as the key not working.
+            smithay::desktop::WindowSurface::X11(surface) => {
+                if let Err(err) = surface.close() {
+                    tracing::warn!(%err, "could not ask an X11 window to close");
+                }
+            }
         }
     }
 
@@ -1673,9 +1727,17 @@ impl Irontile {
             command.env("XCURSOR_THEME", self.cursor.theme_name());
         }
         command.env("XCURSOR_SIZE", self.cursor.base_size().to_string());
-        // Children must not inherit the parent session's display, or they would
-        // connect to the compositor irontile is nested inside instead.
-        command.env_remove("DISPLAY");
+        // Our own X server if there is one, and otherwise nothing: a child must
+        // not inherit the display of the compositor irontile is nested inside,
+        // or an X11 client would open its window over there.
+        match self.xwayland.as_ref().and_then(|x| x.display_name()) {
+            Some(display) => {
+                command.env("DISPLAY", display);
+            }
+            None => {
+                command.env_remove("DISPLAY");
+            }
+        }
         // Anything already finished is cleared out first. A process nobody
         // waits on stays in the table as a zombie, and a binding that repeats
         // -- a volume key held down -- starts one every forty milliseconds.
@@ -1720,19 +1782,34 @@ impl Irontile {
 
     /// What a window calls itself, if it has said.
     pub fn window_names(&self, window: WindowId) -> (Option<String>, Option<String>) {
-        let Some(toplevel) = self.windows.window(window).and_then(|w| w.toplevel()) else {
+        let Some(window) = self.windows.window(window) else {
             return (None, None);
         };
-        smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
-            states
-                .data_map
-                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                .map(|data| {
-                    let attrs = data.lock().unwrap();
-                    (attrs.title.clone(), attrs.app_id.clone())
+        match window.underlying_surface() {
+            smithay::desktop::WindowSurface::Wayland(toplevel) => {
+                smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+                    states
+                        .data_map
+                        .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                        .map(|data| {
+                            let attrs = data.lock().unwrap();
+                            (attrs.title.clone(), attrs.app_id.clone())
+                        })
+                        .unwrap_or((None, None))
                 })
-                .unwrap_or((None, None))
-        })
+            }
+            // X11 calls these WM_NAME and the class half of WM_CLASS. They are
+            // the same two facts under older names, and reporting them as
+            // title and app id is what lets a script treat an X11 window like
+            // any other rather than having to know which it is.
+            smithay::desktop::WindowSurface::X11(surface) => {
+                let empty_is_nothing = |text: String| (!text.is_empty()).then_some(text);
+                (
+                    empty_is_nothing(surface.title()),
+                    empty_is_nothing(surface.class()),
+                )
+            }
+        }
     }
 
     /// What the control socket reports for `workspaces`.
@@ -1814,8 +1891,20 @@ impl CompositorHandler for Irontile {
         &mut self.compositor_state
     }
 
+    /// Where a client's surface bookkeeping lives.
+    ///
+    /// Two kinds of client reach here. Ours carry [`ClientState`], made when
+    /// the connection was accepted; Xwayland carries smithay's own, because
+    /// smithay makes that connection itself when it starts the server. Asking
+    /// only for ours is a panic the first time an X11 program draws anything.
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        if let Some(state) = client.get_data::<smithay::xwayland::XWaylandClientData>() {
+            return &state.compositor_state;
+        }
+        &client
+            .get_data::<ClientState>()
+            .expect("every client is one of the two kinds")
+            .compositor_state
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -1883,8 +1972,12 @@ impl CompositorHandler for Irontile {
         // about the window it belongs to. Asking the child was enough to make a
         // browser's window vanish on a click, because that is when it commits
         // one.
-        let toplevel = window.toplevel().map(|t| t.wl_surface().clone());
-        let shown = toplevel.as_ref().is_some_and(has_buffer);
+        // The window's own surface, not its toplevel: an X11 window has no
+        // toplevel, and asking for one would say every one of them has
+        // nothing to show -- which is a window that is placed, focused and
+        // never drawn.
+        let own = window.wl_surface().map(|surface| surface.into_owned());
+        let shown = own.as_ref().is_some_and(has_buffer);
 
         if self.windows.is_unmapped(id) {
             if shown && self.windows.mark_mapped(id) {
@@ -1985,7 +2078,7 @@ impl SeatHandler for Irontile {
         use smithay::reexports::wayland_server::Resource as _;
 
         let client = focused
-            .map(|focus| focus.surface())
+            .and_then(|focus| focus.surface())
             .and_then(|surface| self.display_handle.get_client(surface.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client.clone());
         // The middle-click selection travels the same way and is just as

@@ -57,6 +57,10 @@ pub struct Scene<'a> {
     /// The capture indicator, when something is copying the screen. Drawn over
     /// everything including the lock screen, and included in the copy itself.
     pub capture: Option<&'a MemoryRenderBuffer>,
+    /// X11 windows the tree does not place: menus, tooltips, drag icons. They
+    /// carry their own position, and go above the windows rather than in the
+    /// order the tree gave.
+    pub unmanaged: &'a [smithay::xwayland::X11Surface],
 }
 
 /// The pointer, ready to draw.
@@ -226,6 +230,31 @@ where
         scale,
         &[Layer::Overlay, Layer::Top],
     ));
+
+    // X11 windows nobody placed: the menus and tooltips a client puts where it
+    // wants them. Above the tiled windows, because a menu that appeared behind
+    // the window it dropped out of would be a menu nobody can use, and below
+    // the panels, because a bar is not something a menu should cover.
+    for surface in scene.unmanaged {
+        let Some(wl_surface) = surface.wl_surface() else {
+            continue;
+        };
+        let geometry = surface.geometry();
+        let at = Rect::new(geometry.loc.x - origin.x, geometry.loc.y - origin.y, 0, 0);
+        out.extend(
+            smithay::backend::renderer::element::surface::render_elements_from_surface_tree::<
+                R,
+                IrontileElement<R>,
+            >(
+                renderer,
+                &wl_surface,
+                to_physical(at, scale),
+                scale,
+                1.0,
+                Kind::Unspecified,
+            ),
+        );
+    }
 
     let mut ordered: Vec<_> = scene
         .frame
