@@ -68,3 +68,9 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+[profile.release]
+# Whole-program optimisation across crates, and one codegen unit so it has the
+# whole picture. Slower to build; smaller and faster to run.
+lto = true
+codegen-units = 1
