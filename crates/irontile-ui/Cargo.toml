@@ -11,6 +11,10 @@ description = "Bar and launcher surfaces for irontile"
 name = "irontile-bar"
 path = "src/bin/irontile-bar.rs"
 
+[[bin]]
+name = "irontile-notify"
+path = "src/bin/irontile-notify.rs"
+
 [dependencies]
 irontile-version.workspace = true
 irontile-power.workspace = true

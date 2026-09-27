@@ -14,6 +14,7 @@ pub mod config;
 pub mod draw;
 pub mod icon;
 pub mod module;
+pub mod notify;
 pub mod theme;
 pub mod tray;
 pub mod wayland;

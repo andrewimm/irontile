@@ -177,3 +177,59 @@ pub fn fill(pixmap: &mut PixmapMut<'_>, x: f32, y: f32, w: f32, h: f32, color: C
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
 }
+
+impl TextRenderer {
+    /// Lays text out to a width and draws it, returning how tall it came out.
+    ///
+    /// The bar never needs this -- a status line that wrapped would be a bar
+    /// that changed height -- but a notification body is somebody else's prose
+    /// and arrives at whatever length it likes.
+    pub fn draw_wrapped(
+        &mut self,
+        pixmap: &mut PixmapMut<'_>,
+        text: &str,
+        at: (f32, f32),
+        within: (f32, usize),
+        color: Color,
+    ) -> f32 {
+        let (x, top) = at;
+        let (width, lines) = within;
+        let mut buffer = self.shape_wrapped(text, width);
+        // Anything past the line budget is dropped rather than shrunk: a
+        // notification is a summary, and one that grows to fit an essay pushes
+        // every other notification off the screen.
+        let kept: Vec<_> = buffer.layout_runs().take(lines).collect();
+        let height: f32 = kept.iter().map(|run| run.line_height).sum();
+        drop(kept);
+        buffer.set_size(Some(width), Some(height.max(1.0)));
+        buffer.shape_until_scroll(&mut self.fonts, false);
+        self.paint(pixmap, buffer, x, top, color);
+        height
+    }
+
+    /// How tall wrapped text will be, without drawing it.
+    pub fn wrapped_height(&mut self, text: &str, width: f32, lines: usize) -> f32 {
+        let buffer = self.shape_wrapped(text, width);
+        buffer
+            .layout_runs()
+            .take(lines)
+            .map(|run| run.line_height)
+            .sum()
+    }
+
+    fn shape_wrapped(&mut self, text: &str, width: f32) -> Buffer {
+        let metrics = Metrics::new(self.size, self.size * 1.4);
+        let mut buffer = Buffer::new(&mut self.fonts, metrics);
+        let attrs = {
+            let mut attrs = Attrs::new();
+            if let Some(first) = self.families.first() {
+                attrs = attrs.family(Family::Name(first));
+            }
+            attrs
+        };
+        buffer.set_size(Some(width), None);
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+        buffer
+    }
+}
