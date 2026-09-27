@@ -11,3 +11,5 @@
 
 pub mod model;
 pub mod paint;
+pub mod service;
+pub mod ui;

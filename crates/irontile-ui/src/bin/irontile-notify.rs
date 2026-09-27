@@ -6,6 +6,15 @@ use irontile_ui::draw::TextRenderer;
 use irontile_ui::icon::IconSet;
 use irontile_ui::notify::model::{Action, Centre, Hit, Notification, Urgency, power_buttons};
 use irontile_ui::notify::paint::{self, Palette, size};
+use irontile_ui::notify::{service, ui};
+
+/// What a second invocation is asking the first one to do.
+#[derive(Clone, Copy)]
+enum Ask {
+    Toggle,
+    Open,
+    Close,
+}
 
 const HELP: &str = "\
 irontile-notify - notifications for irontile, and the panel they collect in
@@ -14,6 +23,11 @@ USAGE:
     irontile-notify [OPTIONS]
 
 OPTIONS:
+    --toggle        Show the panel if it is hidden, hide it if it is shown.
+                    Asks the running daemon over the bus, which is how a key
+                    binding reaches it: the key arrives at the compositor.
+    --open          Show the panel.
+    --close         Hide it.
     --dump PATH     Render the popups and the panel to a PNG and exit, without
                     a compositor and without anything having sent a
                     notification. The only way to work on how these look
@@ -38,6 +52,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let mut dump: Option<String> = None;
+    let mut toggle: Option<Ask> = None;
     let mut scale = 1.0_f32;
     let mut theme = "Adwaita".to_string();
 
@@ -53,6 +68,9 @@ fn run() -> Result<(), String> {
                     .map_err(|_| "--scale needs a number")?;
             }
             "--icon-theme" => theme = args.next().ok_or("--icon-theme needs a name")?,
+            "--toggle" => toggle = Some(Ask::Toggle),
+            "--open" => toggle = Some(Ask::Open),
+            "--close" => toggle = Some(Ask::Close),
             "--version" | "-V" => {
                 println!(
                     "{}",
@@ -68,12 +86,45 @@ fn run() -> Result<(), String> {
         }
     }
 
-    match dump {
-        Some(path) => sheet(&path, scale, &theme),
-        // The daemon itself is the next thing to be written; until it exists,
-        // say so rather than sitting there doing nothing.
-        None => Err("only --dump so far; the daemon is not wired up yet".into()),
+    match (dump, toggle) {
+        (Some(path), _) => sheet(&path, scale, &theme),
+        (None, Some(what)) => ask(what),
+        (None, None) => daemon(&theme),
     }
+}
+
+/// Tells the running daemon to show or hide the panel.
+///
+/// A key binding arrives at the compositor rather than here, so the binding
+/// runs this and this asks the daemon over the bus -- which is also why it is
+/// an error rather than a no-op when nothing answers: a key that silently does
+/// nothing is worse than one that says why.
+fn ask(what: Ask) -> Result<(), String> {
+    let connection = zbus::blocking::Connection::session()
+        .map_err(|err| format!("could not reach the session bus: {err}"))?;
+    let method = match what {
+        Ask::Toggle => "Toggle",
+        Ask::Open => "Open",
+        Ask::Close => "Close",
+    };
+    connection
+        .call_method(
+            Some("org.irontile.Notify"),
+            "/org/irontile/Notify",
+            Some("org.irontile.Notify1"),
+            method,
+            &(),
+        )
+        .map_err(|err| format!("no notification daemon answered: {err}"))?;
+    Ok(())
+}
+
+/// Runs the daemon: the bus on one thread, the surfaces on this one.
+fn daemon(theme: &str) -> Result<(), String> {
+    let service = service::start()?;
+    let families = vec!["Noto Sans".to_string()];
+    eprintln!("irontile-notify: answering org.freedesktop.Notifications");
+    ui::run(&service, theme, &families)
 }
 
 /// Renders the popups and the panel side by side.
