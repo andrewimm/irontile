@@ -161,16 +161,25 @@ pub fn card(
         Urgency::Critical => palette.bad,
         _ => palette.dim,
     };
-    let drawn = card.icon.as_deref().is_some_and(|name| {
-        icons.draw(
-            pixmap,
-            name,
-            left,
-            cursor,
-            px(size::ICON).round() as u32,
-            crate::theme::Color(icon_colour),
-        )
-    });
+    // The sender's own pixels first, when it sent any: a chat application
+    // sends the face of whoever wrote to you, and no icon name can say that.
+    // Drawn as they arrived rather than tinted, the way the tray draws an
+    // application's artwork.
+    let drawn = match &card.image {
+        Some(pixels) => {
+            icons.draw_pixels(pixmap, pixels, left, cursor, px(size::ICON).round() as u32)
+        }
+        None => card.icon.as_deref().is_some_and(|name| {
+            icons.draw(
+                pixmap,
+                name,
+                left,
+                cursor,
+                px(size::ICON).round() as u32,
+                crate::theme::Color(icon_colour),
+            )
+        }),
+    };
     if !drawn {
         let r = px(size::ICON) / 2.0;
         circle(
@@ -240,36 +249,80 @@ pub fn card(
         cursor += height + px(4.0);
     }
 
-    if !card.actions.is_empty() {
+    for (index, rect) in action_rects(text, card, (x, cursor), scale) {
+        let Some(action) = card.actions.get(index) else {
+            continue;
+        };
+        let (bx, by, bw, bh) = rect;
+        rounded(pixmap, bx, by, bw, bh, px(4.0), &solid(palette.hairline));
         text.set_size(px(size::SMALL));
-        let mut button_x = body_x;
-        for action in &card.actions {
-            let label_w = text.width(&action.label);
-            let button_w = label_w + px(16.0);
-            if button_x + button_w > x + w - px(size::PAD) {
-                break;
-            }
-            rounded(
-                pixmap,
-                button_x,
-                cursor,
-                button_w,
-                px(20.0),
-                px(4.0),
-                &solid(palette.hairline),
-            );
-            text.draw_at(
-                pixmap,
-                &action.label,
-                button_x + px(8.0),
-                cursor + px(4.0),
-                crate::theme::Color(palette.warm_near),
-            );
-            button_x += button_w + px(6.0);
-        }
+        text.draw_at(
+            pixmap,
+            &action.label,
+            bx + px(8.0),
+            by + px(4.0),
+            crate::theme::Color(palette.warm_near),
+        );
     }
 
     h
+}
+
+/// Where a notification's buttons sit, given where its text ran out.
+///
+/// The drawing and the pointer both read this, so a button cannot be a few
+/// pixels from where it looks. Anything that would run past the card's edge is
+/// left out rather than clipped: half a button is a button that lies about
+/// what pressing it does.
+pub fn action_rects(
+    text: &mut TextRenderer,
+    card: &Notification,
+    at: (f32, f32),
+    scale: f32,
+) -> Vec<(usize, (f32, f32, f32, f32))> {
+    if card.actions.is_empty() {
+        return Vec::new();
+    }
+    let px = |v: f32| v * scale;
+    let (x, top) = at;
+    let left = x + px(size::PAD) + px(size::STRIPE) + px(size::ICON) + px(size::GAP);
+    let limit = x + px(size::CARD_W) - px(size::PAD);
+
+    text.set_size(px(size::SMALL));
+    let mut out = Vec::new();
+    let mut cursor = left;
+    for (index, action) in card.actions.iter().enumerate() {
+        let width = text.width(&action.label) + px(16.0);
+        if cursor + width > limit {
+            break;
+        }
+        out.push((index, (cursor, top, width, px(20.0))));
+        cursor += width + px(6.0);
+    }
+    out
+}
+
+/// Everything in one notification a pointer can land on.
+///
+/// The buttons first, then the card itself: a press finds the first rectangle
+/// it is inside, and a button sits on top of the card that carries it.
+pub fn card_spots(
+    text: &mut TextRenderer,
+    card: &Notification,
+    at: (f32, f32),
+    scale: f32,
+) -> Vec<Spot> {
+    let px = |v: f32| v * scale;
+    let height = card_height(text, card, scale);
+    // Where the buttons are drawn from, which is what the drawing works out as
+    // it goes: everything above them, less the padding below.
+    let top = at.1 + height - px(size::PAD) - px(20.0);
+    let mut spots: Vec<Spot> = action_rects(text, card, (at.0, top), scale)
+        .into_iter()
+        .map(|(index, rect)| (Hit::Action(card.id, index), rect))
+        .collect();
+    spots.push((Hit::Card(card.id), (at.0, at.1, px(size::CARD_W), height)));
+    spots
 }
 
 /// Where each session button sits, in the panel's own pixels.
@@ -457,6 +510,8 @@ pub fn centre(
                 palette,
                 scale,
             ),
+            // Drawn with its card, from the same table the pointer reads.
+            Hit::Action(_, _) => {}
             Hit::Card(id) => {
                 if let Some(note) = state.notifications.iter().find(|n| n.id == *id) {
                     card(pixmap, icons, text, note, palette, (rect.0, rect.1), scale);
@@ -669,5 +724,53 @@ mod tests {
     fn a_row_of_no_buttons_has_no_rectangles() {
         assert!(button_rects(0, 420.0, 900.0, 1.0).is_empty());
         assert_eq!(button_at(&[], (10.0, 10.0)), None);
+    }
+}
+
+#[cfg(test)]
+mod buttons {
+    use super::*;
+    use crate::notify::model::Action;
+
+    fn with_actions(count: usize) -> Notification {
+        Notification {
+            id: 7,
+            summary: "Download finished".to_string(),
+            actions: (0..count)
+                .map(|i| Action {
+                    key: format!("key{i}"),
+                    label: format!("Button {i}"),
+                })
+                .collect(),
+            ..Notification::default()
+        }
+    }
+
+    #[test]
+    fn a_press_on_a_button_finds_the_button_and_not_the_card() {
+        let mut text = TextRenderer::new(&["Noto Sans".to_string()], size::SMALL);
+        let note = with_actions(2);
+        let spots = card_spots(&mut text, &note, (0.0, 0.0), 1.0);
+        // The buttons come before the card, so the first rectangle a point is
+        // inside is the button rather than what it sits on.
+        let Some((Hit::Action(id, index), (x, y, w, h))) = spots.first().copied() else {
+            panic!("the first spot should be a button, got {:?}", spots.first());
+        };
+        assert_eq!((id, index), (7, 0));
+        assert_eq!(
+            spot_at(&spots, (x + w / 2.0, y + h / 2.0)),
+            Some(Hit::Action(7, 0))
+        );
+        // Above the buttons is the card's own text, which dismisses it.
+        assert_eq!(spot_at(&spots, (x + w / 2.0, 4.0)), Some(Hit::Card(7)));
+    }
+
+    #[test]
+    fn a_notification_with_no_buttons_is_all_card() {
+        let mut text = TextRenderer::new(&["Noto Sans".to_string()], size::SMALL);
+        let note = with_actions(0);
+        let spots = card_spots(&mut text, &note, (0.0, 0.0), 1.0);
+        assert_eq!(spots.len(), 1);
+        assert!(matches!(spots[0].0, Hit::Card(7)));
     }
 }

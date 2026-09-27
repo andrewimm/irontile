@@ -307,8 +307,21 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
         for (key, at) in presses {
             match key {
                 Key::Popup(id) => {
+                    let note = state
+                        .popups
+                        .iter()
+                        .find(|popup| popup.note.id == id)
+                        .map(|popup| popup.note.clone());
+                    let Some(note) = note else { continue };
+                    let scale = state
+                        .panel_mut(key)
+                        .map(|panel| panel.scale())
+                        .unwrap_or(1.0);
+                    let spots = paint::card_spots(&mut text, &note, (0.0, 0.0), scale);
+                    let point = (at.0 * scale, at.1 * scale);
+                    press(service, &note, paint::spot_at(&spots, point));
                     close_popup(&mut state, id);
-                    service.reply(Reply::Closed(id, Closed::Dismissed));
+                    close_notification(service, id);
                 }
                 Key::Panel => {
                     let centre = centre_state(&shared, &buttons, &arrived, state.hovered);
@@ -324,8 +337,11 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
                     match paint::spot_at(&spots, point) {
                         Some(Hit::Quiet) => toggle_quiet(service),
                         Some(Hit::Clear) => clear_all(service, &shared.live),
-                        Some(Hit::Card(id)) => {
-                            service.reply(Reply::Closed(id, Closed::Dismissed));
+                        Some(hit @ (Hit::Card(id) | Hit::Action(id, _))) => {
+                            if let Some(note) = shared.live.iter().find(|note| note.id == id) {
+                                press(service, note, Some(hit));
+                            }
+                            close_popup(&mut state, id);
                             close_notification(service, id);
                         }
                         Some(Hit::Power(index)) => {
@@ -983,5 +999,109 @@ impl Dispatch<WlSurface, Key> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+/// Tells the sender what was pressed, and why the notification is going away.
+fn press(service: &Service, note: &Notification, hit: Option<Hit>) {
+    for reply in replies_for(note, hit) {
+        service.reply(reply);
+    }
+}
+
+/// What a press means, as messages back to the sender.
+///
+/// A button press names the action it carried. A press anywhere else invokes
+/// `default` if the sender offered one -- which is how "click the notification
+/// to open the thing" has always worked -- and is otherwise just a dismissal.
+/// Either way the notification goes: a card that stayed after being pressed
+/// would be a card that looks like nothing happened.
+///
+/// Separated from the sending so it can be checked without a bus: what a press
+/// means is a decision, and the sending is plumbing.
+fn replies_for(note: &Notification, hit: Option<Hit>) -> Vec<Reply> {
+    let mut out = Vec::new();
+    match hit {
+        Some(Hit::Action(_, index)) => {
+            if let Some(action) = note.actions.get(index) {
+                out.push(Reply::Invoked(note.id, action.key.clone()));
+            }
+        }
+        _ => {
+            if note.has_default {
+                out.push(Reply::Invoked(note.id, "default".to_string()));
+            }
+        }
+    }
+    out.push(Reply::Closed(note.id, Closed::Dismissed));
+    out
+}
+
+#[cfg(test)]
+mod presses {
+    use super::*;
+    use crate::notify::model::Action;
+
+    fn note(has_default: bool) -> Notification {
+        Notification {
+            id: 3,
+            has_default,
+            actions: vec![
+                Action {
+                    key: "open".to_string(),
+                    label: "Open folder".to_string(),
+                },
+                Action {
+                    key: "later".to_string(),
+                    label: "Later".to_string(),
+                },
+            ],
+            ..Notification::default()
+        }
+    }
+
+    #[test]
+    fn a_button_names_the_action_it_carried() {
+        assert_eq!(
+            replies_for(&note(false), Some(Hit::Action(3, 1))),
+            vec![
+                Reply::Invoked(3, "later".to_string()),
+                Reply::Closed(3, Closed::Dismissed),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_press_on_the_card_takes_the_default_action_when_there_is_one() {
+        assert_eq!(
+            replies_for(&note(true), Some(Hit::Card(3))),
+            vec![
+                Reply::Invoked(3, "default".to_string()),
+                Reply::Closed(3, Closed::Dismissed),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_press_on_a_card_with_no_default_is_only_a_dismissal() {
+        assert_eq!(
+            replies_for(&note(false), Some(Hit::Card(3))),
+            vec![Reply::Closed(3, Closed::Dismissed)]
+        );
+        assert_eq!(
+            replies_for(&note(false), None),
+            vec![Reply::Closed(3, Closed::Dismissed)]
+        );
+    }
+
+    #[test]
+    fn a_button_that_is_not_there_dismisses_rather_than_inventing_a_key() {
+        // The pointer and the drawing read one table, so this should not
+        // happen -- and if it ever does, sending a made-up action to somebody
+        // else's program is the wrong way to be wrong.
+        assert_eq!(
+            replies_for(&note(true), Some(Hit::Action(3, 9))),
+            vec![Reply::Closed(3, Closed::Dismissed)]
+        );
     }
 }

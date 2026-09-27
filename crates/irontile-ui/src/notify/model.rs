@@ -50,6 +50,14 @@ pub struct Notification {
     pub body: String,
     pub urgency: Urgency,
     pub actions: Vec<Action>,
+    /// Whether the sender offered a `default` action, which is what a click
+    /// on the notification itself invokes. Never drawn as a button: it is
+    /// already the whole card.
+    pub has_default: bool,
+    /// Pixels the sender sent instead of naming an icon. Chrome and the chat
+    /// applications all do this, and without it their notifications show a
+    /// letter in a disc where the picture should be.
+    pub image: Option<crate::module::Pixels>,
     /// When it arrived, for the "4m ago" a panel shows. Held as a duration
     /// rather than an instant so that a test can say what it wants to see.
     pub age: std::time::Duration,
@@ -65,6 +73,8 @@ impl Default for Notification {
             body: String::new(),
             urgency: Urgency::Normal,
             actions: Vec::new(),
+            has_default: false,
+            image: None,
             age: std::time::Duration::ZERO,
         }
     }
@@ -163,6 +173,9 @@ pub enum Hit {
     Clear,
     /// One of the session buttons, by its place in the row.
     Power(usize),
+    /// A button a notification offered, by the notification and its place in
+    /// that notification's list.
+    Action(u32, usize),
     /// A notification, which dismisses it.
     Card(u32),
 }

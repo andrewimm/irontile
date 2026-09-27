@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use zbus::zvariant::Value;
 
+use crate::module::Pixels;
 use crate::notify::model::{Action, Notification, Urgency};
 
 /// Why a notification stopped being shown. The numbers are the
@@ -31,7 +32,7 @@ pub enum Closed {
 }
 
 /// Something the surface decided, on its way back to the sender.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
     Closed(u32, Closed),
     Invoked(u32, String),
@@ -145,14 +146,22 @@ impl Notifications {
             .map(Urgency::from_hint)
             .unwrap_or_default();
 
+        // A picture beats a name, and a name in `image-path` beats the icon the
+        // sender gave as an argument: the hint is the more specific of the two
+        // and is what a sender uses when it has something particular to show.
+        let (drawn, named) = image_by_path(&hints);
+        let image = image_from_hints(&hints).or(drawn);
+
         let note = Notification {
             id,
             app: app_name,
-            icon: (!app_icon.is_empty()).then_some(app_icon),
+            icon: named.or((!app_icon.is_empty()).then_some(app_icon)),
             summary,
             body,
             urgency,
             actions: pairs(&actions),
+            has_default: has_default(&actions),
+            image,
             age: std::time::Duration::ZERO,
         };
 
@@ -250,6 +259,109 @@ impl Panel {
             .map(|shared| shared.quiet)
             .unwrap_or(false)
     }
+}
+
+/// The pixels a sender sent instead of naming an icon.
+///
+/// `image-data` is a struct of width, height, row stride, whether there is an
+/// alpha channel, bits per sample, channels, and the bytes. Only eight bits a
+/// sample is worth handling: nothing has sent anything else this century, and
+/// guessing at a format nobody uses would be code nobody could test.
+///
+/// The rows are strided and the channels are RGB or RGBA, where what draws
+/// them wants tightly packed ARGB, so this is the conversion as well as the
+/// parsing. `image_data` and `icon_data` are the same thing under the names
+/// older versions of the specification used.
+pub fn image_from_hints(hints: &HashMap<String, Value<'_>>) -> Option<Pixels> {
+    let value = ["image-data", "image_data", "icon_data"]
+        .into_iter()
+        .find_map(|name| hints.get(name))?;
+    let (width, height, stride, has_alpha, bits, channels, data): (
+        i32,
+        i32,
+        i32,
+        bool,
+        i32,
+        i32,
+        Vec<u8>,
+    ) = value.try_clone().ok()?.try_into().ok()?;
+
+    if bits != 8 || !(3..=4).contains(&channels) {
+        return None;
+    }
+    let (w, h, stride) = (
+        usize::try_from(width).ok()?,
+        usize::try_from(height).ok()?,
+        usize::try_from(stride).ok()?,
+    );
+    let channels = channels as usize;
+    if w == 0 || h == 0 || stride < w * channels || data.len() < stride * (h - 1) + w * channels {
+        return None;
+    }
+
+    let mut argb = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        let row = &data[y * stride..];
+        for x in 0..w {
+            let pixel = &row[x * channels..];
+            let alpha = if has_alpha && channels == 4 {
+                pixel[3]
+            } else {
+                255
+            };
+            argb.extend_from_slice(&[alpha, pixel[0], pixel[1], pixel[2]]);
+        }
+    }
+    Some(Pixels {
+        width: w as u32,
+        height: h as u32,
+        argb: argb.into(),
+    })
+}
+
+/// The picture a sender named by path, rather than sending its pixels.
+///
+/// `image-path` holds either a file to load or an icon name to look up, and
+/// the specification lets a sender use it for both. A leading slash or a
+/// `file://` is the difference; anything else goes back to the caller to be
+/// resolved against the icon theme like any other name.
+///
+/// Only PNG is loaded. It is what senders use, and reaching for a general
+/// image library to cover the ones that do not would be a great deal of
+/// machinery for a case nobody has.
+pub fn image_by_path(hints: &HashMap<String, Value<'_>>) -> (Option<Pixels>, Option<String>) {
+    let Some(text) = ["image-path", "image_path"]
+        .into_iter()
+        .find_map(|name| hints.get(name))
+        .and_then(|value| String::try_from(value.try_clone().ok()?).ok())
+    else {
+        return (None, None);
+    };
+    let path = match text.strip_prefix("file://") {
+        Some(rest) => rest.to_string(),
+        None if text.starts_with('/') => text.clone(),
+        // Not a path at all: a name for the theme.
+        None => return (None, Some(text)),
+    };
+    let Ok(pixmap) = tiny_skia::Pixmap::load_png(&path) else {
+        return (None, None);
+    };
+    let mut argb = Vec::with_capacity(pixmap.data().len());
+    for pixel in pixmap.pixels() {
+        // tiny-skia holds premultiplied colour; the tray's format is straight
+        // ARGB, so this undoes the multiplication rather than showing a dark
+        // halo wherever an icon is translucent.
+        let colour = pixel.demultiply();
+        argb.extend_from_slice(&[colour.alpha(), colour.red(), colour.green(), colour.blue()]);
+    }
+    (
+        Some(Pixels {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            argb: argb.into(),
+        }),
+        None,
+    )
 }
 
 /// Splits the flat list the specification uses into pairs.
@@ -429,5 +541,80 @@ mod tests {
         let flat = ["open".to_string(), "Open".to_string(), "orphan".to_string()];
         assert_eq!(pairs(&flat).len(), 1);
         assert!(!has_default(&flat));
+    }
+}
+
+#[cfg(test)]
+mod images {
+    use super::*;
+
+    fn hint(
+        width: i32,
+        height: i32,
+        stride: i32,
+        alpha: bool,
+        channels: i32,
+        data: Vec<u8>,
+    ) -> HashMap<String, Value<'static>> {
+        let mut hints = HashMap::new();
+        hints.insert(
+            "image-data".to_string(),
+            Value::from((width, height, stride, alpha, 8_i32, channels, data)),
+        );
+        hints
+    }
+
+    #[test]
+    fn rgb_pixels_become_opaque_argb_ones() {
+        // Two pixels: red, then green.
+        let pixels = image_from_hints(&hint(2, 1, 6, false, 3, vec![255, 0, 0, 0, 255, 0]))
+            .expect("two pixels of red and green");
+        assert_eq!((pixels.width, pixels.height), (2, 1));
+        assert_eq!(&pixels.argb[..], &[255, 255, 0, 0, 255, 0, 255, 0]);
+    }
+
+    #[test]
+    fn the_padding_at_the_end_of_a_row_is_not_part_of_the_picture() {
+        // Two rows of one pixel each, in a buffer whose rows are four bytes
+        // apart. Reading straight through would take the padding as pixels.
+        let data = vec![1, 2, 3, 99, 4, 5, 6, 99];
+        let pixels = image_from_hints(&hint(1, 2, 4, false, 3, data))
+            .expect("one pixel on each of two rows");
+        assert_eq!(&pixels.argb[..], &[255, 1, 2, 3, 255, 4, 5, 6]);
+    }
+
+    #[test]
+    fn an_alpha_channel_is_kept() {
+        let pixels = image_from_hints(&hint(1, 1, 4, true, 4, vec![10, 20, 30, 40]))
+            .expect("one translucent pixel");
+        assert_eq!(&pixels.argb[..], &[40, 10, 20, 30]);
+    }
+
+    #[test]
+    fn nonsense_is_refused_rather_than_drawn() {
+        // A sample size nothing uses, a channel count that means nothing, and
+        // a buffer too short for what it claims: each would be a panic or a
+        // smear if believed.
+        let mut odd = hint(1, 1, 4, true, 4, vec![1, 2, 3, 4]);
+        odd.insert(
+            "image-data".to_string(),
+            Value::from((
+                1_i32,
+                1_i32,
+                4_i32,
+                true,
+                16_i32,
+                4_i32,
+                vec![1_u8, 2, 3, 4],
+            )),
+        );
+        assert!(image_from_hints(&odd).is_none());
+        assert!(image_from_hints(&hint(1, 1, 4, true, 2, vec![1, 2, 3, 4])).is_none());
+        assert!(image_from_hints(&hint(4, 4, 16, true, 4, vec![1, 2, 3, 4])).is_none());
+    }
+
+    #[test]
+    fn no_hint_at_all_is_not_an_error() {
+        assert!(image_from_hints(&HashMap::new()).is_none());
     }
 }
