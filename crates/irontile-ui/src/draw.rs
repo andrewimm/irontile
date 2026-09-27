@@ -18,6 +18,8 @@ pub struct TextRenderer {
     fonts: FontSystem,
     cache: SwashCache,
     families: Vec<String>,
+    /// Whether a colour glyph is drained to the colour of the text around it.
+    monochrome: bool,
     /// The size to rasterize at, in pixels of the buffer being drawn into --
     /// not the size written in the configuration, which is in logical pixels.
     /// The two differ by the display's scale, and one renderer serves bars on
@@ -35,6 +37,14 @@ impl std::fmt::Debug for TextRenderer {
 }
 
 impl TextRenderer {
+    /// Whether colour glyphs are drained to the text colour. On by default: a
+    /// status line is one row of one colour, and a glyph that arrived from an
+    /// emoji font because the text font did not have it looks like a mistake
+    /// rather than a decision.
+    pub fn set_monochrome(&mut self, yes: bool) {
+        self.monochrome = yes;
+    }
+
     /// Sets the size to rasterize at, in buffer pixels.
     ///
     /// Everything else a bar draws is multiplied by the display's scale, and
@@ -51,6 +61,7 @@ impl TextRenderer {
             fonts: FontSystem::new(),
             cache: SwashCache::new(),
             families: families.to_vec(),
+            monochrome: true,
             size,
         }
     }
@@ -132,6 +143,7 @@ impl TextRenderer {
             (rgba.blue() * 255.0) as u8,
             (rgba.alpha() * 255.0) as u8,
         );
+        let monochrome = self.monochrome;
 
         let mut buffer = buffer;
         buffer.draw(
@@ -144,6 +156,11 @@ impl TextRenderer {
                 if glyph_color.a() == 0 {
                     return;
                 }
+                let glyph_color = if monochrome {
+                    drained(glyph_color, fill)
+                } else {
+                    glyph_color
+                };
                 let mut paint = Paint::default();
                 paint.set_color_rgba8(
                     glyph_color.r(),
@@ -163,6 +180,37 @@ impl TextRenderer {
             },
         );
     }
+}
+
+/// A coloured glyph, said in the colour of the text around it.
+///
+/// Only a colour font ever gets here: an ordinary glyph comes back in exactly
+/// the colour it was asked for, and is left alone. A colour one -- an emoji,
+/// usually, and often one nobody chose, since a font fallback picks it up for
+/// a symbol the text font happens not to have -- arrives in its own palette,
+/// which on a status line reads as one word painted green among a row of
+/// off-white ones.
+///
+/// Brightness is kept and colour is not: the glyph's luminance picks how much
+/// of the text colour to use, so shape and shading survive and nothing comes
+/// out invisible. The floor is what stops a dark emoji vanishing into a dark
+/// bar.
+fn drained(glyph: cosmic_text::Color, fill: cosmic_text::Color) -> cosmic_text::Color {
+    if glyph.r() == fill.r() && glyph.g() == fill.g() && glyph.b() == fill.b() {
+        return glyph;
+    }
+    let luminance = (0.2126 * f32::from(glyph.r())
+        + 0.7152 * f32::from(glyph.g())
+        + 0.0722 * f32::from(glyph.b()))
+        / 255.0;
+    let weight = 0.35 + 0.65 * luminance;
+    let channel = |value: u8| (f32::from(value) * weight).round().clamp(0.0, 255.0) as u8;
+    cosmic_text::Color::rgba(
+        channel(fill.r()),
+        channel(fill.g()),
+        channel(fill.b()),
+        glyph.a(),
+    )
 }
 
 /// Paints a solid rectangle.

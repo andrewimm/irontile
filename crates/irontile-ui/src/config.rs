@@ -20,6 +20,11 @@ pub struct Config {
     /// the glyphs it has, and everything else falls through to the next.
     pub font: Vec<String>,
     pub font_size: f32,
+    /// Whether a colour glyph -- an emoji, usually one a fallback picked up
+    /// for a symbol the text font lacks -- is drawn in its own colours.
+    /// Off by default: one green glyph in a row of off-white ones reads as a
+    /// mistake rather than as a decision.
+    pub color_emoji: bool,
     /// An icon theme name. Icons are named by the freedesktop specification, so
     /// the names hold still across releases in a way a font's codepoints do
     /// not.
@@ -56,6 +61,7 @@ impl Default for Config {
             position: Position::Top,
             font: vec!["Noto Sans".into()],
             font_size: 14.0,
+            color_emoji: false,
             icon_theme: "Adwaita".into(),
             icon_path: None,
             background: color("#252221"),
@@ -91,6 +97,7 @@ struct ConfigFile {
     position: Option<Position>,
     font: Option<Vec<String>>,
     font_size: Option<f32>,
+    color_emoji: Option<bool>,
     icon_theme: Option<String>,
     icon_path: Option<std::path::PathBuf>,
     background: Option<Color>,
@@ -126,6 +133,7 @@ impl ConfigFile {
             position: self.position.unwrap_or(defaults.position),
             font: self.font.unwrap_or(defaults.font),
             font_size: self.font_size.unwrap_or(defaults.font_size),
+            color_emoji: self.color_emoji.unwrap_or(defaults.color_emoji),
             icon_theme: self.icon_theme.unwrap_or(defaults.icon_theme),
             icon_path: self.icon_path.or(defaults.icon_path),
             background: self.background.unwrap_or(defaults.background),

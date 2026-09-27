@@ -64,7 +64,9 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         .subscribe()
         .map_err(|e| format!("could not subscribe: {e}"))?;
 
-    let text = TextRenderer::new(&config.font, config.font_size);
+    let mut text = TextRenderer::new(&config.font, config.font_size);
+    text.set_monochrome(!config.color_emoji);
+    let text = text;
     let icons = IconSet::new(&config.icon_theme, config.icon_path.clone());
     let mut state = State {
         config,
