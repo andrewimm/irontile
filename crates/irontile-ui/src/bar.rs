@@ -81,28 +81,44 @@ pub fn draw(
     let padding = config.padding as f32 * scale;
     let mut hits = Vec::new();
 
-    let regions = [
+    // Collected before anything is drawn, because where the left region may
+    // reach depends on how wide the middle one turned out. A window title is
+    // as long as the window says it is, and the desktop numbers are the one
+    // thing on the bar whose position has to hold still.
+    let icon_size = (config.font_size * scale).round().max(1.0) as u32;
+    let mut regions = [
         (&config.left, Align::Left),
         (&config.center, Align::Center),
         (&config.right, Align::Right),
-    ];
-    for (names, align) in regions {
+    ]
+    .map(|(names, align)| {
         let segments = collect(config, names, snapshot, world, alt);
-        // Icons are square and sized from the text, so they sit on the line
-        // rather than beside it.
-        let icon_size = (config.font_size * scale).round().max(1.0) as u32;
         let widths: Vec<f32> = segments
             .iter()
             .map(|s| measure(text, icons, s, icon_size) + padding * 2.0)
             .collect();
+        (segments, widths, align)
+    });
+
+    let centre_total: f32 = regions[1].1.iter().sum();
+    let right_total: f32 = regions[2].1.iter().sum();
+    let (left_budget, centre_x, right_budget) = budgets(w, centre_total, right_total, padding);
+    // The middle is left alone: it is a handful of numbers, and a desktop
+    // indicator that shortened itself would be indicating nothing.
+    for (index, budget) in [(0, left_budget), (2, right_budget)] {
+        let (segments, widths, _) = &mut regions[index];
+        fit(text, icons, segments, widths, budget, icon_size, padding);
+    }
+
+    for (segments, widths, align) in &regions {
         let total: f32 = widths.iter().sum();
         let mut x = match align {
             Align::Left => 0.0,
-            Align::Center => (w - total) / 2.0,
+            Align::Center => centre_x,
             Align::Right => w - total,
         };
 
-        for (segment, segment_width) in segments.iter().zip(&widths) {
+        for (segment, segment_width) in segments.iter().zip(widths) {
             // The focused desktop is picked out behind the text and underlined,
             // which reads as selection rather than as alarm.
             if let Some(background) = segment.style.background {
@@ -909,5 +925,140 @@ mod tests {
             },
         );
         assert_eq!(frame.pixmap.height(), config.height as u32 * 2);
+    }
+}
+
+/// How much room the outer regions have, and where the middle one starts.
+///
+/// The middle is the anchor: the desktop numbers have to hold still, because a
+/// row of numbers that slid about as window titles changed would be a row
+/// nobody could aim at. So what is left on either side of it is what the other
+/// two get. With nothing in the middle there is no anchor, and the left region
+/// may run until the right one begins.
+fn budgets(width: f32, centre: f32, right: f32, gap: f32) -> (f32, f32, f32) {
+    if centre <= 0.0 {
+        return ((width - right - gap).max(0.0), width / 2.0, width.max(0.0));
+    }
+    let centre_x = ((width - centre) / 2.0).max(0.0);
+    (
+        (centre_x - gap).max(0.0),
+        centre_x,
+        (width - (centre_x + centre) - gap).max(0.0),
+    )
+}
+
+/// Trims a region to the room it has.
+///
+/// Segments are kept whole while they fit; the first one that does not is
+/// shortened to what is left, and anything after it is dropped. A bar that
+/// drew past its budget would write a window title over the desktop numbers,
+/// which is the one thing on the bar that has to stay readable.
+fn fit(
+    text: &mut TextRenderer,
+    icons: &mut IconSet,
+    segments: &mut Vec<Segment>,
+    widths: &mut Vec<f32>,
+    budget: f32,
+    icon_size: u32,
+    padding: f32,
+) {
+    if widths.iter().sum::<f32>() <= budget {
+        return;
+    }
+    let mut used = 0.0;
+    let mut kept = 0;
+    for index in 0..segments.len() {
+        let room = budget - used;
+        if widths[index] <= room {
+            used += widths[index];
+            kept += 1;
+            continue;
+        }
+        shorten(text, &mut segments[index], room - padding * 2.0);
+        let width = measure(text, icons, &segments[index], icon_size) + padding * 2.0;
+        let anything = segments[index].pieces.iter().any(|piece| match piece {
+            Piece::Text(run) => !run.is_empty(),
+            _ => true,
+        });
+        if anything && width <= room {
+            widths[index] = width;
+            kept += 1;
+        }
+        break;
+    }
+    segments.truncate(kept);
+    widths.truncate(kept);
+}
+
+/// Shortens a segment's text to fit, from the end, marking the cut.
+fn shorten(text: &mut TextRenderer, segment: &mut Segment, budget: f32) {
+    let fixed: f32 = segment
+        .pieces
+        .iter()
+        .filter(|piece| !matches!(piece, Piece::Text(_)))
+        .count() as f32;
+    let _ = fixed;
+    for piece in segment.pieces.iter_mut().rev() {
+        let Piece::Text(run) = piece else { continue };
+        if text.width(run) <= budget.max(0.0) {
+            continue;
+        }
+        *run = clipped(text, run, budget);
+    }
+}
+
+/// The longest prefix of `run` that fits in `budget`, with an ellipsis.
+///
+/// One character at a time from the end. A title is a few dozen characters and
+/// a bar redraws a few times a second at most, so the simple answer is the
+/// right one -- and the ellipsis has to be measured as part of the string
+/// rather than subtracted from the budget, because its width depends on which
+/// font ends up supplying it.
+fn clipped(text: &mut TextRenderer, run: &str, budget: f32) -> String {
+    let mut chars: Vec<char> = run.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let mut candidate: String = chars.iter().collect();
+        // Trailing space before an ellipsis reads as a gap rather than a cut.
+        while candidate.ends_with(' ') {
+            candidate.pop();
+        }
+        candidate.push('…');
+        if text.width(&candidate) <= budget {
+            return candidate;
+        }
+    }
+    String::new()
+}
+
+#[cfg(test)]
+mod room {
+    use super::budgets;
+
+    #[test]
+    fn the_sides_stop_before_the_middle() {
+        let (left, centre_x, right) = budgets(1000.0, 100.0, 300.0, 10.0);
+        assert_eq!(centre_x, 450.0);
+        // Up to the middle, less the gutter.
+        assert_eq!(left, 440.0);
+        // From the far side of the middle to the edge, less the gutter.
+        assert_eq!(right, 440.0);
+        // What the desktop numbers want, they get: the anchor does not move
+        // because a title is long.
+        assert!(left + 100.0 + right <= 1000.0);
+    }
+
+    #[test]
+    fn with_nothing_in_the_middle_the_left_runs_until_the_right_begins() {
+        let (left, _, _) = budgets(1000.0, 0.0, 200.0, 10.0);
+        assert_eq!(left, 790.0);
+    }
+
+    #[test]
+    fn a_middle_wider_than_the_display_leaves_nothing_rather_than_less_than_nothing() {
+        let (left, centre_x, right) = budgets(300.0, 400.0, 50.0, 10.0);
+        assert_eq!(left, 0.0);
+        assert_eq!(centre_x, 0.0);
+        assert_eq!(right, 0.0);
     }
 }

@@ -95,6 +95,7 @@ fn render_to_png(
     scale: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut text = TextRenderer::new(&config.font, config.font_size * scale);
+    text.set_monochrome(!config.color_emoji);
     let mut icons = IconSet::new(&config.icon_theme, config.icon_path.clone());
     // One frame is all there is, so it is worth waiting a moment for the
     // readings that arrive on their own rather than drawing a bar with a hole
@@ -144,7 +145,12 @@ fn sample() -> Snapshot {
         ],
         windows: vec![WindowInfo {
             id: WindowId(0),
-            title: Some("irontile — the bar, rendered".into()),
+            // Long on purpose: the left region has to stop before the desktop
+            // numbers, and a short title would never show whether it does.
+            title: Some(
+                "irontile — the bar, rendered, with a window title long enough to reach the middle and keep going"
+                    .into(),
+            ),
             app_id: Some("org.irontile.demo".into()),
             workspace: WorkspaceId(1),
             output: Some(OutputId(1)),
@@ -162,6 +168,7 @@ fn tooltip_to_png(
     scale: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut renderer = TextRenderer::new(&config.font, config.font_size);
+    renderer.set_monochrome(!config.color_emoji);
     let frame = bar::tooltip(config, &mut renderer, text, scale)
         .ok_or("a tooltip with nothing in it is not drawn")?;
     frame.pixmap.save_png(target)?;
