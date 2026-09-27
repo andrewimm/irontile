@@ -14,6 +14,8 @@ enum Ask {
     Toggle,
     Open,
     Close,
+    /// Turns quiet hours on when it is off, and off when it is on.
+    Quiet,
 }
 
 const HELP: &str = "\
@@ -28,6 +30,7 @@ OPTIONS:
                     binding reaches it: the key arrives at the compositor.
     --open          Show the panel.
     --close         Hide it.
+    --quiet         Turn quiet hours on if it is off, and off if it is on.
     --status        Print how many notifications are held and whether quiet
                     hours is on, as two words: a count, then `quiet` or
                     `loud`. What a bar module reads.
@@ -75,6 +78,7 @@ fn run() -> Result<(), String> {
             "--toggle" => toggle = Some(Ask::Toggle),
             "--open" => toggle = Some(Ask::Open),
             "--close" => toggle = Some(Ask::Close),
+            "--quiet" => toggle = Some(Ask::Quiet),
             "--version" | "-V" => {
                 println!(
                     "{}",
@@ -106,10 +110,41 @@ fn run() -> Result<(), String> {
 fn ask(what: Ask) -> Result<(), String> {
     let connection = zbus::blocking::Connection::session()
         .map_err(|err| format!("could not reach the session bus: {err}"))?;
+    // Quiet is the odd one: it takes the state to move to, and the state to
+    // move to is the opposite of the one there is. Asking first is a round
+    // trip nobody notices and saves a second verb on the interface.
+    if matches!(what, Ask::Quiet) {
+        let now = connection
+            .call_method(
+                Some("org.irontile.Notify"),
+                "/org/irontile/Notify",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.irontile.Notify1", "Quiet"),
+            )
+            .map_err(|err| format!("no notification daemon answered: {err}"))?
+            .body()
+            .deserialize::<zbus::zvariant::OwnedValue>()
+            .ok()
+            .and_then(|value| bool::try_from(value).ok())
+            .unwrap_or(false);
+        connection
+            .call_method(
+                Some("org.irontile.Notify"),
+                "/org/irontile/Notify",
+                Some("org.irontile.Notify1"),
+                "Quiet",
+                &(!now,),
+            )
+            .map_err(|err| format!("no notification daemon answered: {err}"))?;
+        return Ok(());
+    }
+
     let method = match what {
         Ask::Toggle => "Toggle",
         Ask::Open => "Open",
         Ask::Close => "Close",
+        Ask::Quiet => unreachable!("handled above"),
     };
     connection
         .call_method(
