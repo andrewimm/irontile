@@ -383,6 +383,18 @@ modules, and a table per module carrying its format string, icons and
 thresholds. `--dump PATH` renders one bar to a PNG without a compositor, which
 is how a configuration is checked without starting a session.
 
+The three regions do not overlap. The middle is the anchor -- the desktop
+numbers have to hold still, because they are the one thing on a bar people aim
+at by position rather than by reading -- so a window title long enough to reach
+them is shortened with an ellipsis instead. With nothing in the middle, the
+left region runs until the right one begins.
+
+A colour glyph is drained to the colour of the text around it. Fonts fall back,
+and what they fall back to for a symbol the text font lacks is frequently a
+colour emoji font, which draws it in its own palette: one green mark in a row
+of off-white ones, chosen by nobody. Brightness is kept and colour is not, so
+the shape survives. `color_emoji = true` puts the colours back.
+
 ```toml
 left = ["window"]
 center = ["workspaces"]
@@ -800,6 +812,20 @@ downwards and leave on their own -- except a critical one, which stays until it
 is dismissed. That is the whole of what critical means, and a countdown would
 take it away while somebody was reading it.
 
+**Pressing a button does what it says.** A notification may offer actions, and
+a press on one sends the sender the key it carried. A press anywhere else on
+the card invokes `default` when the sender offered one -- which is how
+"click the notification to open the thing" has always worked -- and is
+otherwise a dismissal. Either way the card goes, because one that stayed after
+being pressed would look like nothing had happened.
+
+**The picture is the sender's own.** An application that names an icon gets it
+from the theme; one that sends pixels instead -- `image-data` inline or
+`image-path` on disk, which is what the browsers and chat applications do --
+gets those drawn as they arrived rather than tinted. An application that sends
+neither gets its initial in a warm disc, which is at least a different mark for
+each program.
+
 **Quiet hours holds notifications back without dropping them.** Nothing appears
 at the corner; everything still arrives in the panel. Being uninterrupted is
 not the same as being uninformed. A critical notification is shown anyway.
@@ -817,7 +843,10 @@ that happens not to have some icon font still gets pictures -- and a theme
 missing a name leaves the word underneath still saying what the button does.
 
 `--dump PATH` renders the popups and the panel to a PNG, with `--scale`, so the
-look can be worked on without waiting for something to happen.
+look can be worked on without waiting for something to happen. `--status`
+prints how many are waiting and whether quiet hours is on, as two words, which
+is what the bar's notification module reads -- a shell script should not have
+to parse JSON to draw a number.
 
 Only one program at a time may be the notification daemon. Starting this one
 alongside another leaves whichever lost the race silently showing nothing, so
