@@ -42,13 +42,14 @@ bad one; the certificate behind the attestation lives for minutes and there is
 nothing to leak. This is also why `pacman -U` on a release URL asks for a
 `.sig` and does not find one: download the package first and install the file.
 
-Six binaries, a desktop entry, a PAM service, a man page each and completions
-for `irontilectl`:
+Seven binaries, a desktop entry, a PAM service, a portal configuration, a man
+page each, and completions for `irontilectl`:
 
 | File | Where it goes |
 | --- | --- |
 | `irontile` | `/usr/bin` |
 | `irontile-bar` | `/usr/bin` |
+| `irontile-notify` | `/usr/bin` |
 | `irontile-lock` | `/usr/bin` |
 | `irontile-polkit` | `/usr/bin` |
 | `irontilectl` | `/usr/bin` |
@@ -737,6 +738,57 @@ With no compositor to draw on it asks on the terminal instead. That is not a
 nicety -- an agent that can only ask through a window is an agent that cannot be
 used to fix a broken window.
 
+## Notifications
+
+`irontile-notify` answers `org.freedesktop.Notifications`, which is how every
+program on the desktop asks for a word to appear on screen. It draws two
+things: a card at the corner of the display, and a panel holding everything
+that has arrived.
+
+```toml
+[startup]
+exec = [
+  "irontile-notify",
+]
+
+[binds]
+"Super+n" = "spawn irontile-notify --toggle"
+```
+
+The binding runs a second copy of the binary, which asks the running one over
+the bus and exits. A key press arrives at the compositor rather than at a
+daemon, and this is the shortest path between the two; an invocation that finds
+nobody listening says so rather than doing nothing quietly.
+
+**Popups sit on the overlay**, above even a fullscreen window, because a
+notification nobody can see is a notification that did not happen. They stack
+downwards and leave on their own -- except a critical one, which stays until it
+is dismissed. That is the whole of what critical means, and a countdown would
+take it away while somebody was reading it.
+
+**Quiet hours holds notifications back without dropping them.** Nothing appears
+at the corner; everything still arrives in the panel. Being uninterrupted is
+not the same as being uninformed. A critical notification is shown anyway.
+
+**The panel carries the session's buttons** -- lock, sleep, hibernate, restart,
+power off -- and runs them through `systemctl`, which is what performs them. A
+desktop with its own verbs for suspend would be a desktop with its own words
+for it.
+
+Everything is drawn the way the lock screen is: the same palette, the same
+hairline rule carrying the gradient the compositor puts around a focused
+window, the same warm stripe down the edge of a card. The icons are SVGs
+resolved against the icon theme rather than glyphs from a font, so a machine
+that happens not to have some icon font still gets pictures -- and a theme
+missing a name leaves the word underneath still saying what the button does.
+
+`--dump PATH` renders the popups and the panel to a PNG, with `--scale`, so the
+look can be worked on without waiting for something to happen.
+
+Only one program at a time may be the notification daemon. Starting this one
+alongside another leaves whichever lost the race silently showing nothing, so
+it says which it was and exits.
+
 ## Portals
 
 `xdg-desktop-portal` is the front desk applications ask when they want
@@ -968,7 +1020,7 @@ exec = ["alacritty"]
 | `irontile-layout` | Tiling tree, desktops, and display arrangement. Pure integer geometry, no Wayland. |
 | `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
 | `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
-| `irontile-ui` | Bar and launcher, as ordinary layer-shell clients. |
+| `irontile-ui` | Bar, notifications and launcher, as ordinary layer-shell clients. |
 | `irontile-lock` | `irontile-lock`, the lock screen. Draws, and asks PAM. |
 | `irontile-polkit` | `irontile-polkit`, the polkit authentication agent. Draws, and asks polkit's helper. |
 | `irontile-session` | `start-irontile`, the supervisor a login manager starts. |

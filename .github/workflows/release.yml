@@ -144,6 +144,7 @@ jobs:
           apt-get install -y ./irontile_*.deb
           irontile --version
           irontile-bar --version
+          irontile-notify --version
           irontilectl --version
           irontile-lock --version
           irontile-polkit --version
@@ -162,6 +163,7 @@ jobs:
           # which installs perfectly and then cannot lock the screen.
           irontile-lock --user root --dump /tmp/lock.png
           irontile-bar --dump /tmp/bar.png
+          irontile-notify --dump /tmp/notify.png
           irontile-polkit --dump /tmp/polkit.png
           # Files rather than behaviour: nothing would notice these missing.
           ls /usr/share/man/man1/irontile.1* >/dev/null
@@ -186,6 +188,7 @@ jobs:
           dnf install -y --setopt=tsflags= ./irontile-*.rpm
           irontile --version
           irontile-bar --version
+          irontile-notify --version
           irontilectl --version
           irontile-lock --version
           irontile-polkit --version
@@ -204,6 +207,7 @@ jobs:
           # which installs perfectly and then cannot lock the screen.
           irontile-lock --user root --dump /tmp/lock.png
           irontile-bar --dump /tmp/bar.png
+          irontile-notify --dump /tmp/notify.png
           irontile-polkit --dump /tmp/polkit.png
           # Files rather than behaviour: nothing would notice these missing.
           # The man pages are %doc, and this image installs with nodocs, so the
@@ -232,6 +236,7 @@ jobs:
           pacman -U --noconfirm ./irontile-*.pkg.tar.zst
           irontile --version
           irontile-bar --version
+          irontile-notify --version
           irontilectl --version
           irontile-lock --version
           irontile-polkit --version
@@ -250,6 +255,7 @@ jobs:
           # which installs perfectly and then cannot lock the screen.
           irontile-lock --user root --dump /tmp/lock.png
           irontile-bar --dump /tmp/bar.png
+          irontile-notify --dump /tmp/notify.png
           irontile-polkit --dump /tmp/polkit.png
           # Files rather than behaviour: nothing would notice these missing.
           # makepkg compresses man pages, hence the glob.

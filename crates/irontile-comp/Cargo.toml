@@ -94,6 +94,7 @@ suggests = "libxcb1, libx11-xcb1, libxcursor1, adwaita-icon-theme"
 assets = [
     ["../../target/release/irontile", "usr/bin/", "755"],
     ["../../target/release/irontile-bar", "usr/bin/", "755"],
+    ["../../target/release/irontile-notify", "usr/bin/", "755"],
     ["../../target/release/irontilectl", "usr/bin/", "755"],
     ["../../target/release/irontile-lock", "usr/bin/", "755"],
     ["../../target/release/irontile-polkit", "usr/bin/", "755"],
@@ -127,6 +128,7 @@ auto-req = "find-requires"
 assets = [
     { source = "target/release/irontile", dest = "/usr/bin/irontile", mode = "755" },
     { source = "target/release/irontile-bar", dest = "/usr/bin/irontile-bar", mode = "755" },
+    { source = "target/release/irontile-notify", dest = "/usr/bin/irontile-notify", mode = "755" },
     { source = "target/release/irontilectl", dest = "/usr/bin/irontilectl", mode = "755" },
     { source = "target/release/irontile-lock", dest = "/usr/bin/irontile-lock", mode = "755" },
     { source = "target/release/irontile-polkit", dest = "/usr/bin/irontile-polkit", mode = "755" },

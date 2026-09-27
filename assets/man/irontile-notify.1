@@ -1,0 +1,108 @@
+.\" No version in the title line: see the note in irontile.1.
+.TH IRONTILE-NOTIFY 1 "" "irontile" "irontile"
+.SH NAME
+irontile\-notify \- notifications for irontile, and the panel they collect in
+.SH SYNOPSIS
+.B irontile\-notify
+.br
+.B irontile\-notify
+.RB [ \-\-toggle | \-\-open | \-\-close ]
+.br
+.B irontile\-notify \-\-dump
+.I PATH
+.RB [ \-\-scale
+.IR N ]
+.SH DESCRIPTION
+.B irontile\-notify
+answers
+.B org.freedesktop.Notifications
+on the session bus, which is how every program on the desktop asks for a word
+to appear on screen. What arrives is shown as a card at the corner of the
+display and kept in a panel afterwards.
+.PP
+Started with the session and left running. Only one program at a time may be
+the notification daemon: a second one finds the name taken and says so rather
+than showing half of everything.
+.PP
+Popups sit on the overlay layer, above even a fullscreen window, because a
+notification nobody can see is a notification that did not happen. They stack
+downwards and go on their own after a few seconds \(em except a critical one,
+which stays until it is dismissed, since that is the whole of what critical
+means.
+.PP
+The panel is a side panel holding everything that has arrived, with the
+session's buttons along the bottom: lock, sleep, hibernate, restart, power off.
+Its icons come from the icon theme as SVGs rather than from a font, so a
+machine without some particular font still gets pictures \(em and a theme
+missing a name still leaves the word underneath saying what the button does.
+.PP
+Clicking a notification dismisses it. Escape closes the panel.
+.SH OPTIONS
+.TP
+.B \-\-toggle
+Show the panel if it is hidden, hide it if it is shown, and exit. A key press
+arrives at the compositor rather than at this program, so a binding runs this
+and this asks the running daemon over the bus.
+.TP
+.B \-\-open
+Show the panel.
+.TP
+.B \-\-close
+Hide it.
+.TP
+.BI \-\-dump " PATH"
+Render the popups and the panel to a PNG and exit, without a compositor and
+without anything having sent a notification. The only way to work on how these
+look without waiting for something to happen.
+.TP
+.BI \-\-scale " N"
+Display scale to render for
+.BR \-\-dump .
+Default 1.
+.TP
+.BI \-\-icon\-theme " NAME"
+The icon theme to draw from. Default: Adwaita.
+.TP
+.B \-\-version
+Show the version and exit.
+.TP
+.B \-\-help
+Show a usage message and exit.
+.SH EXAMPLES
+Start it with the session, and bind the panel to a key:
+.PP
+.EX
+[startup]
+exec = [
+  "irontile\-notify",
+]
+
+[binds]
+"Super+n" = "spawn irontile\-notify \-\-toggle"
+.EE
+.SH BUS
+.TP
+.B org.freedesktop.Notifications
+The standard interface, at
+.IR /org/freedesktop/Notifications .
+Capabilities reported are
+.BR actions ,
+.BR body ,
+.B icon\-static
+and
+.BR persistence .
+.TP
+.B org.irontile.Notify1
+The panel's own switch, at
+.IR /org/irontile/Notify :
+.BR Toggle ,
+.BR Open ,
+.B Close
+and
+.BR Quiet (b).
+Not part of anybody's specification; it exists because a key binding has to
+reach a running daemon somehow.
+.SH SEE ALSO
+.BR irontile (1),
+.BR irontile\-bar (1),
+.BR irontilectl (1)

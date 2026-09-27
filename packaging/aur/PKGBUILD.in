@@ -83,6 +83,7 @@ package() {
     cd "$pkgname-$pkgver"
     install -Dm755 target/release/irontile "$pkgdir/usr/bin/irontile"
     install -Dm755 target/release/irontile-bar "$pkgdir/usr/bin/irontile-bar"
+    install -Dm755 target/release/irontile-notify "$pkgdir/usr/bin/irontile-notify"
     install -Dm755 target/release/irontilectl "$pkgdir/usr/bin/irontilectl"
     install -Dm755 target/release/irontile-lock "$pkgdir/usr/bin/irontile-lock"
     install -Dm755 target/release/irontile-polkit "$pkgdir/usr/bin/irontile-polkit"
