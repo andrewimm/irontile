@@ -50,6 +50,15 @@ Show the panel.
 .B \-\-close
 Hide it.
 .TP
+.B \-\-status
+Print how many notifications are held and whether quiet hours is on, as two
+words: a count, then
+.B quiet
+or
+.BR loud .
+What a bar module reads, so a bar can show a count without this program having
+to know anything about bars.
+.TP
 .BI \-\-dump " PATH"
 Render the popups and the panel to a PNG and exit, without a compositor and
 without anything having sent a notification. The only way to work on how these

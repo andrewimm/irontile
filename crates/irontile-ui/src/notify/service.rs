@@ -232,6 +232,24 @@ impl Panel {
         }
         nudge(&self.wake);
     }
+
+    /// How many notifications are being held, for a bar to show.
+    #[zbus(property)]
+    fn count(&self) -> u32 {
+        self.shared
+            .lock()
+            .map(|shared| shared.live.len() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Whether notifications are being held back rather than shown.
+    #[zbus(property(emits_changed_signal = "false"), name = "Quiet")]
+    fn quiet_now(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|shared| shared.quiet)
+            .unwrap_or(false)
+    }
 }
 
 /// Splits the flat list the specification uses into pairs.

@@ -28,6 +28,9 @@ OPTIONS:
                     binding reaches it: the key arrives at the compositor.
     --open          Show the panel.
     --close         Hide it.
+    --status        Print how many notifications are held and whether quiet
+                    hours is on, as two words: a count, then `quiet` or
+                    `loud`. What a bar module reads.
     --dump PATH     Render the popups and the panel to a PNG and exit, without
                     a compositor and without anything having sent a
                     notification. The only way to work on how these look
@@ -68,6 +71,7 @@ fn run() -> Result<(), String> {
                     .map_err(|_| "--scale needs a number")?;
             }
             "--icon-theme" => theme = args.next().ok_or("--icon-theme needs a name")?,
+            "--status" => return status(),
             "--toggle" => toggle = Some(Ask::Toggle),
             "--open" => toggle = Some(Ask::Open),
             "--close" => toggle = Some(Ask::Close),
@@ -116,6 +120,34 @@ fn ask(what: Ask) -> Result<(), String> {
             &(),
         )
         .map_err(|err| format!("no notification daemon answered: {err}"))?;
+    Ok(())
+}
+
+/// Prints what a bar wants to know: how many, and whether they are being held.
+///
+/// One line, two words, so a shell script can read it without a JSON parser:
+/// the count, then `quiet` or `loud`. A bar module runs this every couple of
+/// seconds, so it says nothing more than it has to.
+fn status() -> Result<(), String> {
+    let connection = zbus::blocking::Connection::session()
+        .map_err(|err| format!("could not reach the session bus: {err}"))?;
+    let ask = |property: &str| -> Result<zbus::zvariant::OwnedValue, String> {
+        connection
+            .call_method(
+                Some("org.irontile.Notify"),
+                "/org/irontile/Notify",
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.irontile.Notify1", property),
+            )
+            .map_err(|err| format!("no notification daemon answered: {err}"))?
+            .body()
+            .deserialize::<zbus::zvariant::OwnedValue>()
+            .map_err(|err| format!("the daemon said something unreadable: {err}"))
+    };
+    let count = u32::try_from(ask("Count")?).unwrap_or(0);
+    let quiet = bool::try_from(ask("Quiet")?).unwrap_or(false);
+    println!("{count} {}", if quiet { "quiet" } else { "loud" });
     Ok(())
 }
 
