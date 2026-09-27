@@ -1,9 +1,31 @@
-# irontile
+<p align="center">
+  <img src=".github/logo.png" alt="" width="128" height="128">
+</p>
 
-A Wayland tiling compositor with a split-container tree as its native model,
-not a plugin on top of a floating one.
+<h1 align="center">irontile</h1>
+
+<p align="center">
+  A Wayland tiling compositor with a split-container tree as its native model,<br>
+  not a plugin on top of a floating one.
+</p>
+
+<p align="center">
+  <a href="#installing">Install</a> &nbsp;&middot;&nbsp;
+  <a href="#configuration">Configure</a> &nbsp;&middot;&nbsp;
+  <a href="#bindings">Bindings</a> &nbsp;&middot;&nbsp;
+  <a href="#building-from-source">Build</a> &nbsp;&middot;&nbsp;
+  <a href="#design-notes">Design notes</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/andrewimm/irontile/actions/workflows/ci.yml"><img src="https://github.com/andrewimm/irontile/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/andrewimm/irontile/releases/latest"><img src="https://img.shields.io/github/v/release/andrewimm/irontile" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT licence"></a>
+</p>
 
 <img width="2256" height="1504" alt="2026-09-14_180519" src="https://github.com/user-attachments/assets/f554458f-f9a5-42f4-9deb-2d639aecdabd" />
+
+---
 
 ## Installing
 
@@ -153,6 +175,8 @@ Two lines because they are two binaries. Installing a package replaces both on
 disk and neither in memory, so a session keeps running whatever it started as
 until it is restarted, and those numbers can disagree for days. The second line
 is the one that describes the compositor holding your windows.
+
+---
 
 ## Configuration
 
@@ -318,6 +342,8 @@ is the only thing that can move it -- which also means nothing else could drive
 one in a test. Everything a pointer reaches is otherwise reachable only by hand,
 which is how a bar that received no pointer events at all went unnoticed.
 
+---
+
 ## Control socket
 
 Every binding is also a command:
@@ -337,6 +363,8 @@ irontilectl watch        # stream events
 
 `IRONTILE_SOCKET` targets a specific instance; otherwise the socket belonging to
 `WAYLAND_DISPLAY` is used. Processes irontile spawns inherit both.
+
+---
 
 ## Bar
 
@@ -635,6 +663,8 @@ padding = 8
 min_width = 180
 ```
 
+---
+
 ## Lock screen
 
 `irontile-lock` is an ordinary `ext-session-lock` client with no privileges of
@@ -689,6 +719,8 @@ A backstop redraws anyway if no frame is asked for within a couple of seconds,
 because a compositor going quiet without turning the displays off would
 otherwise stop the clock in front of somebody.
 
+---
+
 ## Authentication agent
 
 `irontile-polkit` is the agent polkit asks when something wants an
@@ -737,6 +769,8 @@ appears when something wants an administrator is a prompt nobody can look at.
 With no compositor to draw on it asks on the terminal instead. That is not a
 nicety -- an agent that can only ask through a window is an agent that cannot be
 used to fix a broken window.
+
+---
 
 ## Notifications
 
@@ -789,6 +823,8 @@ Only one program at a time may be the notification daemon. Starting this one
 alongside another leaves whichever lost the race silently showing nothing, so
 it says which it was and exits.
 
+---
+
 ## Portals
 
 `xdg-desktop-portal` is the front desk applications ask when they want
@@ -833,6 +869,8 @@ indicator exists and why it cannot be turned off. Closing that door means
 gating screencopy on the portal, and that would break `grim` -- so it is a
 decision to take deliberately rather than a box to tick.
 
+---
+
 ## Protocols
 
 | Protocol | Notes |
@@ -858,6 +896,8 @@ shape gets it from an XCursor theme; and a built-in arrow covers the case where
 no theme is installed, which is what a fresh machine looks like.
 
 Not yet implemented: `pointer-constraints` and `relative-pointer`.
+
+---
 
 ## X11 programs
 
@@ -889,6 +929,7 @@ drawn where they put themselves, above the tiled windows and below the panels,
 because a menu that appeared behind the window it dropped out of is a menu
 nobody can use.
 
+---
 
 ## Backends
 
@@ -897,6 +938,8 @@ nobody can use.
 | nested | A window inside another compositor. The development loop. |
 | headless | No renderer, displays described on the command line. What the integration tests drive over the control socket. |
 | session | Real hardware: libseat for the seat, udev for GPUs, one `DrmCompositor` per connected connector, libinput for input. |
+
+---
 
 ## Logging
 
@@ -921,6 +964,8 @@ session worth reading about is usually the one whose output went with the
 reboot. Nested and headless runs do not write it -- they are started from a
 terminal somebody is already watching, and writing the same path would rotate
 away the log of the session they are nested inside.
+
+---
 
 ## Building from source
 
@@ -1025,6 +1070,8 @@ exec = ["alacritty"]
 | `irontile-polkit` | `irontile-polkit`, the polkit authentication agent. Draws, and asks polkit's helper. |
 | `irontile-session` | `start-irontile`, the supervisor a login manager starts. |
 | `xtask` | Task runner. |
+
+---
 
 ## Design notes
 
@@ -1138,6 +1185,8 @@ compositor.
 queued, a page flip completes, and that vblank asks for the next one; a display
 with nothing to draw goes quiet.
 
+---
+
 ## Releases
 
 Versions are the workspace `version` in `Cargo.toml`, and a release is that
@@ -1175,6 +1224,8 @@ checkout it sits in, which is how the release workflow builds exactly what was
 tagged rather than something fetched back afterwards. What the two ask for and
 what they install are the same thing said twice, so a test compares them and
 fails when only one of them learns about a new dependency.
+
+---
 
 ## License
 
