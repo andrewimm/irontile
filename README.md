@@ -23,7 +23,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT licence"></a>
 </p>
 
-<img width="2256" height="1504" alt="2026-09-14_180519" src="https://github.com/user-attachments/assets/f554458f-f9a5-42f4-9deb-2d639aecdabd" />
+<img width="2256" height="1504" src=".github/screenshot.png"
+  alt="A tiled desktop: a file tree and an editor on the left, htop and a shell in
+  the middle, and the notification centre open down the right with two cards and
+  a row of session buttons -- lock, sleep, hibernate, restart, power off.">
 
 ---
 
