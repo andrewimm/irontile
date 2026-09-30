@@ -1112,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-comp"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "irontile-ipc",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-ipc"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "irontile-layout",
  "irontile-version",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-layout"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "proptest",
  "serde",
@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-lock"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cosmic-text",
@@ -1173,7 +1173,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-motion"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "serde",
  "toml",
@@ -1181,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-polkit"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "cosmic-text",
  "irontile-version",
@@ -1196,11 +1196,11 @@ dependencies = [
 
 [[package]]
 name = "irontile-power"
-version = "0.2.10"
+version = "0.3.0"
 
 [[package]]
 name = "irontile-session"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "irontile-version",
  "rustix 1.1.4",
@@ -1209,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-ui"
-version = "0.2.10"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cosmic-text",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "irontile-version"
-version = "0.2.10"
+version = "0.3.0"
 
 [[package]]
 name = "itertools"

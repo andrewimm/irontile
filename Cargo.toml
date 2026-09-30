@@ -15,18 +15,18 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.10"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
 repository = "https://github.com/andrewimm/irontile"
 
 [workspace.dependencies]
-irontile-layout = { path = "crates/irontile-layout", version = "0.2.0" }
-irontile-motion = { path = "crates/irontile-motion", version = "0.2.0" }
-irontile-ipc = { path = "crates/irontile-ipc", version = "0.2.0" }
-irontile-power = { path = "crates/irontile-power", version = "0.2.0" }
-irontile-version = { path = "crates/irontile-version", version = "0.2.0" }
+irontile-layout = { path = "crates/irontile-layout", version = "0.3.0" }
+irontile-motion = { path = "crates/irontile-motion", version = "0.3.0" }
+irontile-ipc = { path = "crates/irontile-ipc", version = "0.3.0" }
+irontile-power = { path = "crates/irontile-power", version = "0.3.0" }
+irontile-version = { path = "crates/irontile-version", version = "0.3.0" }
 libpulse-binding = "2.30"
 zbus = "5"
 serde = { version = "1", features = ["derive"] }
