@@ -299,6 +299,76 @@ binding and a held letter feel the same. `resize` repeats by default because it
 is a ramp; a `spawn` is opaque -- `wpctl set-volume 5%+` is a ramp and `firefox`
 is emphatically not -- so it repeats only when the binding says to.
 
+### Animation
+
+```toml
+[animation]
+enabled = true           # off means every change is instant
+time_scale = 1.0         # half is half speed; 0.25 is for watching one closely
+open_style = "zoom"      # or grow, slide, fade, none
+dim_unfocused = 1.0      # 1 is no fading at all
+
+# Windows moving and resizing as the tree reflows: an open, a close, a swap, a
+# resize, a gap change.
+[animation.layout]
+kind = "spring"
+response = 0.38          # roughly one oscillation in seconds; smaller is snappier
+damping_ratio = 0.8      # 1 arrives without overshooting, below it bounces
+
+# A window arriving. The shape of the arrival is `open_style`.
+[animation.open]
+kind = "spring"
+response = 0.34
+damping_ratio = 0.68
+
+# A window being dragged, which wants a much tighter spring than a reflow: it is
+# following a hand rather than settling into a place.
+[animation.drag]
+kind = "spring"
+response = 0.16
+damping_ratio = 0.82
+
+# Focus moving from one window to another: the border colour, and the fade if
+# `dim_unfocused` asks for one.
+[animation.focus]
+kind = "bezier"
+duration_ms = 160
+curve = "out_cubic"      # or out_quint, out_expo, emphasized, in_out_cubic,
+                         # out_back, linear -- or points = [x1, y1, x2, y2]
+```
+
+Every channel is either a spring or a curve, and they are not interchangeable. A
+curve is a promise about time: exactly this long, exactly this shape. It has to
+restart when the target moves, because it has no memory of how fast it was
+already going, so an interrupted curve visibly stutters. A spring is a promise
+about force, and keeps its velocity when the target moves -- a window redirected
+halfway through a move carries on smoothly into the new direction. That is why
+springs are the default for everything a person can interrupt, which on a tiling
+desktop is nearly everything, and why `focus` is the one channel left as a
+curve: a colour crossfade has nothing that can interrupt it part way.
+
+`open_style` decides what an arriving window looks like. `zoom` comes in a shade
+small and transparent, `grow` from nothing at the centre of its cell, `slide` up
+from below, `fade` does nothing but opacity, and `none` puts the window straight
+there. Nothing animates a window *leaving*: once a client has destroyed its
+surface there is no picture of it left to animate, and keeping one would mean
+holding a copy of every window against the chance that it closes.
+
+`dim_unfocused` makes an unfocused window **translucent** rather than dark --
+without a shader there is nothing to darken it with. Against a dark background
+that reads as dimming, which is the intent; where two floating windows overlap
+it reads as see-through, which is not. It also stops the window being handed
+straight to a hardware plane. Hence the default of 1.0, which is no fading.
+
+A window being dragged leans into the way it is going, wider along the movement
+and narrower across it, keeping its area. That one is not configurable and costs
+nothing: it is a rectangle of a different size, drawn the way every other
+rectangle is.
+
+The bar keeps its own `[animation]` table in `bar.toml`. A title scrolling up to
+reveal the next one and a window travelling to a new cell are different things
+and should not be made to share a number.
+
 ### Bindings
 
 Everything built in is behind Super. Directions are `h`/`j`/`k`/`l` or the
@@ -391,6 +461,13 @@ numbers have to hold still, because they are the one thing on a bar people aim
 at by position rather than by reading -- so a window title long enough to reach
 them is shortened with an ellipsis instead. With nothing in the middle, the
 left region runs until the right one begins.
+
+The window title is replaced rather than swapped: the one leaving rises out of
+the bar as the one arriving rises into place, so a title that changed because
+you moved somewhere does not look like a window that renamed itself. Its spring
+lives in an `[animation]` table in `bar.toml`, separate from the compositor's --
+a title scrolling and a window travelling are different things. `enabled = false`
+there swaps the text outright.
 
 A colour glyph is drained to the colour of the text around it. Fonts fall back,
 and what they fall back to for a symbol the text font lacks is frequently a
@@ -815,6 +892,13 @@ downwards and leave on their own -- except a critical one, which stays until it
 is dismissed. That is the whole of what critical means, and a countdown would
 take it away while somebody was reading it.
 
+Cards arrive and leave from the edge they sit against, and the stack closes up
+behind one that goes -- a card on its way out gives up its place at once rather
+than when it has finished leaving, so the stack settles once rather than twice.
+The panel slides in and out on a spring of its own, and turning round mid-flight
+keeps whatever speed it had. Neither is configurable yet: `irontile-notify` has
+no file of its own to put an `[animation]` table in.
+
 **Pressing a button does what it says.** A notification may offer actions, and
 a press on one sends the sender the key it carried. A press anywhere else on
 the card invokes `default` when the sender offered one -- which is how
@@ -1095,6 +1179,7 @@ exec = ["alacritty"]
 | Crate | What it is |
 | --- | --- |
 | `irontile-layout` | Tiling tree, desktops, and display arrangement. Pure integer geometry, no Wayland. |
+| `irontile-motion` | Springs and curves. Shared by the compositor, the bar and the notification daemon, which are separate processes that animate the same feeling. |
 | `irontile-comp` | The compositor. Owns every protocol and rendering concern. |
 | `irontile-ipc` | Control-socket protocol, the shared action vocabulary, and `irontilectl`. |
 | `irontile-ui` | Bar, notifications and launcher, as ordinary layer-shell clients. |
