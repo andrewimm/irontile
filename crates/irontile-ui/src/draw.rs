@@ -101,13 +101,31 @@ impl TextRenderer {
         height: f32,
         color: Color,
     ) {
+        self.draw_shifted(pixmap, text, x, height, 0.0, color);
+    }
+
+    /// Centred in `height` as [`TextRenderer::draw`] does it, then moved `dy`
+    /// from there -- negative upwards.
+    ///
+    /// For text part way through being replaced: one line rising out of the
+    /// space while another rises into it. Anything drawn past the edge of the
+    /// pixmap is clipped, which is what makes a line able to leave.
+    pub fn draw_shifted(
+        &mut self,
+        pixmap: &mut PixmapMut<'_>,
+        text: &str,
+        x: f32,
+        height: f32,
+        dy: f32,
+        color: Color,
+    ) {
         let buffer = self.shape(text);
         let text_height: f32 = buffer.layout_runs().map(|run| run.line_height).sum();
         self.paint(
             pixmap,
             buffer,
             x,
-            ((height - text_height) / 2.0).max(0.0),
+            ((height - text_height) / 2.0).max(0.0) + dy,
             color,
         );
     }
@@ -144,6 +162,12 @@ impl TextRenderer {
             (rgba.alpha() * 255.0) as u8,
         );
         let monochrome = self.monochrome;
+        // cosmic-text throws away the alpha of the colour it is handed -- its
+        // own source says `TODO: blend base alpha?` -- and reports coverage
+        // alone, so a colour asking to be half transparent arrives fully
+        // opaque. Kept here and multiplied in below, because a caller fading
+        // text out has no way of knowing that.
+        let opacity = rgba.alpha().clamp(0.0, 1.0);
 
         let mut buffer = buffer;
         buffer.draw(
@@ -161,13 +185,12 @@ impl TextRenderer {
                 } else {
                     glyph_color
                 };
+                let alpha = (f32::from(glyph_color.a()) * opacity).round() as u8;
+                if alpha == 0 {
+                    return;
+                }
                 let mut paint = Paint::default();
-                paint.set_color_rgba8(
-                    glyph_color.r(),
-                    glyph_color.g(),
-                    glyph_color.b(),
-                    glyph_color.a(),
-                );
+                paint.set_color_rgba8(glyph_color.r(), glyph_color.g(), glyph_color.b(), alpha);
                 paint.anti_alias = false;
                 if let Some(rect) = Rect::from_xywh(
                     x + px as f32,
@@ -279,5 +302,60 @@ impl TextRenderer {
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
         buffer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::color;
+
+    /// How much ink a run of text put on a fresh pixmap.
+    fn ink(alpha: f32, dy: f32) -> u32 {
+        let mut text = TextRenderer::new(&["Noto Sans".to_string()], 14.0);
+        let mut pixmap = tiny_skia::Pixmap::new(200, 30).expect("a pixmap");
+        text.draw_shifted(
+            &mut pixmap.as_mut(),
+            "a title",
+            4.0,
+            30.0,
+            dy,
+            color("#ffffff").faded(alpha),
+        );
+        pixmap
+            .pixels()
+            .iter()
+            .map(|pixel| u32::from(pixel.alpha()))
+            .sum()
+    }
+
+    #[test]
+    fn asking_for_faded_text_gets_faded_text() {
+        // cosmic-text reports coverage and throws away the alpha of the colour
+        // it was handed, so this has to be applied on the way to the pixmap. It
+        // was not, once: text asked to be half transparent came out opaque,
+        // which made one line crossing another look like one line on top of
+        // another.
+        let solid = ink(1.0, 0.0);
+        let faint = ink(0.35, 0.0);
+        assert!(solid > 0, "nothing was drawn at all");
+        assert!(
+            faint * 2 < solid,
+            "faded text was barely fainter: {faint} against {solid}"
+        );
+        assert_eq!(ink(0.0, 0.0), 0, "fully transparent text drew something");
+    }
+
+    #[test]
+    fn text_pushed_off_the_top_is_clipped_rather_than_wrapped_round() {
+        // What makes a line able to leave: it is drawn where it would not fit
+        // and the part outside is simply not there.
+        let settled = ink(1.0, 0.0);
+        let leaving = ink(1.0, -14.0);
+        assert!(
+            leaving < settled,
+            "a line pushed halfway out should show less of itself: {leaving} against {settled}"
+        );
+        assert_eq!(ink(1.0, -200.0), 0, "a line pushed right out still drew");
     }
 }

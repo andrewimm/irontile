@@ -47,6 +47,15 @@ pub struct Pixels {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Segment {
     pub pieces: Vec<Piece>,
+    /// Whether replacing this segment's text should be shown as a change.
+    ///
+    /// True for the focused window's title and nothing else. Most of the bar
+    /// says numbers that tick -- a clock, a percentage, a temperature -- and
+    /// animating those would be a bar that never holds still. A title, though,
+    /// changes because you moved somewhere, and seeing the old one leave is how
+    /// you know that is what happened rather than a window having renamed
+    /// itself.
+    pub reveal: bool,
     pub level: Level,
     /// Drawn picked out, the way an active desktop is.
     ///
@@ -111,6 +120,7 @@ impl Segment {
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             pieces: pieces(&text.into()),
+            reveal: false,
             level: Level::Normal,
             focused: false,
             buttons: Buttons::default(),
@@ -246,6 +256,7 @@ fn workspaces(config: &ModuleConfig, snapshot: &Snapshot) -> Vec<Segment> {
             };
             let segment = Segment {
                 pieces: pieces(&text),
+                reveal: false,
                 level: Level::Normal,
                 // Picked out by being on this bar's display, not by holding
                 // the keyboard. With two monitors only one desktop is globally
@@ -284,6 +295,8 @@ fn window(config: &ModuleConfig, snapshot: &Snapshot) -> Vec<Segment> {
     }
     let mut segment = Segment::plain(text);
     segment.tooltip = tooltip(config, &values, 100.0);
+    // The one module whose text is worth watching change.
+    segment.reveal = true;
     vec![finish(config, segment)]
 }
 
@@ -319,6 +332,7 @@ fn battery(config: &ModuleConfig, state: Option<Battery>) -> Vec<Segment> {
         config,
         Segment {
             pieces: pieces(&text),
+            reveal: false,
             level,
             focused: false,
             buttons: Buttons::default(),
@@ -354,6 +368,7 @@ fn volume(config: &ModuleConfig, state: Option<Volume>) -> Vec<Segment> {
         config,
         Segment {
             pieces: pieces(&text),
+            reveal: false,
             level: threshold(config, state.percent),
             focused: false,
             buttons: Buttons::default(),
@@ -374,6 +389,7 @@ fn backlight(config: &ModuleConfig, level: Option<f64>) -> Vec<Segment> {
         config,
         Segment {
             pieces: pieces(&text),
+            reveal: false,
             level: threshold(config, level),
             focused: false,
             buttons: Buttons::default(),
@@ -416,6 +432,7 @@ fn network(config: &ModuleConfig, state: &Network) -> Vec<Segment> {
         config,
         Segment {
             pieces: pieces(&text),
+            reveal: false,
             level,
             focused: false,
             buttons: Buttons::default(),
@@ -463,6 +480,7 @@ fn tray(config: &ModuleConfig, items: &[crate::tray::Item]) -> Vec<Segment> {
                 config,
                 Segment {
                     pieces: vec![piece],
+                    reveal: false,
                     // An item asking for attention is the one thing in a tray
                     // that is worth colouring.
                     level: match item.status {
@@ -500,6 +518,7 @@ fn command(config: &ModuleConfig, output: Option<String>) -> Vec<Segment> {
         config,
         Segment {
             pieces: pieces(&text),
+            reveal: false,
             level,
             focused: false,
             buttons: Buttons::default(),

@@ -44,6 +44,14 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 /// nothing else is happening.
 const MAX_WAIT: Duration = Duration::from_secs(1);
 
+/// How long to wait between frames of something that is moving.
+///
+/// The bar has no vblank to hang a pump on: it draws when it decides to, and
+/// the compositor shows the result at whatever rate it is running. Sixty a
+/// second is enough to read as smooth and few enough that a title changing does
+/// not register as work.
+const FRAME: Duration = Duration::from_millis(16);
+
 /// Mark the surfaces that are not bars apart from the bars, which are numbered
 /// by display. There is never more than one of each of these.
 const TOOLTIP: usize = usize::MAX;
@@ -84,6 +92,8 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         tip: None,
         popup: None,
         scratch: Vec::new(),
+        reveal: crate::reveal::Reveal::default(),
+        repaint: false,
         dirty: true,
         running: true,
     };
@@ -98,6 +108,7 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     state.create_bars(&handle);
 
     let mut last_draw = Instant::now();
+    let mut last_step = Instant::now();
     while state.running {
         if state.dirty {
             state.refresh(&mut control);
@@ -105,7 +116,14 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
             // The modules were rebuilt, so what the pointer is resting on may
             // have moved or stopped saying anything.
             state.hovered();
+            state.repaint = false;
             last_draw = Instant::now();
+        } else if state.repaint {
+            // An animation frame: the same world, drawn again a little further
+            // along. Nothing is asked of the compositor and nothing the pointer
+            // can rest on has moved.
+            state.repaint = false;
+            state.redraw(&handle);
         }
         // Put up whatever the pointer has now rested on for long enough, and
         // paint it once the compositor has said how large it may be.
@@ -143,10 +161,16 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         for wake in &wake_fds {
             fds.push(PollFd::new(wake, PollFlags::IN));
         }
-        // Whichever comes first: the next clock tick, or a tooltip falling due.
+        // Whichever comes first: the next clock tick, a tooltip falling due, or
+        // the next frame of something that is moving.
         let wait = MAX_WAIT
             .saturating_sub(last_draw.elapsed())
-            .min(state.tip_due().unwrap_or(MAX_WAIT));
+            .min(state.tip_due().unwrap_or(MAX_WAIT))
+            .min(if state.reveal.moving() {
+                FRAME
+            } else {
+                MAX_WAIT
+            });
         let timeout = rustix::time::Timespec {
             tv_sec: wait.as_secs() as i64,
             tv_nsec: wait.subsec_nanos() as i64,
@@ -203,6 +227,16 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         }
         if last_draw.elapsed() >= MAX_WAIT {
             state.dirty = true;
+        }
+        // Stepped last, from the clock, so a frame spent waiting on the poll
+        // counts and a burst of events does not advance it several times over.
+        let elapsed = last_step.elapsed();
+        last_step = Instant::now();
+        if state.reveal.moving() {
+            let motion = state.config.animation.title;
+            let dt = state.config.animation.dt(elapsed.min(FRAME * 4));
+            state.reveal.step(&motion, dt);
+            state.repaint = true;
         }
     }
     Ok(())
@@ -521,6 +555,13 @@ struct State {
     /// Reused between frames: at a few hundred kilobytes a bar, allocating this
     /// per redraw is the largest thing the bar would do per frame.
     scratch: Vec<u8>,
+    /// The window title on its way from one to the next.
+    reveal: crate::reveal::Reveal,
+    /// Set when the picture has changed but the world has not: an animation
+    /// frame. Kept apart from `dirty` because that one re-reads every window and
+    /// desktop from the compositor, which is not something to do sixty times a
+    /// second for a title that is sliding.
+    repaint: bool,
     dirty: bool,
     running: bool,
 }
@@ -600,6 +641,20 @@ impl State {
         if let Ok(ResponsePayload::Windows(windows)) = control.query(Query::Windows) {
             self.snapshot.windows = windows;
         }
+        // The title the bar is about to draw, taken from the window itself
+        // rather than from the module's format: a format with a prefix in it
+        // would otherwise make every title look like a change from the last.
+        let title = self
+            .snapshot
+            .windows
+            .iter()
+            .find(|window| window.focused)
+            .and_then(|window| window.title.as_deref())
+            .unwrap_or_default();
+        self.reveal.to(title);
+        if !self.config.animation.enabled {
+            self.reveal.finish();
+        }
     }
 
     fn redraw(&mut self, handle: &QueueHandle<State>) {
@@ -628,6 +683,7 @@ impl State {
                     width: pixels,
                     scale,
                     alt: &|name: &str| alt.contains(name),
+                    reveal: self.reveal.going(),
                 },
             );
             let shm = self.globals.shm.clone();

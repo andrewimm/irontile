@@ -47,6 +47,8 @@ pub struct Config {
     pub padding: i32,
     pub tooltip: Tooltip,
     pub menu: MenuStyle,
+    /// How the bar's own moving parts move.
+    pub animation: Animation,
     /// Modules by region, naming entries in `modules`.
     pub left: Vec<String>,
     pub center: Vec<String>,
@@ -75,6 +77,7 @@ impl Default for Config {
             padding: 8,
             tooltip: Tooltip::default(),
             menu: MenuStyle::default(),
+            animation: Animation::default(),
             left: vec!["window".into()],
             center: vec!["workspaces".into()],
             right: vec!["battery".into(), "clock".into()],
@@ -111,6 +114,7 @@ struct ConfigFile {
     padding: Option<i32>,
     tooltip: Option<Tooltip>,
     menu: Option<MenuStyle>,
+    animation: Option<Animation>,
     left: Option<Vec<String>>,
     center: Option<Vec<String>>,
     right: Option<Vec<String>>,
@@ -147,11 +151,67 @@ impl ConfigFile {
             padding: self.padding.unwrap_or(defaults.padding),
             tooltip: self.tooltip.unwrap_or(defaults.tooltip),
             menu: self.menu.unwrap_or(defaults.menu),
+            animation: self.animation.unwrap_or(defaults.animation),
             left: region(self.left, defaults.left),
             center: region(self.center, defaults.center),
             right: region(self.right, defaults.right),
             modules: self.modules.unwrap_or(defaults.modules),
         }
+    }
+}
+
+/// How the bar's own moving parts move.
+///
+/// Its own table rather than the compositor's, because what moves here is not
+/// what moves there: a title scrolling up to reveal the next one and a window
+/// travelling to a new cell are different things and should not be made to
+/// share a number. The compositor's `[animation]` in `irontile.toml` is
+/// separate and neither reads the other.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub struct Animation {
+    /// Off means text changes outright, which is also what happens when the bar
+    /// has no compositor to be smooth for.
+    pub enabled: bool,
+    /// How fast time passes. Half is half speed.
+    pub time_scale: f32,
+    /// The focused window's title being replaced.
+    pub title: irontile_motion::Motion,
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Animation {
+            enabled: true,
+            time_scale: 1.0,
+            title: irontile_motion::Motion::spring(0.3, 0.72),
+        }
+    }
+}
+
+impl Animation {
+    /// How much animated time one frame of real time is worth.
+    ///
+    /// Zero would leave a title permanently half replaced, so the scale is held
+    /// inside sensible bounds here rather than being corrected in the file.
+    ///
+    /// Switching animation off is not done by making time stop or rush: a
+    /// spring integrates its step in fixed slices, so an enormous `dt` is an
+    /// enormous number of slices rather than an instant arrival. Nothing is
+    /// started in the first place instead.
+    pub fn dt(&self, real: std::time::Duration) -> std::time::Duration {
+        let scale = if self.time_scale.is_finite() {
+            self.time_scale.clamp(0.05, 20.0)
+        } else {
+            1.0
+        };
+        // Left exactly alone at ordinary speed: `mul_f32` goes out to an f32 and
+        // back, and a frame that comes back a nanosecond longer than it went in
+        // is a frame whose length depends on which compiler rounded it.
+        if scale == 1.0 {
+            return real;
+        }
+        real.mul_f32(scale)
     }
 }
 

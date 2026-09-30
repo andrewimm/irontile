@@ -10,6 +10,16 @@ impl Color {
     pub fn rgba(&self) -> tiny_skia::Color {
         self.0
     }
+
+    /// The same colour, this much of it.
+    ///
+    /// Multiplies rather than replaces, so fading something already
+    /// half-transparent does not make it more opaque than it was.
+    pub fn faded(self, amount: f32) -> Color {
+        let mut color = self.0;
+        color.set_alpha(color.alpha() * amount.clamp(0.0, 1.0));
+        Color(color)
+    }
 }
 
 impl<'de> Deserialize<'de> for Color {

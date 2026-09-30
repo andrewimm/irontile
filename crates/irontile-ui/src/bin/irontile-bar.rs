@@ -113,6 +113,7 @@ fn render_to_png(
             width,
             scale,
             alt: &|_| false,
+            reveal: None,
         },
     );
     frame.pixmap.save_png(target)?;

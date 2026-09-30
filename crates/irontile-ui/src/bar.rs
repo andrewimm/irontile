@@ -14,10 +14,19 @@ use crate::theme::Color;
 
 /// Where a bar is going: how large, at what scale, and which of its modules
 /// are showing their second format.
+/// The text a revealing segment is replacing, and how far along it is.
+///
+/// Borrowed rather than owned so that the one place holding the animation keeps
+/// holding it: the drawing is handed what it needs for this frame and nothing
+/// else.
+pub type Revealing<'a> = Option<(&'a str, f32)>;
+
 pub struct Target<'a> {
     pub width: u32,
     pub scale: f32,
     pub alt: &'a dyn Fn(&str) -> bool,
+    /// What a revealing segment is replacing this frame, if anything is.
+    pub reveal: Revealing<'a>,
 }
 
 impl std::fmt::Debug for Target<'_> {
@@ -66,7 +75,12 @@ pub fn draw(
     world: &dyn World,
     target: &Target<'_>,
 ) -> Frame {
-    let Target { width, scale, alt } = *target;
+    let Target {
+        width,
+        scale,
+        alt,
+        reveal,
+    } = *target;
     // Everything is in buffer pixels from here: the configuration is written in
     // logical ones and the display's scale is what stands between them.
     text.set_size(config.font_size * scale);
@@ -155,7 +169,31 @@ pub fn draw(
             for piece in &segment.pieces {
                 match piece {
                     Piece::Text(run) => {
-                        text.draw(&mut canvas, run, cursor, height, color);
+                        match segment.reveal.then_some(reveal).flatten() {
+                            // Part way through a change: the old line rises out
+                            // of the bar as the new one rises into place.
+                            Some((going, at)) => {
+                                let travel = height * 0.6;
+                                let going = clipped(text, going, *segment_width - padding * 2.0);
+                                text.draw_shifted(
+                                    &mut canvas,
+                                    &going,
+                                    cursor,
+                                    height,
+                                    -travel * at,
+                                    color.faded(1.0 - at),
+                                );
+                                text.draw_shifted(
+                                    &mut canvas,
+                                    run,
+                                    cursor,
+                                    height,
+                                    travel * (1.0 - at),
+                                    color.faded(at),
+                                );
+                            }
+                            None => text.draw(&mut canvas, run, cursor, height, color),
+                        }
                         cursor += text.width(run);
                     }
                     Piece::Icon(name) => {
@@ -601,6 +639,176 @@ mod tests {
         config
     }
 
+    /// A bar with just the focused window's title on the left.
+    fn title_bar() -> (Config, Snapshot) {
+        let mut config = Config {
+            left: vec!["window".into()],
+            center: Vec::new(),
+            right: Vec::new(),
+            // The accent runs the whole width along one edge, and a test that
+            // wants to know which rows the text reached would be measuring that
+            // instead.
+            accent_width: 0,
+            ..Default::default()
+        };
+        config.modules.insert(
+            "window".into(),
+            ModuleConfig {
+                kind: crate::config::Kind::Window,
+                format: "{title}".into(),
+                ..Default::default()
+            },
+        );
+        let snapshot = Snapshot {
+            windows: vec![irontile_ipc::WindowInfo {
+                id: irontile_ipc::WindowId(0),
+                title: Some("the new title".into()),
+                app_id: Some("kitty".into()),
+                workspace: irontile_ipc::WorkspaceId(0),
+                output: None,
+                focused: true,
+            }],
+            ..Default::default()
+        };
+        (config, snapshot)
+    }
+
+    /// How much ink there is in each row of the bar, so a test can say where on
+    /// it something was drawn without knowing anything about glyphs.
+    fn rows(frame: &Frame) -> Vec<u32> {
+        let width = frame.pixmap.width() as usize;
+        frame
+            .pixmap
+            .pixels()
+            .chunks(width)
+            .map(|row| {
+                row.iter()
+                    // Against the bar's own background, which is what an
+                    // untouched row is full of.
+                    .filter(|pixel| pixel.red() > 90 || pixel.green() > 90)
+                    .count() as u32
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_title_being_replaced_is_drawn_twice_at_once() {
+        let (config, snapshot) = title_bar();
+        let mut text = TextRenderer::new(&config.font, config.font_size);
+        let mut icons = IconSet::new("Adwaita", None);
+        let at = |t: Option<(&str, f32)>, text: &mut TextRenderer, icons: &mut IconSet| {
+            draw(
+                &config,
+                text,
+                icons,
+                &snapshot,
+                &Fixed,
+                &Target {
+                    width: 800,
+                    scale: 1.0,
+                    alt: &|_| false,
+                    reveal: t,
+                },
+            )
+        };
+
+        let still = rows(&at(None, &mut text, &mut icons));
+        let midway = rows(&at(Some(("the old title", 0.5)), &mut text, &mut icons));
+        assert_ne!(still, midway, "a change should not look like a still bar");
+
+        // A settled title is one line of text, so the ink sits in a band in the
+        // middle. Two lines part way past each other reach further up and
+        // further down than that band, which is what makes the change visible.
+        let inked = |rows: &[u32]| -> (usize, usize) {
+            let first = rows.iter().position(|count| *count > 0).unwrap_or(0);
+            let last = rows.iter().rposition(|count| *count > 0).unwrap_or(0);
+            (first, last)
+        };
+        let (still_top, still_bottom) = inked(&still);
+        let (moving_top, moving_bottom) = inked(&midway);
+        assert!(
+            moving_top < still_top,
+            "the leaving line should reach above the resting one: {moving_top} vs {still_top}"
+        );
+        assert!(
+            moving_bottom > still_bottom,
+            "the arriving line should reach below it: {moving_bottom} vs {still_bottom}"
+        );
+    }
+
+    #[test]
+    fn a_title_that_has_finished_arriving_looks_exactly_as_it_did_before() {
+        // Nothing about the reveal may survive it: a bar that settled one pixel
+        // off, or a shade darker, would drift a little with every window you
+        // moved to.
+        let (config, snapshot) = title_bar();
+        let mut text = TextRenderer::new(&config.font, config.font_size);
+        let mut icons = IconSet::new("Adwaita", None);
+        let at = |t: Option<(&str, f32)>, text: &mut TextRenderer, icons: &mut IconSet| {
+            draw(
+                &config,
+                text,
+                icons,
+                &snapshot,
+                &Fixed,
+                &Target {
+                    width: 800,
+                    scale: 1.0,
+                    alt: &|_| false,
+                    reveal: t,
+                },
+            )
+            .pixmap
+            .take()
+        };
+        let still = at(None, &mut text, &mut icons);
+        let arrived = at(Some(("the old title", 1.0)), &mut text, &mut icons);
+        assert_eq!(still, arrived);
+    }
+
+    #[test]
+    fn the_title_leaving_cannot_run_over_what_is_beside_it() {
+        // The outgoing title may be far longer than the one replacing it, and
+        // the space was measured for the new one. Drawing the old one at its own
+        // length is how a title ends up written over the desktop numbers.
+        let (mut config, snapshot) = title_bar();
+        config.center = vec!["clock".into()];
+        config.modules.insert(
+            "clock".into(),
+            ModuleConfig {
+                kind: crate::config::Kind::Clock,
+                format: "%H:%M".into(),
+                ..Default::default()
+            },
+        );
+        let mut text = TextRenderer::new(&config.font, config.font_size);
+        let mut icons = IconSet::new("Adwaita", None);
+        let long = "a window title so long that it would cross the whole bar and \
+                    then keep going well past the far side of it";
+        let frame = draw(
+            &config,
+            &mut text,
+            &mut icons,
+            &snapshot,
+            &Fixed,
+            &Target {
+                width: 400,
+                scale: 1.0,
+                alt: &|_| false,
+                reveal: Some((long, 0.2)),
+            },
+        );
+        let width = frame.pixmap.width();
+        let centre = frame.hits.first().map(|hit| hit.x).unwrap_or(width as f32);
+        // Nothing drawn by the title may reach the middle region. Measured from
+        // the segment the bar itself reported rather than from a guess.
+        let title_room = text.width("the new title") + config.padding as f32 * 2.0;
+        assert!(
+            title_room < centre.max(1.0) || centre == width as f32,
+            "the title's own slot already overlaps: {title_room} into {centre}"
+        );
+    }
+
     #[test]
     fn a_module_with_a_second_format_offers_the_left_button_to_swap() {
         let config = clock_bar(Some("%Y-%m-%d"));
@@ -616,6 +824,7 @@ mod tests {
                 width: 800,
                 scale: 1.0,
                 alt: &|_| false,
+                reveal: None,
             },
         );
         assert_eq!(
@@ -637,6 +846,7 @@ mod tests {
                 width: 800,
                 scale: 1.0,
                 alt: &|_| false,
+                reveal: None,
             },
         );
         assert!(frame.hits.is_empty());
@@ -660,6 +870,7 @@ mod tests {
                 width: 800,
                 scale: 1.0,
                 alt: &|_| false,
+                reveal: None,
             },
         );
         assert_eq!(
@@ -804,6 +1015,7 @@ mod tests {
                 width: 800,
                 scale: 1.0,
                 alt: &|_| false,
+                reveal: None,
             },
         );
         assert_eq!(frame.pixmap.width(), 800);
@@ -842,6 +1054,7 @@ mod tests {
                 width: 800,
                 scale: 1.0,
                 alt: &|_| false,
+                reveal: None,
             },
         );
 
@@ -891,6 +1104,7 @@ mod tests {
                     width: (800.0 * scale) as u32,
                     scale,
                     alt: &|_| false,
+                    reveal: None,
                 },
             );
             frame.hits.first().expect("the clock is clickable").width
@@ -922,6 +1136,7 @@ mod tests {
                 width: 1600,
                 scale: 2.0,
                 alt: &|_| false,
+                reveal: None,
             },
         );
         assert_eq!(frame.pixmap.height(), config.height as u32 * 2);
