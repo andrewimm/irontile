@@ -1117,6 +1117,7 @@ dependencies = [
  "anyhow",
  "irontile-ipc",
  "irontile-layout",
+ "irontile-motion",
  "irontile-version",
  "libc",
  "rustix 1.1.4",
@@ -1171,6 +1172,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "irontile-motion"
+version = "0.2.10"
+dependencies = [
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "irontile-polkit"
 version = "0.2.10"
 dependencies = [
@@ -1205,6 +1214,7 @@ dependencies = [
  "chrono",
  "cosmic-text",
  "irontile-ipc",
+ "irontile-motion",
  "irontile-power",
  "irontile-version",
  "libpulse-binding",
