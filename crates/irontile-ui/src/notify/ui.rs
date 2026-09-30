@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use irontile_motion::{Animated, Motion};
 use rustix::event::{PollFd, PollFlags};
 use wayland_client::protocol::{
     wl_buffer::{self, WlBuffer},
@@ -174,6 +175,66 @@ struct Popup {
     panel: Panel,
     note: Notification,
     until: Option<Instant>,
+    /// How far in it is: zero off the right edge, one in place.
+    at: Animated,
+    /// Where the top of this card sits, in logical pixels from the top of the
+    /// display.
+    ///
+    /// A number that moves, because the card above it may go away: the stack
+    /// closing up is the difference between notifications that are a list and
+    /// notifications that are a pile of surfaces which happen to be adjacent.
+    slot: Animated,
+    /// Set once it has been told to go. It stays on screen until it has
+    /// finished leaving, and takes no part in anything while it does: it is a
+    /// picture of a notification rather than a notification.
+    leaving: bool,
+}
+
+/// Springs for the surfaces, from the motion lab's defaults.
+///
+/// Not configurable yet, because `irontile-notify` has no configuration file of
+/// its own to put an `[animation]` table in. The numbers are the lab's, and the
+/// day this program grows a file they move into it.
+fn panel_motion() -> Motion {
+    Motion::spring(0.42, 0.78)
+}
+
+fn card_motion() -> Motion {
+    Motion::spring(0.36, 0.64)
+}
+
+/// How long to wait between frames of something that is moving.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// Paints with everything moved `dx` to the right, clipped at the edge.
+///
+/// Sliding the result of the painting rather than teaching every coordinate in
+/// it about an offset: a card knows where its own title goes and should not also
+/// have to know that the whole card is part way onto the screen. Settled
+/// surfaces paint straight into the buffer, so the common case copies nothing.
+fn slid(
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    dx: f32,
+    paint: impl FnOnce(&mut tiny_skia::PixmapMut<'_>),
+) {
+    if dx < 0.5 {
+        paint(pixmap);
+        return;
+    }
+    let (w, h) = (pixmap.width(), pixmap.height());
+    let Some(mut staged) = tiny_skia::Pixmap::new(w, h) else {
+        paint(pixmap);
+        return;
+    };
+    paint(&mut staged.as_mut());
+    pixmap.draw_pixmap(
+        dx.round() as i32,
+        0,
+        staged.as_ref(),
+        &tiny_skia::PixmapPaint::default(),
+        tiny_skia::Transform::identity(),
+        None,
+    );
 }
 
 struct State {
@@ -190,7 +251,48 @@ struct State {
     /// Set when escape was pressed while the panel had the keyboard.
     escaped: bool,
     hovered: Option<Hit>,
+    /// How far the panel is in: zero off the right edge, one in place.
+    centre_at: Animated,
+    /// Set while the panel is on its way out. Its surface outlives the decision
+    /// to close it by however long the animation takes, and it must not be
+    /// clicked or hovered while it is leaving.
+    closing: bool,
     quit: bool,
+}
+
+impl State {
+    /// Whether anything on screen is part way through moving.
+    fn moving(&self) -> bool {
+        self.centre_at.moving()
+            || self
+                .popups
+                .iter()
+                .any(|popup| popup.at.moving() || popup.slot.moving())
+    }
+
+    /// Steps everything by `dt`, marking whatever moved as owing a frame.
+    ///
+    /// What was moving before the step owes a frame, not what is still moving
+    /// after it: a value settles on the step that carries it home, and asking
+    /// afterwards would skip the one frame that shows it arrived.
+    fn advance(&mut self, dt: Duration) {
+        let was = self.centre_at.moving();
+        self.centre_at.step(&panel_motion(), dt);
+        if was && let Some(panel) = &mut self.centre {
+            panel.dirty = true;
+        }
+        let motion = card_motion();
+        for popup in &mut self.popups {
+            let was = popup.at.moving();
+            popup.at.step(&motion, dt);
+            if was {
+                popup.panel.dirty = true;
+            }
+            // The slot moves the surface rather than its contents, so a card
+            // closing the gap above it owes no repaint.
+            popup.slot.step(&motion, dt);
+        }
+    }
 }
 
 /// Runs the surfaces until something says to stop.
@@ -211,6 +313,8 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
         pressed: Vec::new(),
         escaped: false,
         hovered: None,
+        centre_at: Animated::unit(0.0),
+        closing: false,
         quit: false,
     };
     queue
@@ -228,9 +332,18 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
     // When each notification arrived, so the panel can say how long ago.
     let mut arrived: HashMap<u32, Instant> = HashMap::new();
 
+    let mut last_step = Instant::now();
     while !state.quit {
         service.drain();
         let shared = service.state();
+
+        // Measured from the clock rather than assumed to be a frame, so a pass
+        // that waited on the bus instead of on the timer still advances by the
+        // right amount. Capped, because waking from suspend should not teleport
+        // a card across the screen.
+        let elapsed = last_step.elapsed();
+        last_step = Instant::now();
+        state.advance(elapsed.min(FRAME * 4));
 
         // Notifications that have gone from the bus side take their popup with
         // them: a sender that closed one means it.
@@ -269,20 +382,29 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
                 Urgency::Normal => Some(Instant::now() + LINGER),
             };
             if let Some(popup) = make_popup(&mut state, note, &mut text) {
+                let mut at = Animated::unit(0.0);
+                at.retarget(1.0);
+                let top = MARGIN + stacked_height(&state, &mut text);
                 state.popups.push(Popup {
                     panel: popup,
                     note: note.clone(),
                     until,
+                    at,
+                    slot: Animated::pixels(top as f32),
+                    leaving: false,
                 });
             }
         }
 
         // Expiry.
         let now = Instant::now();
+        // One already leaving has expired as far as anything cares, and saying
+        // so again would put a second `NotificationClosed` on the bus for every
+        // frame of it sliding away.
         let expired: Vec<u32> = state
             .popups
             .iter()
-            .filter(|popup| popup.until.is_some_and(|at| at <= now))
+            .filter(|popup| !popup.leaving && popup.until.is_some_and(|at| at <= now))
             .map(|popup| popup.note.id)
             .collect();
         for id in expired {
@@ -290,27 +412,71 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
             service.reply(Reply::Closed(id, Closed::Expired));
         }
 
-        // The panel follows the switch on the bus side.
+        // The panel follows the switch on the bus side, but its surface outlives
+        // the switch by however long it takes to leave.
         match (shared.panel, state.centre.is_some()) {
-            (true, false) => state.centre = make_centre(&mut state),
-            (false, true) => {
-                if let Some(panel) = state.centre.take() {
-                    panel.destroy();
-                }
+            (true, false) => {
+                state.centre = make_centre(&mut state);
+                state.closing = false;
+                state.centre_at.snap(0.0);
+                state.centre_at.retarget(1.0);
+            }
+            // Asked for again while it was leaving. The spring keeps the speed
+            // it already had, so it turns round rather than starting afresh.
+            (true, true) if state.closing => {
+                state.closing = false;
+                state.centre_at.retarget(1.0);
+            }
+            (false, true) if !state.closing => {
+                state.closing = true;
+                state.centre_at.retarget(0.0);
+                // Nothing on a panel that is leaving is under the pointer any
+                // more, whatever the pointer's last position was.
                 state.hovered = None;
             }
             _ => {}
         }
+        // Gone once it has finished going.
+        if state.closing && !state.centre_at.moving() {
+            if let Some(panel) = state.centre.take() {
+                panel.destroy();
+            }
+            state.closing = false;
+        }
+        // And popups that have finished leaving. Whatever goes leaves a gap for
+        // the ones below it to close up into, so the stack is recomputed after.
+        let before = state.popups.len();
+        state.popups.retain(|popup| {
+            let done = popup.leaving && !popup.at.moving();
+            if done {
+                popup.panel.layer.destroy();
+                if let Some(viewport) = &popup.panel.viewport {
+                    viewport.destroy();
+                }
+                popup.panel.surface.destroy();
+            }
+            !done
+        });
+        // Also after anything was dismissed this pass: a card marked as leaving
+        // has already given up its place, and the ones below should start moving
+        // up while it is still sliding out rather than after it has gone.
+        if state.popups.len() != before || state.popups.iter().any(|p| p.leaving) {
+            restack(&mut state, &mut text);
+        }
+        place_popups(&mut state);
 
         // What was clicked, now that both sides agree on what is where.
         let presses = std::mem::take(&mut state.pressed);
         for (key, at) in presses {
             match key {
                 Key::Popup(id) => {
+                    // A popup already on its way out is a picture of a
+                    // notification rather than a notification: clicking it must
+                    // not dismiss whatever has taken its place.
                     let note = state
                         .popups
                         .iter()
-                        .find(|popup| popup.note.id == id)
+                        .find(|popup| popup.note.id == id && !popup.leaving)
                         .map(|popup| popup.note.clone());
                     let Some(note) = note else { continue };
                     let scale = state
@@ -323,7 +489,7 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
                     close_popup(&mut state, id);
                     close_notification(service, id);
                 }
-                Key::Panel => {
+                Key::Panel if !state.closing => {
                     let centre = centre_state(&shared, &buttons, &arrived, state.hovered);
                     let Some(panel) = &state.centre else { continue };
                     let scale = panel.scale();
@@ -356,6 +522,10 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
                         None => {}
                     }
                 }
+                // A press that landed on the panel as it was leaving. Dropped
+                // rather than acted on: whatever was under the pointer when the
+                // panel started to go is not under it now.
+                Key::Panel => {}
             }
         }
 
@@ -364,8 +534,8 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
             shut_panel(service);
         }
 
-        // Hover, which only the panel shows.
-        if let Some(panel) = &state.centre {
+        // Hover, which only the panel shows -- and only while it is staying.
+        if let Some(panel) = &state.centre.as_ref().filter(|_| !state.closing) {
             let scale = panel.scale();
             let centre = centre_state(&shared, &buttons, &arrived, state.hovered);
             let spots = paint::spots(
@@ -442,6 +612,11 @@ pub fn run(service: &Service, theme: &str, families: &[String]) -> Result<(), St
 
 /// How long until something needs doing without anybody asking.
 fn next_wake(state: &State) -> Duration {
+    // Anything part way through moving wants the next frame, which is sooner
+    // than any expiry ever is.
+    if state.moving() {
+        return FRAME;
+    }
     let now = Instant::now();
     state
         .popups
@@ -514,11 +689,80 @@ fn make_popup(state: &mut State, note: &Notification, text: &mut TextRenderer) -
     ))
 }
 
+/// Gives every popup that is staying its place in the stack.
+///
+/// Called whenever the set of them changes. A card that is leaving keeps
+/// whatever slot it had -- it is on its way off the side and its height is no
+/// longer anybody's business -- and the ones below it close the gap.
+fn restack(state: &mut State, text: &mut TextRenderer) {
+    let cards: Vec<(bool, f32)> = state
+        .popups
+        .iter()
+        .map(|popup| {
+            (
+                popup.leaving,
+                paint::card_height(text, &popup.note, 1.0).ceil(),
+            )
+        })
+        .collect();
+    for (popup, top) in state.popups.iter_mut().zip(stack_tops(&cards)) {
+        if let Some(top) = top {
+            popup.slot.retarget(top);
+        }
+    }
+}
+
+/// Where the top of each card goes, given what is there and what is leaving.
+///
+/// A card on its way out takes no room: the ones below it start closing the gap
+/// while it is still sliding away rather than waiting for it to be gone, which
+/// is the difference between a stack that settles once and one that settles
+/// twice.
+fn stack_tops(cards: &[(bool, f32)]) -> Vec<Option<f32>> {
+    let mut top = MARGIN as f32;
+    cards
+        .iter()
+        .map(|(leaving, height)| {
+            if *leaving {
+                return None;
+            }
+            let here = top;
+            top += height + size::GAP;
+            Some(here)
+        })
+        .collect()
+}
+
+/// Moves each popup's surface to where its slot says it is now.
+///
+/// The margin is the only way a layer surface can be put somewhere, so this is a
+/// commit per frame per moving card. Only while they are moving: a settled stack
+/// commits nothing.
+fn place_popups(state: &mut State) {
+    for popup in &mut state.popups {
+        if !popup.slot.moving() {
+            continue;
+        }
+        popup
+            .panel
+            .layer
+            .set_margin(popup.slot.value().round() as i32, MARGIN, 0, 0);
+        // No buffer attached: the surface's contents have not changed, only
+        // where the compositor is being asked to put them.
+        popup.panel.surface.commit();
+    }
+}
+
 /// How much room the popups already take, in logical pixels.
+///
+/// One on its way out has given up its place: a new notification takes the slot
+/// straight away and the two cross over, which is better than the new one
+/// hanging back for a card that is already halfway off the screen.
 fn stacked_height(state: &State, text: &mut TextRenderer) -> i32 {
     state
         .popups
         .iter()
+        .filter(|popup| !popup.leaving)
         .map(|popup| paint::card_height(text, &popup.note, 1.0).ceil() as i32 + size::GAP as i32)
         .sum()
 }
@@ -590,10 +834,20 @@ fn new_panel(
     }
 }
 
+/// Starts a popup on its way out.
+///
+/// It is not destroyed here: it slides back off the edge it came in from first,
+/// and the loop reaps it once it has gone. From this moment it is marked as
+/// leaving, which is what keeps a notification that has been dismissed from
+/// being dismissed again by a click on the picture of it.
 fn close_popup(state: &mut State, id: u32) {
-    if let Some(index) = state.popups.iter().position(|popup| popup.note.id == id) {
-        let popup = state.popups.remove(index);
-        popup.panel.destroy();
+    if let Some(popup) = state
+        .popups
+        .iter_mut()
+        .find(|popup| popup.note.id == id && !popup.leaving)
+    {
+        popup.leaving = true;
+        popup.at.retarget(0.0);
     }
 }
 
@@ -612,6 +866,7 @@ fn draw_all(
 
     for index in 0..state.popups.len() {
         let note = state.popups[index].note.clone();
+        let at = state.popups[index].at.value();
         let panel = &mut state.popups[index].panel;
         if !panel.configured || !panel.dirty {
             continue;
@@ -619,11 +874,17 @@ fn draw_all(
         let scale = panel.scale();
         paint_into(panel, &shm, &handle, |pixmap, scale| {
             pixmap.fill(tiny_skia::Color::TRANSPARENT);
-            paint::card(pixmap, icons, text, &note, palette, (0.0, 0.0), scale);
+            // Off the right edge of its own surface and back, so a card arrives
+            // from the side of the screen it sits against.
+            let dx = (1.0 - at).clamp(0.0, 1.0) * pixmap.width() as f32;
+            slid(pixmap, dx, |pixmap| {
+                paint::card(pixmap, icons, text, &note, palette, (0.0, 0.0), scale);
+            });
         });
         let _ = scale;
     }
 
+    let at = state.centre_at.value();
     if let Some(panel) = &mut state.centre
         && panel.configured
         && panel.dirty
@@ -631,15 +892,19 @@ fn draw_all(
         {
             let size = panel.pixels();
             paint_into(panel, &shm, &handle, |pixmap, scale| {
-                paint::centre(
-                    pixmap,
-                    icons,
-                    text,
-                    centre,
-                    palette,
-                    (size.0 as f32, size.1 as f32),
-                    scale,
-                );
+                pixmap.fill(tiny_skia::Color::TRANSPARENT);
+                let dx = (1.0 - at).clamp(0.0, 1.0) * pixmap.width() as f32;
+                slid(pixmap, dx, |pixmap| {
+                    paint::centre(
+                        pixmap,
+                        icons,
+                        text,
+                        centre,
+                        palette,
+                        (size.0 as f32, size.1 as f32),
+                        scale,
+                    );
+                });
             });
         }
     }
@@ -1103,5 +1368,110 @@ mod presses {
             replies_for(&note(true), Some(Hit::Action(3, 9))),
             vec![Reply::Closed(3, Closed::Dismissed)]
         );
+    }
+}
+
+#[cfg(test)]
+mod sliding {
+    use super::*;
+
+    /// How many pixels in each column have anything in them.
+    fn columns(pixmap: &tiny_skia::Pixmap) -> Vec<u32> {
+        let width = pixmap.width() as usize;
+        let mut out = vec![0; width];
+        for (index, pixel) in pixmap.pixels().iter().enumerate() {
+            if pixel.alpha() > 0 {
+                out[index % width] += 1;
+            }
+        }
+        out
+    }
+
+    /// Fills the left third of whatever it is given, so a test can see where
+    /// that third ended up.
+    fn block(pixmap: &mut tiny_skia::PixmapMut<'_>) {
+        let third = pixmap.width() as f32 / 3.0;
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(255, 255, 255, 255);
+        if let Some(rect) = tiny_skia::Rect::from_xywh(0.0, 0.0, third, pixmap.height() as f32) {
+            pixmap.fill_rect(rect, &paint, tiny_skia::Transform::identity(), None);
+        }
+    }
+
+    fn drawn(dx: f32) -> Vec<u32> {
+        let mut pixmap = tiny_skia::Pixmap::new(90, 10).expect("a pixmap");
+        slid(&mut pixmap.as_mut(), dx, block);
+        columns(&pixmap)
+    }
+
+    #[test]
+    fn nothing_is_moved_when_nothing_is_moving() {
+        // The settled case has to be pixel for pixel what it was before any of
+        // this existed, and it has to avoid the copy: it is every frame that is
+        // not part of a transition.
+        let still = drawn(0.0);
+        assert_eq!(still[0], 10, "the block should start at the left edge");
+        assert_eq!(still[29], 10);
+        assert_eq!(still[30], 0, "and stop a third of the way across");
+    }
+
+    #[test]
+    fn a_surface_part_way_in_is_drawn_further_over() {
+        let halfway = drawn(45.0);
+        assert_eq!(halfway[0], 0, "the left edge should be clear");
+        assert_eq!(halfway[44], 0);
+        assert_eq!(halfway[45], 10, "and the block pushed over by the offset");
+        assert_eq!(halfway[74], 10);
+        assert_eq!(halfway[75], 0);
+    }
+
+    #[test]
+    fn a_surface_pushed_right_out_shows_nothing_at_all() {
+        // What the far end of leaving looks like. Anything still visible here
+        // would be a card that never quite went away.
+        assert_eq!(drawn(90.0).iter().sum::<u32>(), 0);
+        assert_eq!(drawn(400.0).iter().sum::<u32>(), 0);
+    }
+}
+
+#[cfg(test)]
+mod stacking {
+    use super::{MARGIN, stack_tops};
+    use crate::notify::paint::size;
+
+    #[test]
+    fn the_first_card_sits_at_the_margin_and_the_rest_below_it() {
+        let tops = stack_tops(&[(false, 80.0), (false, 120.0), (false, 90.0)]);
+        assert_eq!(tops[0], Some(MARGIN as f32));
+        assert_eq!(tops[1], Some(MARGIN as f32 + 80.0 + size::GAP));
+        assert_eq!(
+            tops[2],
+            Some(MARGIN as f32 + 80.0 + size::GAP + 120.0 + size::GAP)
+        );
+    }
+
+    #[test]
+    fn a_card_on_its_way_out_takes_no_room() {
+        // The one below it closes the gap while it is still sliding away. A
+        // stack that waited for it to be gone would settle twice: once when the
+        // card left and once when it was reaped.
+        let tops = stack_tops(&[(true, 80.0), (false, 120.0)]);
+        assert_eq!(tops[0], None, "a leaving card is not given a place");
+        assert_eq!(
+            tops[1],
+            Some(MARGIN as f32),
+            "the next one moves to the top"
+        );
+    }
+
+    #[test]
+    fn everything_leaving_leaves_nothing_behind() {
+        let tops = stack_tops(&[(true, 80.0), (true, 120.0)]);
+        assert!(tops.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn an_empty_stack_is_not_an_error() {
+        assert!(stack_tops(&[]).is_empty());
     }
 }
