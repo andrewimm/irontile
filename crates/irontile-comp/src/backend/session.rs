@@ -345,6 +345,14 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         if state.dirty {
             state.reflow();
         }
+        // Starts a transition promptly -- within the loop's sixteen
+        // milliseconds -- after which each display's vblank carries it on at
+        // whatever that display's refresh rate actually is. Skipped while the
+        // seat belongs to someone else: there is nothing to draw into, and a
+        // window should not spend its animation on another virtual terminal.
+        if is_active(state) {
+            state.advance();
+        }
         // Only when something has changed, with a backstop in case something
         // changed without saying so. Rendering every pass regardless was the
         // simple way to be sure nothing was ever missed, and it cost several
@@ -417,6 +425,8 @@ fn device_added(
             let context = EGLContext::new(&egl).context("no EGL context")?;
             GlesRenderer::new(context).context("no GL renderer")?
         };
+        // Before anything can be drawn, so a shader this hardware will not build
+        // is a line at startup rather than a surprise on the first drag.
         session.renderer = Some(renderer);
         session.primary = Some(node);
         // Prefer the render node: it is the one a client may open without
@@ -705,10 +715,16 @@ fn frame_finished(state: &mut Irontile, node: DrmNode, crtc: crtc::Handle) {
     let id = surface.id;
     let pending = surface.pending;
 
+    // Anything the compositor is animating itself is stepped here as well as in
+    // the event loop, which is what lets it run at the display's refresh rate
+    // rather than at the loop's sixteen milliseconds. The step is measured from
+    // the clock, so being called from both places costs nothing.
+    let moving = state.advance();
+
     // Clients are told the frame is on screen only once it actually is, which
     // is what paces an animating client to the refresh rate.
     state.send_frame_callbacks_for(id);
-    if pending {
+    if pending || moving {
         render_output(state, id);
     }
 }
@@ -786,9 +802,12 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         .as_ref()
         .map(|image| image.size)
         .unwrap_or((0, 0));
+    // Read before the borrow below splits the compositor into its parts.
+    let state_dragged = state.dragged();
     let Irontile {
         backend,
         placements,
+        departing,
         windows,
         unmanaged,
         outputs,
@@ -830,6 +849,10 @@ fn compose(state: &mut Irontile, id: OutputId) -> Composed {
         .unwrap_or(1.0);
     let scene = Scene {
         frame: placements,
+        departing,
+        dragged: state_dragged,
+        dim: config.animation.dim_unfocused,
+        open_style: config.animation.open_style,
         windows,
         outputs,
         layout,
@@ -950,6 +973,10 @@ fn pause_devices(state: &mut Irontile) {
             surface.queued = false;
         }
     }
+    // Neither is any animation. Coming back to a session that resumed a slide
+    // begun before it went away would draw a frame of somewhere the desktop no
+    // longer is.
+    state.finish_animations();
 }
 
 fn resume_devices(state: &mut Irontile) {

@@ -28,6 +28,23 @@ pub struct Entry {
     /// the window, so a gap during a resize shows background rather than
     /// border colour.
     pub border: Vec<SolidColorBuffer>,
+    /// How far through arriving this window is.
+    ///
+    /// One for everything that has been on screen for longer than a moment.
+    pub open: irontile_motion::Animated,
+    /// How focused this window is, from nothing to fully.
+    ///
+    /// A number rather than a flag because focus is drawn as a colour, and a
+    /// colour can be part way. Nothing else changes: the window that has the
+    /// keyboard has it outright from the moment it is given.
+    pub focus: irontile_motion::Animated,
+    /// Where this window is being drawn, as against where the tree put it.
+    ///
+    /// Lives here rather than beside the layout because it is a fact about the
+    /// picture, not about the arrangement: everything that asks where a window
+    /// *is* -- hit testing, the control socket, the layout's own tests -- reads
+    /// the cell, and only the renderer reads this.
+    pub rect: crate::motion::AnimatedRect,
 }
 
 #[derive(Debug, Default)]
@@ -60,6 +77,9 @@ impl Registry {
             Entry {
                 window,
                 border: Vec::new(),
+                open: irontile_motion::Animated::unit(0.0),
+                focus: irontile_motion::Animated::unit(0.0),
+                rect: crate::motion::AnimatedRect::default(),
             },
         );
         self.unmapped.insert(id);
@@ -104,6 +124,22 @@ impl Registry {
 
     pub fn get(&self, id: WindowId) -> Option<&Entry> {
         self.entries.get(&id)
+    }
+
+    /// Every window, in no particular order.
+    ///
+    /// For the things that are true of all of them regardless of where the tree
+    /// put them -- stepping an animation, for instance, which a window on a
+    /// desktop nobody is looking at still needs so that it is settled by the
+    /// time that desktop is shown.
+    pub fn entries_mut(&mut self) -> impl Iterator<Item = &mut Entry> {
+        self.entries.values_mut()
+    }
+
+    /// The same, for the things that have to treat one window differently from
+    /// the rest -- the one being dragged, for instance.
+    pub fn entries_mut_with_ids(&mut self) -> impl Iterator<Item = (WindowId, &mut Entry)> {
+        self.entries.iter_mut().map(|(id, entry)| (*id, entry))
     }
 
     pub fn get_mut(&mut self, id: WindowId) -> Option<&mut Entry> {

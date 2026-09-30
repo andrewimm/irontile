@@ -17,6 +17,7 @@ mod ipc;
 mod keymap;
 mod layer;
 mod lock;
+mod motion;
 mod registry;
 mod render;
 mod screencopy;

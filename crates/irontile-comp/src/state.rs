@@ -5,6 +5,7 @@
 //! events become layout commands, and the [`Frame`] that comes back becomes
 //! surface configures and render elements.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use irontile_layout::{
@@ -62,6 +63,7 @@ use smithay::{
 
 use crate::backend::Backend;
 use crate::config::Config;
+use crate::motion::moved;
 use crate::registry::Registry;
 
 /// The display of the nested backend, which always has exactly one.
@@ -167,6 +169,25 @@ pub struct Drag {
     /// Where the pointer was at the last motion, so each step is a delta.
     pub last: Point<f64, Logical>,
     pub kind: DragKind,
+    /// The window a carried one would change places with if it were let go now.
+    ///
+    /// Tracked as the pointer moves rather than worked out on release, because
+    /// it is also what is drawn picked out: you should be able to see where a
+    /// window is going to land before you drop it there.
+    pub onto: Option<WindowId>,
+}
+
+/// The two windows that should change places when a drag is let go.
+///
+/// `None` for every drag that is not a carry, for a carry dropped over nothing,
+/// and for one dropped back on itself -- which is what letting go without having
+/// gone anywhere looks like, and must not be mistaken for a rearrangement.
+pub fn swap_on_release(drag: Drag) -> Option<(WindowId, WindowId)> {
+    if !matches!(drag.kind, DragKind::Carry) {
+        return None;
+    }
+    let onto = drag.onto?;
+    (onto != drag.window).then_some((drag.window, onto))
 }
 
 /// What a drag is doing to the window it holds.
@@ -178,12 +199,25 @@ pub enum DragKind {
         horizontal: Option<Direction>,
         vertical: Option<Direction>,
     },
-    /// The whole window follows the pointer.
+    /// The whole window follows the pointer, and its new position is kept.
     ///
-    /// Only a floating window can be moved this way. Where a tiled one sits is
-    /// the layout's to decide, and dragging it somewhere would be overruled by
-    /// the next reflow.
+    /// A floating window: where it sits is its own, so the drag writes it down.
     Move,
+    /// A tiled window carried above the tree.
+    ///
+    /// Nothing in the layout changes while it is held -- where a tiled window
+    /// sits is the layout's to decide, and writing a position down would only be
+    /// overruled by the next reflow. Only the picture follows the pointer. On
+    /// release it changes places with whatever it was dropped on, which is a
+    /// thing the tree *can* say: the two windows swap cells.
+    ///
+    /// Swapping rather than inserting is deliberate. Dropping a window into a
+    /// tree that then has to decide which side of its neighbour it landed on,
+    /// and whether that makes a new split, is a great deal of guessing about
+    /// intent from a single point; swapping is unambiguous, reversible by doing
+    /// it again, and still rearranges the screen substantially -- a window
+    /// swapped between a tall pair and a wide one comes out a different shape.
+    Carry,
 }
 
 /// A connected display and the protocol object advertising it.
@@ -212,6 +246,24 @@ pub struct Irontile {
     pub redraw: bool,
     /// When a frame was last put on screen, for the backstop below.
     pub last_render: Instant,
+    /// Windows still being drawn after the desktop they are on went away.
+    ///
+    /// Not part of the frame: nothing may find them by asking where a window is,
+    /// because they are not anywhere any more. They exist so that changing
+    /// desktop can be watched rather than merely noticed, and they are dropped
+    /// the moment they have finished leaving.
+    pub departing: Vec<irontile_layout::Placement>,
+    /// Which desktop each display was last showing, so that a change can be
+    /// told from a reflow that happened for any of the other reasons.
+    pub showing: HashMap<OutputId, WorkspaceId>,
+    /// When animations were last stepped.
+    ///
+    /// Separate from `last_render` because they answer different questions: one
+    /// paces the screen, this one measures how much time an animation should be
+    /// charged for. Keeping them apart is what lets animations be advanced from
+    /// more than one place -- the event loop and every display's vblank --
+    /// without any of them double-counting.
+    pub last_advance: Instant,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -401,6 +453,9 @@ impl Irontile {
             dirty: true,
             redraw: true,
             last_render: Instant::now(),
+            departing: Vec::new(),
+            showing: HashMap::new(),
+            last_advance: Instant::now(),
             compositor_state: CompositorState::new::<Self>(dh),
             xdg_shell_state: XdgShellState::new::<Self>(dh),
             layer_shell_state: WlrLayerShellState::new::<Self>(dh),
@@ -905,10 +960,16 @@ impl Irontile {
                 );
             }
         }
+        // Before the frame is replaced, because what is leaving a display and
+        // what is arriving on it is the difference between the two frames.
+        self.begin_slides(&next);
         self.placements = next;
         // Everything that sets `dirty` arrives here, so this one line covers
         // every layout change without having to find them all.
         self.redraw = true;
+        // Before the borders, which are sized from where a window is being
+        // drawn rather than from where it is going.
+        self.sync_motion();
         self.sync_borders();
         self.sync_surface_outputs();
         self.refresh_keyboard_focus();
@@ -1170,28 +1231,69 @@ impl Irontile {
         let width = self.config.theme.border_width;
         let focused = self.config.theme.border_focused.clone();
         let unfocused = self.config.theme.border_unfocused.clone();
-        for placement in &self.placements.placements {
+        // While a window is being carried, the one it would change places with
+        // is picked out the way a focused window is. Nothing else is focused at
+        // that moment -- the carried window took focus when it was picked up --
+        // so this reads as "here", not as a second focused window.
+        let onto = self.drag.and_then(|drag| drag.onto);
+        let carried = self.dragged();
+        let opening = self.config.animation.open_style;
+        // Windows on a desktop that is sliding away still have a frame around
+        // them, and it has to travel with them: a border left behind at the
+        // cell would be a rectangle drawn around nothing.
+        for placement in self
+            .placements
+            .placements
+            .iter()
+            .chain(self.departing.iter())
+        {
             let Some(entry) = self.windows.get_mut(placement.window) else {
                 continue;
             };
-            let paint = if placement.focused {
-                &focused
-            } else {
-                &unfocused
-            };
             // A fullscreen window has no border at all, so it owns no strips.
-            let visible = placement.kind != PlacementKind::Fullscreen && width > 0;
-            let cell = placement.rect;
+            let fullscreen = placement.kind == PlacementKind::Fullscreen;
+            let visible = !fullscreen && width > 0;
+            // Where the window is being drawn this frame, not where it is headed,
+            // so the strips travel with it -- and around where it is actually
+            // drawn, so that a window leaning or arriving takes its frame with
+            // it. The same question the renderer asks, asked the same way, or
+            // the strips would be sized for one rectangle and drawn around
+            // another.
+            let (drawn, _) = crate::motion::drawn(
+                entry.rect.now(),
+                width,
+                fullscreen,
+                (Some(placement.window) == carried).then(|| entry.rect.velocity()),
+                (opening, entry.open.value()),
+            );
+            let cell = drawn.frame;
+            // Split into pieces if *either* end of the fade is a gradient: a
+            // border crossing from a gradient to a flat colour is a gradient all
+            // the way until it arrives.
+            let graded = !focused.is_solid() || !unfocused.is_solid();
             let segments = if visible {
-                crate::render::border_segments(cell, width, !paint.is_solid())
+                crate::render::border_segments(cell, width, graded)
             } else {
                 Vec::new()
             };
             entry
                 .border
                 .resize_with(segments.len(), SolidColorBuffer::default);
+            // Focus arrives as a number between the two paints rather than as a
+            // choice of one, so the border crosses from one to the other instead
+            // of switching. A drop target is picked out outright: it is not
+            // becoming focused, it is being pointed at.
+            let towards = if Some(placement.window) == onto {
+                1.0
+            } else {
+                entry.focus.value()
+            };
             for (buffer, rect) in entry.border.iter_mut().zip(&segments) {
-                let color = crate::render::segment_color(paint, cell, *rect);
+                let color = crate::motion::mix(
+                    crate::render::segment_color(&unfocused, cell, *rect),
+                    crate::render::segment_color(&focused, cell, *rect),
+                    towards,
+                );
                 buffer.update((rect.w.max(0), rect.h.max(0)), color);
             }
         }
@@ -1628,6 +1730,231 @@ impl Irontile {
     /// Asks for the screen to be drawn again.
     pub fn queue_redraw(&mut self) {
         self.redraw = true;
+    }
+
+    /// Moves every animation on by however long it has been, and asks for
+    /// another frame if any of them are still going.
+    ///
+    /// Safe to call as often as anything likes: the step is measured from the
+    /// clock rather than assumed to be one frame, so calling it twice in quick
+    /// succession advances by two small steps instead of two whole ones. That is
+    /// what lets both the event loop and each display's vblank drive it -- the
+    /// loop starts a transition promptly, and the vblanks then carry it at
+    /// whatever the display's actual refresh rate is rather than at the loop's
+    /// sixteen milliseconds.
+    pub fn advance(&mut self) -> bool {
+        let elapsed = self.last_advance.elapsed();
+        self.last_advance = Instant::now();
+        // A step longer than this is a compositor that was busy elsewhere --
+        // waking from suspend, a long reload -- and charging an animation for
+        // the whole gap makes it lurch. Nothing needs more than a frame's worth
+        // of progress at once.
+        const LONGEST: Duration = Duration::from_millis(100);
+        let dt = self.config.animation.dt(elapsed.min(LONGEST));
+        let motion = self.config.animation.layout;
+        // A window being carried by the pointer is on a different spring from
+        // one settling into a cell.
+        let carried = self.dragged();
+        let drag = self.config.animation.drag;
+
+        let focus = self.config.animation.focus;
+        let opening = self.config.animation.open;
+        let mut moving = false;
+        for (id, entry) in self.windows.entries_mut_with_ids() {
+            let motion = if Some(id) == carried { &drag } else { &motion };
+            moving |= entry.rect.step(motion, dt);
+            moving |= entry.focus.step(&focus, dt);
+            moving |= entry.open.step(&opening, dt);
+        }
+        // A window that has finished leaving has left. Kept until then so that
+        // the last frame of it going is drawn, and dropped immediately after so
+        // that a desktop nobody is looking at costs nothing.
+        if !self.departing.is_empty() {
+            let windows = &self.windows;
+            self.departing.retain(|placement| {
+                windows
+                    .get(placement.window)
+                    .is_some_and(|entry| entry.rect.moving())
+            });
+        }
+        if moving {
+            // The strips around a window are sized from its rectangle, so they
+            // have to be resized as it travels or the frame would sit at the
+            // destination while the window slid towards it.
+            self.sync_borders();
+            self.redraw = true;
+        }
+        moving
+    }
+
+    /// Puts every animation at its destination at once.
+    ///
+    /// For the moments when animating would be wrong rather than merely
+    /// unwanted: the session being taken away by a VT switch, and coming back
+    /// from one. Resuming a half-finished slide from before the session went
+    /// away would draw a frame of somewhere the desktop no longer is.
+    pub fn finish_animations(&mut self) {
+        // Whatever was on its way off the side is simply gone: there is nothing
+        // for it to finish arriving at.
+        self.departing.clear();
+        for placement in &self.placements.placements {
+            let rect = placement.rect;
+            if let Some(entry) = self.windows.get_mut(placement.window) {
+                entry.rect.snap(rect);
+            }
+        }
+        self.last_advance = Instant::now();
+        self.sync_borders();
+        self.redraw = true;
+    }
+
+    /// Sets up the desktops that are changing on each display.
+    ///
+    /// Called with the frame that is about to be applied, while `self.placements`
+    /// still holds the one being replaced: what leaves and what arrives is the
+    /// difference between the two, and both are needed at once.
+    ///
+    /// A window that leaves because its desktop went away is not the same as one
+    /// that leaves because it was closed or sent elsewhere, and only the first
+    /// should travel. So the question asked here is about the *display* -- is it
+    /// showing a different desktop than it was -- rather than about any window.
+    fn begin_slides(&mut self, next: &Frame) {
+        // Reaped here as well as when they settle: a window whose desktop came
+        // straight back is not leaving any more, and one that was closed while
+        // it left has nothing to draw.
+        self.departing
+            .retain(|p| !next.placements.iter().any(|q| q.window == p.window));
+
+        if !self.config.animation.enabled || self.session_lock.is_some() {
+            self.departing.clear();
+            for output in self.layout.outputs() {
+                if let Some(ws) = self.layout.active_workspace(output.id) {
+                    self.showing.insert(output.id, ws);
+                }
+            }
+            return;
+        }
+
+        let outputs: Vec<(OutputId, i32)> = self
+            .layout
+            .outputs()
+            .iter()
+            .map(|output| (output.id, output.logical.w))
+            .collect();
+        for (id, width) in outputs {
+            let Some(now) = self.layout.active_workspace(id) else {
+                continue;
+            };
+            let Some(was) = self.showing.insert(id, now) else {
+                // The first frame on this display. Nothing was showing, so
+                // nothing is leaving.
+                continue;
+            };
+            if was == now {
+                continue;
+            }
+            // A gap between the two desktops, so they are never both partly on
+            // screen with no seam to tell them apart.
+            let span = width + self.config.theme.border_width.max(8) * 4;
+            let (leaves, arrives) =
+                crate::motion::slide(self.desktop_order(was), self.desktop_order(now), span);
+
+            // What was on this display and is no longer anywhere: it goes on
+            // travelling, off the side it should.
+            let leaving: Vec<irontile_layout::Placement> = self
+                .placements
+                .placements
+                .iter()
+                .filter(|p| p.output == id && p.workspace == was)
+                .filter(|p| !next.placements.iter().any(|q| q.window == p.window))
+                .copied()
+                .collect();
+            for placement in leaving {
+                if let Some(entry) = self.windows.get_mut(placement.window) {
+                    entry.rect.retarget(moved(placement.rect, leaves, 0));
+                }
+                self.departing.push(placement);
+            }
+
+            // And what has arrived starts off the other side, so that the two
+            // move together. Snapped, not retargeted: it is not travelling from
+            // wherever it last happened to be, it is coming in from off screen.
+            for placement in next.placements.iter().filter(|p| p.output == id) {
+                if self
+                    .placements
+                    .placements
+                    .iter()
+                    .any(|q| q.window == placement.window)
+                {
+                    continue;
+                }
+                if let Some(entry) = self.windows.get_mut(placement.window) {
+                    entry.rect.snap(moved(placement.rect, arrives, 0));
+                }
+            }
+        }
+    }
+
+    /// The window the pointer is carrying, if it is carrying one.
+    ///
+    /// Only a move: dragging an edge is a resize, and a window being resized is
+    /// not being thrown anywhere. Leaning into a deliberate resize would make
+    /// the edge under the pointer stop matching the pointer.
+    pub fn dragged(&self) -> Option<WindowId> {
+        self.drag
+            .filter(|drag| matches!(drag.kind, DragKind::Move | DragKind::Carry))
+            .map(|drag| drag.window)
+    }
+
+    /// Where a desktop sits in the order they are shown in.
+    fn desktop_order(&self, ws: WorkspaceId) -> u32 {
+        crate::motion::order(
+            self.layout
+                .workspace(ws)
+                .and_then(|workspace| workspace.name.as_deref()),
+        )
+    }
+
+    /// Tells each window where it is going, so the renderer can take it there.
+    ///
+    /// A window's first placement is taken as fact rather than as a journey; see
+    /// [`crate::motion::AnimatedRect`]. With animation switched off, or while the
+    /// session is locked, every placement is a fact.
+    fn sync_motion(&mut self) {
+        let animate = self.config.animation.enabled && self.session_lock.is_none();
+        // A window being carried is following a hand, not a cell. The tree goes
+        // on saying where it belongs -- which is how it knows where to spring
+        // back to -- but until it is let go, that is not where it is drawn.
+        let carried = self
+            .drag
+            .filter(|drag| matches!(drag.kind, DragKind::Carry))
+            .map(|drag| drag.window);
+        for placement in &self.placements.placements {
+            if Some(placement.window) == carried {
+                continue;
+            }
+            let rect = placement.rect;
+            let Some(entry) = self.windows.get_mut(placement.window) else {
+                continue;
+            };
+            let focused = if placement.focused { 1.0 } else { 0.0 };
+            // The first time the tree says where a window goes is the window
+            // arriving. Asked before the rectangle is told, because telling it
+            // is what marks it as placed.
+            let arriving = !entry.rect.placed();
+            if animate {
+                entry.rect.retarget(rect);
+                entry.focus.retarget(focused);
+                if arriving {
+                    entry.open.snap(0.0);
+                    entry.open.retarget(1.0);
+                }
+            } else {
+                entry.rect.snap(rect);
+                entry.focus.snap(focused);
+                entry.open.snap(1.0);
+            }
+        }
     }
 
     /// Works out whether anything on screen is asking to stay awake.
@@ -2344,5 +2671,53 @@ mod tests {
         // staleness or a session that never draws again.
         assert!(render_now(false, RENDER_BACKSTOP));
         assert!(render_now(false, RENDER_BACKSTOP * 2));
+    }
+}
+
+#[cfg(test)]
+mod carrying {
+    use super::{Drag, DragKind, WindowId, swap_on_release};
+    use smithay::utils::Point;
+
+    fn drag(kind: DragKind, window: u64, onto: Option<u64>) -> Drag {
+        Drag {
+            window: WindowId(window),
+            last: Point::from((0.0, 0.0)),
+            kind,
+            onto: onto.map(WindowId),
+        }
+    }
+
+    #[test]
+    fn a_window_dropped_on_another_changes_places_with_it() {
+        let held = drag(DragKind::Carry, 1, Some(4));
+        assert_eq!(swap_on_release(held), Some((WindowId(1), WindowId(4))));
+    }
+
+    #[test]
+    fn a_window_dropped_over_nothing_goes_back_where_it_came_from() {
+        // No command at all: the tree never stopped saying where it belongs, so
+        // letting go is enough to send it back.
+        assert_eq!(swap_on_release(drag(DragKind::Carry, 1, None)), None);
+    }
+
+    #[test]
+    fn a_window_dropped_on_itself_is_not_a_rearrangement() {
+        // What picking a window up and putting it straight down looks like. A
+        // swap with itself would still be a layout change, and a layout change
+        // is a thing that can be undone and reported.
+        assert_eq!(swap_on_release(drag(DragKind::Carry, 7, Some(7))), None);
+    }
+
+    #[test]
+    fn dragging_a_floating_window_or_an_edge_swaps_nothing() {
+        // A floating window keeps wherever it was put, and a resize is not a
+        // move at all. Neither should rearrange the tree on release.
+        assert_eq!(swap_on_release(drag(DragKind::Move, 1, Some(4))), None);
+        let resize = DragKind::Resize {
+            horizontal: None,
+            vertical: None,
+        };
+        assert_eq!(swap_on_release(drag(resize, 1, Some(4))), None);
     }
 }

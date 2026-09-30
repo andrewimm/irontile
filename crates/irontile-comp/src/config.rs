@@ -26,6 +26,8 @@ pub struct Config {
     pub cursor: CursorConfig,
     /// How pointing devices behave.
     pub input: InputConfig,
+    /// How things move on their way from one place to another.
+    pub animation: AnimationConfig,
     /// Per-display settings, matched by connector name.
     pub outputs: Vec<OutputConfig>,
     /// Commands run once the compositor is up.
@@ -51,6 +53,7 @@ impl Default for Config {
             keymap: Keymap::defaults(),
             cursor: CursorConfig::default(),
             input: InputConfig::default(),
+            animation: AnimationConfig::default(),
             outputs: Vec::new(),
             startup: Vec::new(),
             session: SessionConfig::default(),
@@ -170,6 +173,7 @@ impl Config {
             keymap,
             cursor: file.cursor,
             input: file.input,
+            animation: file.animation,
             outputs,
             startup,
             session: file.session,
@@ -194,6 +198,131 @@ pub struct InputConfig {
     pub natural_scroll: Option<bool>,
     pub touchpad: TouchpadConfig,
     pub keyboard: KeyboardConfig,
+}
+
+/// How things move on their way from one place to another.
+///
+/// One channel so far. The others in the design -- a window opening, focus
+/// moving, a desktop sliding past, a window being dragged -- arrive with the
+/// code that animates them rather than as settings that do nothing.
+///
+/// The bar and the notification daemon have channels of their own and read them
+/// from their own files, because a window sliding to a new cell and a title
+/// scrolling up to reveal the next one are not the same thing and should not be
+/// forced to share a number.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AnimationConfig {
+    /// Off means every change is instant, which is also what the compositor
+    /// falls back to when it cannot keep up.
+    pub enabled: bool,
+    /// How fast time passes for animations. Half is half speed; small numbers
+    /// are for watching a transition closely enough to tune it.
+    pub time_scale: f32,
+    /// Windows moving and resizing as the tree reflows: an open, a close, a
+    /// swap, a resize, a gap change.
+    pub layout: irontile_motion::Motion,
+    /// A window being dragged, which wants a much tighter spring than a reflow:
+    /// it is following a hand rather than settling into a place, and a window
+    /// that lagged behind the pointer the way a retiling one lags would feel
+    /// like a window being dragged through treacle.
+    pub drag: irontile_motion::Motion,
+    /// Focus moving from one window to another: the border colour, and how far
+    /// an unfocused window is faded if `dim_unfocused` asks for that.
+    ///
+    /// A curve rather than a spring, and the only channel that is. A colour
+    /// crossfade has nothing that can interrupt it part way, so the momentum a
+    /// spring keeps buys nothing here.
+    pub focus: irontile_motion::Motion,
+    /// A window arriving. The shape of the arrival is `open_style`.
+    ///
+    /// Nothing here covers a window leaving: once a client has destroyed its
+    /// surface there is no picture of it left to animate, and keeping one would
+    /// mean holding a copy of every window against the chance that it closes.
+    pub open: irontile_motion::Motion,
+    /// What a window arriving looks like.
+    pub open_style: OpenStyle,
+    /// How much of an unfocused window is drawn, from fully faded to fully
+    /// there.
+    ///
+    /// One by default, which is no fading at all. What this does is make the
+    /// window translucent rather than dark -- without a shader there is nothing
+    /// to darken it with -- so an unfocused window blends into whatever is
+    /// behind it. Against the desktop background that reads as dimming, which is
+    /// the intent; where two floating windows overlap it reads as see-through,
+    /// which is not. It also means the window can no longer be handed to a
+    /// hardware plane. The motion lab uses 0.62.
+    pub dim_unfocused: f32,
+}
+
+impl Default for AnimationConfig {
+    fn default() -> Self {
+        AnimationConfig {
+            enabled: true,
+            time_scale: 1.0,
+            // Quick, with just enough softness to read as movement.
+            layout: irontile_motion::Motion::spring(0.38, 0.8),
+            drag: irontile_motion::Motion::spring(0.16, 0.82),
+            focus: irontile_motion::Motion::curve(160, irontile_motion::Curve::OutCubic),
+            open: irontile_motion::Motion::spring(0.34, 0.68),
+            open_style: OpenStyle::Zoom,
+            dim_unfocused: 1.0,
+        }
+    }
+}
+
+impl AnimationConfig {
+    /// The slowest and fastest time may be made to pass.
+    ///
+    /// Zero would stop time and leave every animation permanently half finished,
+    /// which looks exactly like a compositor that has hung. The upper end is
+    /// only there so a typo cannot make every transition instant in a way that
+    /// reads as animation being broken rather than switched off.
+    const SCALE: std::ops::RangeInclusive<f32> = 0.05..=20.0;
+
+    /// How much animated time one frame of real time is worth.
+    ///
+    /// Clamped here rather than when the file is read, so that what a person
+    /// wrote is still what the file says.
+    pub fn dt(&self, real: std::time::Duration) -> std::time::Duration {
+        let scale = if self.time_scale.is_finite() {
+            self.time_scale
+                .clamp(*Self::SCALE.start(), *Self::SCALE.end())
+        } else {
+            1.0
+        };
+        // Ordinary speed is left exactly alone rather than multiplied by one.
+        // `Duration::mul_f32` goes out to an f32 and back, which turns a
+        // sixteen millisecond frame into 16.000001ms -- and by how much depends
+        // on which compiler did the rounding, which is not something the length
+        // of a frame should depend on.
+        if scale == 1.0 {
+            return real;
+        }
+        real.mul_f32(scale)
+    }
+}
+
+/// What a window arriving looks like.
+///
+/// The names are the motion lab's, and so is the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenStyle {
+    /// Slightly small and transparent, growing into place. Suggests the window
+    /// coming towards you rather than being drawn in stages.
+    #[default]
+    Zoom,
+    /// From nothing at the centre of its cell out to the whole of it.
+    Grow,
+    /// Up from below, fading in. The gentlest of them, and the only one that
+    /// says which direction the window came from.
+    Slide,
+    /// Nothing but opacity. For when any movement at all is too much.
+    Fade,
+    /// No arrival: the window is simply there, the way it was before any of
+    /// this.
+    None,
 }
 
 /// The keymap every keyboard on the seat is given.
@@ -423,6 +552,7 @@ struct ConfigFile {
     session: SessionConfig,
     cursor: CursorConfig,
     input: InputConfig,
+    animation: AnimationConfig,
     #[serde(rename = "output")]
     outputs: Vec<OutputFile>,
 }
@@ -439,6 +569,7 @@ impl Default for ConfigFile {
             session: SessionConfig::default(),
             cursor: CursorConfig::default(),
             input: InputConfig::default(),
+            animation: AnimationConfig::default(),
             outputs: Vec::new(),
         }
     }
@@ -893,6 +1024,95 @@ mod tests {
             Config::parse("[input.touchpad]\nclick_method = \"clickfingers\"\n").is_err(),
             "a method that does not exist should be refused, not ignored"
         );
+    }
+
+    #[test]
+    fn a_desktop_that_says_nothing_about_motion_still_moves() {
+        let config = Config::parse("").unwrap();
+        assert!(config.animation.enabled);
+        assert_eq!(config.animation.time_scale, 1.0);
+        assert!(matches!(
+            config.animation.layout,
+            irontile_motion::Motion::Spring { .. }
+        ));
+    }
+
+    #[test]
+    fn a_channel_may_be_a_spring_or_a_curve() {
+        let config = Config::parse(
+            r#"
+            [animation]
+            time_scale = 0.25
+
+            [animation.layout]
+            kind = "bezier"
+            duration_ms = 300
+            points = [0.22, 1.0, 0.36, 1.0]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.animation.time_scale, 0.25);
+        assert_eq!(
+            config.animation.layout,
+            irontile_motion::Motion::bezier(300, [0.22, 1.0, 0.36, 1.0])
+        );
+    }
+
+    #[test]
+    fn animation_can_be_switched_off_outright() {
+        let config = Config::parse("[animation]\nenabled = false\n").unwrap();
+        assert!(!config.animation.enabled);
+    }
+
+    #[test]
+    fn a_misspelt_motion_setting_is_refused_rather_than_ignored() {
+        assert!(
+            Config::parse("[animation.layout]\nkind = \"spring\"\ndamping = 0.9\n").is_err(),
+            "the field is damping_ratio; a near miss should say so"
+        );
+        assert!(
+            Config::parse("[animation]\ntimescale = 2.0\n").is_err(),
+            "an unknown key under [animation] should be an error"
+        );
+    }
+
+    #[test]
+    fn the_time_scale_stretches_a_frame_without_ever_stopping_time() {
+        use std::time::Duration;
+        let frame = Duration::from_millis(16);
+        let at = |scale: f32| {
+            let config = Config::parse(&format!("[animation]\ntime_scale = {scale}\n")).unwrap();
+            config.animation.dt(frame)
+        };
+        // Exact, because ordinary speed does not go near a float at all.
+        assert_eq!(at(1.0), frame);
+        // Scaled, which does, so these are asked about to the microsecond
+        // rather than to the nanosecond: `Duration::mul_f32` rounds the last
+        // digit differently on different compilers, and a test that insisted
+        // otherwise would fail on whichever toolchain it was not written with.
+        let about = |scaled: Duration, want: Duration| {
+            let apart = scaled.max(want) - scaled.min(want);
+            assert!(
+                apart < Duration::from_micros(1),
+                "{scaled:?} is not about {want:?}"
+            );
+        };
+        // Half speed: a frame of real time is worth half a frame of animation.
+        about(at(0.5), Duration::from_millis(8));
+        about(at(2.0), Duration::from_millis(32));
+        // Zero would leave every transition permanently half finished, which
+        // looks exactly like a compositor that has hung.
+        assert!(at(0.0) > Duration::ZERO);
+        assert!(at(-4.0) > Duration::ZERO);
+        assert!(at(1e9) < Duration::from_secs(1));
+        // `nan` is spelled in lower case in TOML, so a file cannot arrive here
+        // with this in it -- but `div` on a NaN duration panics, and the guard
+        // is one line, so it is cheaper to hold than to reason about.
+        let broken = AnimationConfig {
+            time_scale: f32::NAN,
+            ..AnimationConfig::default()
+        };
+        assert_eq!(broken.dt(frame), frame);
     }
 
     #[test]

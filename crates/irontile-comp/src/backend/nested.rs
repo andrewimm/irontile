@@ -87,6 +87,11 @@ pub fn run(options: Options) -> anyhow::Result<()> {
                 // Something moved, so ask the host for a frame to show it in.
                 state.backend.request_redraw();
             }
+            // Nested has no vblank of its own to hang a pump on, so the tick is
+            // the whole clock: every animated frame is asked for here.
+            if state.advance() {
+                state.backend.request_redraw();
+            }
             if wants_redraw && let Err(err) = draw(state) {
                 tracing::error!(%err, "failed to render");
             }
@@ -152,9 +157,12 @@ fn nested_spec(
 fn draw(state: &mut Irontile) -> anyhow::Result<()> {
     // Split the compositor into disjoint borrows: the renderer and the state it
     // is drawing now live in the same struct.
+    // Read before the borrow below splits the compositor into its parts.
+    let state_dragged = state.dragged();
     let Irontile {
         backend,
         placements,
+        departing,
         windows,
         unmanaged,
         outputs,
@@ -176,6 +184,10 @@ fn draw(state: &mut Irontile) -> anyhow::Result<()> {
     let (renderer, mut framebuffer) = graphics.bind().map_err(|e| anyhow::anyhow!("{e}"))?;
     let scene = Scene {
         frame: placements,
+        departing,
+        dragged: state_dragged,
+        dim: config.animation.dim_unfocused,
+        open_style: config.animation.open_style,
         windows,
         outputs,
         layout,

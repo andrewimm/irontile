@@ -403,12 +403,40 @@ fn apply_drag(state: &mut Irontile, drag: Drag, location: Point<f64, Logical>) {
                 });
             }
         }
+        // Nothing is applied: a carried window moves in the picture alone, and
+        // the tree goes on saying it is in the cell it will return to if this
+        // is let go over nothing.
+        DragKind::Carry => {
+            if let Some(entry) = state.windows.get_mut(drag.window) {
+                let held = entry.rect.target();
+                entry.rect.retarget(irontile_layout::Rect::new(
+                    held.x + dx,
+                    held.y + dy,
+                    held.w,
+                    held.h,
+                ));
+            }
+        }
     }
 
+    let onto = match drag.kind {
+        // What it would change places with, which is whatever is under the
+        // pointer that is not the window being carried.
+        DragKind::Carry => state
+            .window_at(location)
+            .filter(|window| *window != drag.window),
+        _ => None,
+    };
     state.drag = Some(Drag {
         last: location,
+        onto,
         ..drag
     });
+    if onto != drag.onto {
+        // The window picked out as the destination has changed, so the borders
+        // have something new to say.
+        state.queue_redraw();
+    }
     state.reflow();
 }
 
@@ -419,7 +447,7 @@ fn drag_cursor(kind: DragKind) -> Option<CursorIcon> {
             horizontal,
             vertical,
         } => edge_cursor(horizontal, vertical),
-        DragKind::Move => Some(CursorIcon::Grabbing),
+        DragKind::Move | DragKind::Carry => Some(CursorIcon::Grabbing),
     }
 }
 
@@ -478,7 +506,16 @@ pub fn button_event(state: &mut Irontile, button: u32, button_state: ButtonState
     let location = pointer.current_location();
 
     // A release always ends a drag, whichever button caused it.
-    if button_state == ButtonState::Released && state.drag.take().is_some() {
+    if button_state == ButtonState::Released
+        && let Some(drag) = state.drag.take()
+    {
+        // A carried window lands where it was dropped: the two change places.
+        // Dropped on nothing, it springs back to its own cell, which needs no
+        // command -- the layout never stopped saying that is where it belongs.
+        if let Some((a, b)) = crate::state::swap_on_release(drag) {
+            state.apply(Command::SwapWindows { a, b });
+        }
+        state.reflow();
         pointer.frame(state);
         return;
     }
@@ -504,6 +541,7 @@ pub fn button_event(state: &mut Irontile, button: u32, button_state: ButtonState
                 horizontal,
                 vertical,
             },
+            onto: None,
         });
         // Tell the client the pointer left, so it stops drawing hover states
         // for a pointer it will not hear from again until the drag ends.
@@ -521,20 +559,25 @@ pub fn button_event(state: &mut Irontile, button: u32, button_state: ButtonState
         return;
     }
 
-    // Super and the left button moves a floating window, the mirror of Super
-    // and the right button resizing one. A tiled window is deliberately not
-    // draggable: where it sits is the layout's to decide, and the next reflow
-    // would undo the move anyway.
+    // Super and the left button picks a window up, the mirror of Super and the
+    // right button resizing one. A floating window keeps wherever it is put; a
+    // tiled one is carried above the tree and changes places with whatever it
+    // is dropped on.
     if button_state == ButtonState::Pressed
         && button == BTN_LEFT
         && logo
         && !pointer.is_grabbed()
-        && let Some(window) = state.floating_at(location)
+        && let Some(window) = state.window_at(location)
     {
+        let kind = match state.floating_at(location) {
+            Some(_) => DragKind::Move,
+            None => DragKind::Carry,
+        };
         state.drag = Some(Drag {
             window,
             last: location,
-            kind: DragKind::Move,
+            kind,
+            onto: None,
         });
         // Tell the client the pointer left, so it stops drawing hover states
         // for a pointer it will not hear from again until the drag ends.
@@ -569,6 +612,7 @@ pub fn button_event(state: &mut Irontile, button: u32, button_state: ButtonState
                 horizontal,
                 vertical,
             },
+            onto: None,
         });
         return;
     }

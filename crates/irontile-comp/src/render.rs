@@ -15,6 +15,7 @@ use smithay::backend::renderer::element::memory::{
 };
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::element::{AsRenderElements, Kind};
 use smithay::backend::renderer::{ImportAll, ImportMem, Renderer};
 use smithay::desktop::layer_map_for_output;
@@ -26,9 +27,19 @@ use crate::registry::Registry;
 use crate::state::OutputEntry;
 use crate::theme::{Paint, Theme};
 
+/// How far a scale may be from one and still count as one.
+///
+/// A sixteenth of a pixel on a thousand-pixel window: below this the difference
+/// is not drawable, and staying on the unscaled path is worth more than being
+/// exact about a rounding error.
+const SCALE_ENOUGH: f64 = 1.0 / 16_000.0;
+
 render_elements! {
     pub IrontileElement<R> where R: ImportAll + ImportMem;
     Surface = WaylandSurfaceRenderElement<R>,
+    /// A window part way through changing size, drawn from a buffer that is
+    /// either the size it came from or the size it is going to.
+    Scaled = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
     Border = SolidColorRenderElement,
     /// Any image the compositor rasterised itself: the pointer, and the mark
     /// that says the screen is being copied. One variant rather than two
@@ -44,6 +55,15 @@ render_elements! {
 /// once.
 pub struct Scene<'a> {
     pub frame: &'a Frame,
+    /// What a window arriving looks like.
+    pub open_style: crate::config::OpenStyle,
+    /// How much of an unfocused window is drawn. One means no fading.
+    pub dim: f32,
+    /// The window the pointer is carrying, which is the only one that leans
+    /// into the way it is moving.
+    pub dragged: Option<irontile_layout::WindowId>,
+    /// Windows still being drawn after their desktop went away.
+    pub departing: &'a [irontile_layout::Placement],
     pub windows: &'a Registry,
     pub outputs: &'a [OutputEntry],
     pub layout: &'a Layout,
@@ -260,21 +280,39 @@ where
         .frame
         .placements
         .iter()
+        // Windows whose desktop is on its way off the side. They are no longer
+        // anywhere as far as the layout is concerned, which is why they arrive
+        // separately: the frame is what is, and this is what is still visible.
+        .chain(scene.departing.iter())
         .filter(|p| p.output == output)
         .collect();
-    ordered.sort_by_key(|p| std::cmp::Reverse(p.z));
+    // A carried window is drawn above everything, whatever the tree thinks of
+    // its stacking: it is being held over the desktop, and one that slid under
+    // its own neighbours would look like it had been dropped already.
+    ordered.sort_by_key(|p| {
+        let carried = scene.dragged == Some(p.window);
+        (std::cmp::Reverse(carried), std::cmp::Reverse(p.z))
+    });
 
     for placement in ordered {
         let Some(entry) = scene.windows.get(placement.window) else {
             continue;
         };
-        let cell = local(placement.rect, origin);
-        let content = match placement.kind {
-            // A fullscreen window covers the display outright; a border would
-            // make it not fullscreen.
-            PlacementKind::Fullscreen => cell,
-            _ => cell.inset(scene.theme.border_width),
-        };
+        // Where the window is being drawn, which is where the tree put it once
+        // it has finished travelling there.
+        let cell = local(entry.rect.now(), origin);
+        // The window leans if it is being carried, and is still on its way in if
+        // it has only just been given a cell. Both move its frame with it, which
+        // is why this is one call and not three steps here: `sync_borders` asks
+        // the same question and the two must come back with the same answer.
+        let (drawn, arrival) = crate::motion::drawn(
+            cell,
+            scene.theme.border_width,
+            placement.kind == PlacementKind::Fullscreen,
+            (scene.dragged == Some(placement.window)).then(|| entry.rect.velocity()),
+            (scene.open_style, entry.open.value()),
+        );
+        let content = drawn.content;
 
         // The cell is where the *window* goes, and a window is not the whole
         // buffer it arrives in. A client drawing its own decorations puts its
@@ -295,15 +333,83 @@ where
             content.h,
         );
 
-        out.extend(
-            AsRenderElements::<R>::render_elements::<IrontileElement<R>>(
-                &entry.window,
-                renderer,
-                to_physical(buffer, scale),
-                scale,
-                1.0,
-            ),
-        );
+        // A client is told its destination size the moment the tree decides on
+        // it, so the buffer it has is the size it will be when it arrives rather
+        // than the size being drawn this frame. Scaling that buffer to the
+        // travelling rectangle is what makes a resize look like a resize instead
+        // of the window jumping when the new buffer lands.
+        //
+        // A window that has arrived scales by exactly one, and is deliberately
+        // left on the plain path: an element wrapped in anything cannot be
+        // handed straight to a hardware plane, and a still desktop should keep
+        // being as cheap as it was before any of this existed.
+        let committed = entry.window.geometry().size;
+        let (sx, sy) = if committed.w > 0 && committed.h > 0 {
+            (
+                f64::from(content.w) / f64::from(committed.w),
+                f64::from(content.h) / f64::from(committed.h),
+            )
+        } else {
+            (1.0, 1.0)
+        };
+        let at = to_physical(buffer, scale);
+        // Faded back while it does not have the keyboard, if a fade was asked
+        // for. One means no fade at all, which is the default and the path that
+        // leaves a window able to go on a hardware plane.
+        let alpha = match scene.dim {
+            dim if dim >= 1.0 => 1.0,
+            dim => dim + (1.0 - dim) * entry.focus.value().clamp(0.0, 1.0),
+        } * arrival;
+
+        // A window being thrown leans, and if the renderer can turn one it also
+        // turns. Tried before the ordinary elements are built, because a turned
+        // window is drawn from one element of its own and none of the rest
+        // applies to it -- including its border, which would otherwise be a
+        // straight frame around something that is no longer straight.
+        //
+        // Only the root surface turns, so a window that paints itself across
+        // several subsurfaces would show only its main one while it did. That is
+        // why this is reserved for the window in somebody's hand: it lasts as
+        // long as the throw and no longer.
+        // A window in somebody's hand is drawn by one element that turns both it
+        // and its frame. Not only while it is leaning: the same element draws it
+        // at rest as well, so that picking a window up and putting it down are
+        // the only two moments anything changes hands. Switching element part
+        // way through a drag is what made the border blink.
+        if (sx - 1.0).abs() < SCALE_ENOUGH && (sy - 1.0).abs() < SCALE_ENOUGH {
+            out.extend(
+                AsRenderElements::<R>::render_elements::<IrontileElement<R>>(
+                    &entry.window,
+                    renderer,
+                    at,
+                    scale,
+                    alpha,
+                ),
+            );
+        } else {
+            // Scaled about the corner the window is drawn from, not the corner
+            // of its buffer: a client with shadows has a buffer that starts
+            // above and to the left of the window, and scaling about that would
+            // make windows with shadows drift as they resized while windows
+            // without them stayed put.
+            let about = to_physical(content, scale);
+            let factor = Scale::from((sx, sy));
+            out.extend(
+                AsRenderElements::<R>::render_elements::<WaylandSurfaceRenderElement<R>>(
+                    &entry.window,
+                    renderer,
+                    at,
+                    scale,
+                    alpha,
+                )
+                .into_iter()
+                .map(|element| {
+                    IrontileElement::Scaled(RescaleRenderElement::from_element(
+                        element, about, factor,
+                    ))
+                }),
+            );
+        }
 
         if placement.kind == PlacementKind::Fullscreen || scene.theme.border_width <= 0 {
             continue;
@@ -316,7 +422,9 @@ where
         } else {
             &scene.theme.border_unfocused
         };
-        let rects = border_segments(cell, scene.theme.border_width, !paint.is_solid());
+        // Around where the window is actually drawn, not around the cell: a
+        // window that has leaned or is still arriving takes its frame with it.
+        let rects = border_segments(drawn.frame, scene.theme.border_width, !paint.is_solid());
         for (buffer, rect) in entry.border.iter().zip(rects) {
             out.push(IrontileElement::Border(
                 SolidColorRenderElement::from_buffer(
