@@ -786,7 +786,8 @@ pub struct Slide {
     /// How far the strip still has to travel, in logical pixels. Zero when the
     /// desktop being shown is where it belongs.
     offset: Animated,
-    /// Where this slide began, which is where the desktop that is leaving sits.
+    /// How far the desktop being left behind sits from the one arriving: one
+    /// span, signed. Positive when the arriving desktop came from the right.
     from: f32,
 }
 
@@ -801,15 +802,26 @@ impl Default for Slide {
 }
 
 impl Slide {
-    /// Starts a desktop change. `span` is how far apart the two desktops are:
-    /// negative when the arriving one is to the right, so the strip moves left.
+    /// Starts a desktop change. `span` is where the arriving desktop stands
+    /// relative to the one being left: positive when it is to the right, so
+    /// that it travels in from the right and the strip moves left.
     ///
-    /// Interrupting one keeps the speed it had -- switching back and forth
-    /// quickly should feel like pushing a thing that is already moving, not
-    /// like starting again.
+    /// Interrupting one keeps the speed it had. Switching back and forth
+    /// quickly should feel like pushing something already moving rather than
+    /// starting again, and the arithmetic for that is the same arithmetic as
+    /// starting from rest: the desktop arriving is one span from the one being
+    /// left, which is wherever *that* one has got to. From rest it has got
+    /// nowhere, so the offset begins a span from home; mid-slide it is still
+    /// travelling, so the offset begins a span from there. Either way the two
+    /// stay exactly one span apart and nothing jumps.
+    ///
+    /// `nudge` rather than `snap` is the whole of it: it moves the value and
+    /// leaves the velocity alone. It also means this does not read the old
+    /// `from`, so a slide that settled without being finished off cannot leave
+    /// a stale span behind to corrupt the next one.
     pub fn start(&mut self, span: f32) {
         self.from = span;
-        self.offset.snap(span);
+        self.offset.nudge(span);
         self.offset.retarget(0.0);
     }
 
@@ -903,12 +915,63 @@ mod sliding {
         for _ in 0..6 {
             slide.step(&spring(), Duration::from_millis(16));
         }
-        let moving = slide.arriving();
-        assert!(moving > -2296, "it should have travelled some way");
-        // Going back to where it came from starts from here, not from scratch.
+        let arriving = slide.arriving();
+        let leaving = slide.leaving();
+        assert!(arriving > -2296, "it should have travelled some way");
+
+        // Going back is not a new journey. The two desktops swap roles where
+        // they stand: neither moves a pixel at the moment of the turn.
         slide.start(2296.0);
-        assert_eq!(slide.arriving(), 2296);
-        assert_eq!(slide.leaving(), 0);
+        assert_eq!(
+            slide.arriving(),
+            leaving,
+            "the desktop coming back should be where it had got to"
+        );
+        assert_eq!(
+            slide.leaving(),
+            arriving,
+            "and the one now leaving should not have moved either"
+        );
+        assert_ne!(
+            slide.arriving(),
+            2296,
+            "it should not have thrown itself a whole span away and started over"
+        );
+
+        // And the speed survives the turn: it was travelling one way, so for a
+        // frame or two it carries on that way before the spring hauls it back.
+        let turned = slide.arriving();
+        slide.step(&spring(), Duration::from_millis(16));
+        assert!(
+            slide.arriving() > turned,
+            "momentum should carry it past the turn rather than vanish at it"
+        );
+    }
+
+    #[test]
+    fn a_second_switch_the_same_way_carries_on_from_where_it_is() {
+        let mut slide = Slide::default();
+        slide.start(-2296.0);
+        for _ in 0..6 {
+            slide.step(&spring(), Duration::from_millis(16));
+        }
+        let arriving = slide.arriving();
+
+        // Pressing on to a third desktop, in the same direction. The one being
+        // left is the one that was arriving, so it stays where it is, and the
+        // new one is a span beyond it -- which is further than a span from
+        // home, and the reason this cannot simply negate the last span.
+        slide.start(-2296.0);
+        assert_eq!(
+            slide.leaving(),
+            arriving,
+            "the desktop now leaving should be where it had got to"
+        );
+        assert_eq!(
+            slide.arriving(),
+            arriving - 2296,
+            "and the one arriving a span beyond that"
+        );
     }
 
     #[test]
