@@ -234,6 +234,10 @@ pub struct AnimationConfig {
     /// crossfade has nothing that can interrupt it part way, so the momentum a
     /// spring keeps buys nothing here.
     pub focus: irontile_motion::Motion,
+    /// Desktops sliding past one another when the display changes which one it
+    /// shows. Slower and more damped than a reflow, because it is the whole
+    /// screen moving rather than one window finding its place.
+    pub workspace: irontile_motion::Motion,
     /// A window arriving. The shape of the arrival is `open_style`.
     ///
     /// Nothing here covers a window leaving: once a client has destroyed its
@@ -264,6 +268,7 @@ impl Default for AnimationConfig {
             layout: irontile_motion::Motion::spring(0.38, 0.8),
             drag: irontile_motion::Motion::spring(0.16, 0.82),
             focus: irontile_motion::Motion::curve(160, irontile_motion::Curve::OutCubic),
+            workspace: irontile_motion::Motion::spring(0.5, 0.9),
             open: irontile_motion::Motion::spring(0.34, 0.68),
             open_style: OpenStyle::Zoom,
             dim_unfocused: 1.0,

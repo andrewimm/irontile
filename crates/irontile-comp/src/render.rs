@@ -289,6 +289,10 @@ where
     // A carried window is drawn above everything, whatever the tree thinks of
     // its stacking: it is being held over the desktop, and one that slid under
     // its own neighbours would look like it had been dropped already.
+    // Which of these are on the desktop that is leaving rather than the one
+    // arriving. They sit one span further along the same strip.
+    let departing: Vec<irontile_layout::WindowId> =
+        scene.departing.iter().map(|p| p.window).collect();
     ordered.sort_by_key(|p| {
         let carried = scene.dragged == Some(p.window);
         (std::cmp::Reverse(carried), std::cmp::Reverse(p.z))
@@ -300,7 +304,23 @@ where
         };
         // Where the window is being drawn, which is where the tree put it once
         // it has finished travelling there.
-        let cell = local(entry.rect.now(), origin);
+        // The display's own offset, which is how a desktop slides: one number
+        // for every window on it, so the whole desktop moves as one piece and
+        // nothing on it can drift relative to anything else. A window that is
+        // travelling to a new cell goes on doing so underneath it.
+        let strip = scene
+            .outputs
+            .iter()
+            .find(|entry| entry.id == output)
+            .map(|entry| {
+                if departing.contains(&placement.window) {
+                    entry.slide.leaving()
+                } else {
+                    entry.slide.arriving()
+                }
+            })
+            .unwrap_or(0);
+        let cell = local(crate::motion::moved(entry.rect.now(), strip, 0), origin);
         // The window leans if it is being carried, and is still on its way in if
         // it has only just been given a cell. Both move its frame with it, which
         // is why this is one call and not three steps here: `sync_borders` asks

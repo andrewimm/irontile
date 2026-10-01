@@ -63,7 +63,6 @@ use smithay::{
 
 use crate::backend::Backend;
 use crate::config::Config;
-use crate::motion::moved;
 use crate::registry::Registry;
 
 /// The display of the nested backend, which always has exactly one.
@@ -226,6 +225,11 @@ pub struct OutputEntry {
     pub id: OutputId,
     pub output: Output,
     global: GlobalId,
+    /// This display's desktops, sliding past one another.
+    ///
+    /// One number for the whole display rather than one per window: see
+    /// [`crate::motion::Slide`].
+    pub slide: crate::motion::Slide,
 }
 
 pub struct Irontile {
@@ -676,6 +680,7 @@ impl Irontile {
                         id: spec.id,
                         output,
                         global,
+                        slide: crate::motion::Slide::default(),
                     });
                     self.outputs.last().expect("just pushed")
                 }
@@ -1766,15 +1771,26 @@ impl Irontile {
             moving |= entry.focus.step(&focus, dt);
             moving |= entry.open.step(&opening, dt);
         }
-        // A window that has finished leaving has left. Kept until then so that
-        // the last frame of it going is drawn, and dropped immediately after so
-        // that a desktop nobody is looking at costs nothing.
+        // Each display's desktops, which move as one rather than as a crowd.
+        let sliding = self.config.animation.workspace;
+        for entry in &mut self.outputs {
+            moving |= entry.slide.step(&sliding, dt);
+        }
+
+        // A desktop that has finished leaving has left. Its windows are kept
+        // until the strip has carried them off the side, and dropped the moment
+        // it has, so a desktop nobody is looking at costs nothing. The question
+        // is asked of the display now rather than of each window: it is the
+        // display that is moving.
         if !self.departing.is_empty() {
+            let outputs = &self.outputs;
             let windows = &self.windows;
             self.departing.retain(|placement| {
-                windows
-                    .get(placement.window)
-                    .is_some_and(|entry| entry.rect.moving())
+                windows.get(placement.window).is_some()
+                    && outputs
+                        .iter()
+                        .find(|entry| entry.id == placement.output)
+                        .is_some_and(|entry| entry.slide.moving())
             });
         }
         if moving {
@@ -1795,8 +1811,11 @@ impl Irontile {
     /// away would draw a frame of somewhere the desktop no longer is.
     pub fn finish_animations(&mut self) {
         // Whatever was on its way off the side is simply gone: there is nothing
-        // for it to finish arriving at.
+        // for it to finish arriving at, and the strip is put where it belongs.
         self.departing.clear();
+        for entry in &mut self.outputs {
+            entry.slide.finish();
+        }
         for placement in &self.placements.placements {
             let rect = placement.rect;
             if let Some(entry) = self.windows.get_mut(placement.window) {
@@ -1856,11 +1875,25 @@ impl Irontile {
             // A gap between the two desktops, so they are never both partly on
             // screen with no seam to tell them apart.
             let span = width + self.config.theme.border_width.max(8) * 4;
-            let (leaves, arrives) =
+            let (_leaves, arrives) =
                 crate::motion::slide(self.desktop_order(was), self.desktop_order(now), span);
 
-            // What was on this display and is no longer anywhere: it goes on
-            // travelling, off the side it should.
+            // The display slides; the windows on it do not. Nothing here touches
+            // a single window's rectangle, which is the whole point: a desktop
+            // is a rigid thing, so moving it is one number. With a number each,
+            // the band holds together only while every window happens to start
+            // at rest, and one that was still settling when the desktop changed
+            // falls a dozen pixels out of step with its neighbours.
+            //
+            // It also means a window may go on resizing while the desktop
+            // slides, which is right, and was not possible when the two were
+            // fighting over the same rectangle.
+            if let Some(entry) = self.outputs.iter_mut().find(|entry| entry.id == id) {
+                entry.slide.start(arrives as f32);
+            }
+
+            // What was on this display and is no longer anywhere is still drawn,
+            // until the strip has carried it off the side.
             let leaving: Vec<irontile_layout::Placement> = self
                 .placements
                 .placements
@@ -1869,29 +1902,7 @@ impl Irontile {
                 .filter(|p| !next.placements.iter().any(|q| q.window == p.window))
                 .copied()
                 .collect();
-            for placement in leaving {
-                if let Some(entry) = self.windows.get_mut(placement.window) {
-                    entry.rect.retarget(moved(placement.rect, leaves, 0));
-                }
-                self.departing.push(placement);
-            }
-
-            // And what has arrived starts off the other side, so that the two
-            // move together. Snapped, not retargeted: it is not travelling from
-            // wherever it last happened to be, it is coming in from off screen.
-            for placement in next.placements.iter().filter(|p| p.output == id) {
-                if self
-                    .placements
-                    .placements
-                    .iter()
-                    .any(|q| q.window == placement.window)
-                {
-                    continue;
-                }
-                if let Some(entry) = self.windows.get_mut(placement.window) {
-                    entry.rect.snap(moved(placement.rect, arrives, 0));
-                }
-            }
+            self.departing.extend(leaving);
         }
     }
 

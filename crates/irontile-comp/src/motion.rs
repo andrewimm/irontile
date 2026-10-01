@@ -769,3 +769,156 @@ mod spaces {
         }
     }
 }
+
+/// A display's desktops, sliding past one another.
+///
+/// One number for the whole display rather than one per window. That is the
+/// difference between a desktop and a crowd of windows that happen to be going
+/// the same way: with a number each, the band is rigid only while every window
+/// starts at rest, and one that was still settling when the desktop changed
+/// falls out of step by a dozen pixels. With one number there is nothing to
+/// fall out of step with.
+///
+/// It also means a window may go on resizing *while* the desktop slides, which
+/// is correct and was not possible when the two shared the same rectangle.
+#[derive(Debug)]
+pub struct Slide {
+    /// How far the strip still has to travel, in logical pixels. Zero when the
+    /// desktop being shown is where it belongs.
+    offset: Animated,
+    /// Where this slide began, which is where the desktop that is leaving sits.
+    from: f32,
+}
+
+impl Default for Slide {
+    fn default() -> Self {
+        Slide {
+            // Pixels, so a tenth of one is close enough to call it arrived.
+            offset: Animated::pixels(0.0),
+            from: 0.0,
+        }
+    }
+}
+
+impl Slide {
+    /// Starts a desktop change. `span` is how far apart the two desktops are:
+    /// negative when the arriving one is to the right, so the strip moves left.
+    ///
+    /// Interrupting one keeps the speed it had -- switching back and forth
+    /// quickly should feel like pushing a thing that is already moving, not
+    /// like starting again.
+    pub fn start(&mut self, span: f32) {
+        self.from = span;
+        self.offset.snap(span);
+        self.offset.retarget(0.0);
+    }
+
+    /// Where a window on the desktop being shown is drawn, relative to its cell.
+    pub fn arriving(&self) -> i32 {
+        self.offset.value().round() as i32
+    }
+
+    /// Where a window on the desktop being left behind is drawn, relative to
+    /// its cell: the same strip, one desktop further along it.
+    pub fn leaving(&self) -> i32 {
+        (self.offset.value() - self.from).round() as i32
+    }
+
+    pub fn moving(&self) -> bool {
+        self.offset.moving()
+    }
+
+    pub fn step(&mut self, motion: &Motion, dt: Duration) -> bool {
+        self.offset.step(motion, dt)
+    }
+
+    /// Puts the strip where it belongs at once, for a VT switch or a session
+    /// that is not animating.
+    pub fn finish(&mut self) {
+        self.offset.snap(0.0);
+        self.from = 0.0;
+    }
+}
+
+#[cfg(test)]
+mod sliding {
+    use super::*;
+
+    fn spring() -> Motion {
+        Motion::spring(0.5, 0.9)
+    }
+
+    fn settle(slide: &mut Slide) -> usize {
+        let mut frames = 0;
+        while slide.step(&spring(), Duration::from_millis(16)) && frames < 600 {
+            frames += 1;
+        }
+        frames
+    }
+
+    #[test]
+    fn a_desktop_at_rest_offsets_nothing() {
+        let slide = Slide::default();
+        assert_eq!(slide.arriving(), 0);
+        assert_eq!(slide.leaving(), 0);
+        assert!(!slide.moving());
+    }
+
+    #[test]
+    fn the_arriving_desktop_comes_from_one_span_away_and_lands_exactly() {
+        let mut slide = Slide::default();
+        slide.start(-2296.0);
+        assert_eq!(slide.arriving(), -2296, "it should start a whole span away");
+        assert_eq!(slide.leaving(), 0, "and the one leaving starts in place");
+        settle(&mut slide);
+        assert_eq!(
+            slide.arriving(),
+            0,
+            "the desktop shown must land on its cells"
+        );
+        assert_eq!(slide.leaving(), 2296, "and the other end a span away");
+    }
+
+    #[test]
+    fn the_two_desktops_stay_exactly_one_span_apart_throughout() {
+        // The whole point. However far through the slide is, and whatever the
+        // spring is doing, the strip is rigid: nothing on it can drift relative
+        // to anything else on it.
+        let mut slide = Slide::default();
+        slide.start(-2296.0);
+        for _ in 0..200 {
+            assert_eq!(
+                slide.arriving() - slide.leaving(),
+                -2296,
+                "the two desktops came apart"
+            );
+            slide.step(&spring(), Duration::from_millis(16));
+        }
+    }
+
+    #[test]
+    fn turning_round_mid_slide_keeps_the_speed_it_had() {
+        let mut slide = Slide::default();
+        slide.start(-2296.0);
+        for _ in 0..6 {
+            slide.step(&spring(), Duration::from_millis(16));
+        }
+        let moving = slide.arriving();
+        assert!(moving > -2296, "it should have travelled some way");
+        // Going back to where it came from starts from here, not from scratch.
+        slide.start(2296.0);
+        assert_eq!(slide.arriving(), 2296);
+        assert_eq!(slide.leaving(), 0);
+    }
+
+    #[test]
+    fn finishing_puts_the_strip_where_it_belongs() {
+        let mut slide = Slide::default();
+        slide.start(-2296.0);
+        slide.step(&spring(), Duration::from_millis(16));
+        slide.finish();
+        assert!(!slide.moving());
+        assert_eq!(slide.arriving(), 0);
+        assert_eq!(slide.leaving(), 0);
+    }
+}
