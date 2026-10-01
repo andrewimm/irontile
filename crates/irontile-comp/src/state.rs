@@ -36,7 +36,6 @@ use smithay::wayland::fractional_scale::{
 };
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::seat::WaylandFocus as _;
-use smithay::wayland::selection::SelectionHandler;
 use smithay::wayland::selection::data_device::{
     ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
     set_data_device_focus,
@@ -50,6 +49,7 @@ use smithay::wayland::selection::primary_selection::{
 use smithay::wayland::selection::wlr_data_control::{
     DataControlHandler as WlrDataControlHandler, DataControlState as WlrDataControlState,
 };
+use smithay::wayland::selection::{SelectionHandler, SelectionTarget};
 use smithay::wayland::shell::wlr_layer::WlrLayerShellState;
 use smithay::wayland::shell::xdg::XdgShellState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
@@ -2538,6 +2538,40 @@ impl smithay::wayland::idle_inhibit::IdleInhibitHandler for Irontile {
 
 impl SelectionHandler for Irontile {
     type SelectionUserData = ();
+
+    /// A Wayland client is pasting something an X11 client owns.
+    ///
+    /// Everything on the Wayland side of a selection serves itself: the client
+    /// that copied is handed the pipe and writes into it. A selection owned by
+    /// an X11 client has no such client to ask -- as far as Wayland is
+    /// concerned the compositor itself owns it -- so the pipe arrives here, and
+    /// the only thing that knows how to fill it is the X11 window manager.
+    ///
+    /// Leaving this to the default is not a clipboard that fails loudly. The
+    /// types are advertised, the paste is offered and accepted, and the pipe is
+    /// then dropped unwritten: every paste out of an X11 program came back
+    /// empty, and nothing anywhere said why. Copying a password out of
+    /// 1Password put the right mime types on the clipboard and one byte of
+    /// nothing behind them.
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        let loop_handle = self.loop_handle.clone();
+        let Some(wm) = self.xwayland.as_mut().and_then(|x| x.wm.as_mut()) else {
+            // No X server, so nothing can have owned an X11 selection. The pipe
+            // is dropped, which is the same empty paste as before -- but there
+            // was never anything to put in it.
+            return;
+        };
+        if let Err(err) = wm.send_selection(ty, mime_type, fd, loop_handle) {
+            tracing::warn!(%err, "could not hand an X11 selection to a Wayland client");
+        }
+    }
 }
 
 impl DataDeviceHandler for Irontile {
