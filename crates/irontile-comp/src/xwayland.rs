@@ -266,13 +266,30 @@ impl XwmHandler for Irontile {
     /// Both directions are handled by smithay once these say yes: without them
     /// copying in an X11 program and pasting in a Wayland one silently does
     /// nothing, which is the kind of breakage people blame on the application.
-    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
-        // Only for the client that holds the keyboard, matching what the
-        // Wayland clipboard already does: the selection follows focus, and
-        // nothing in the background can read it by asking.
+    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
+        // Only while an X11 window is the one with the keyboard.
+        //
+        // This asked whether *anything* had focus, which is true essentially
+        // always -- including while a Wayland password manager had it. Any
+        // background X11 process could then read the Wayland clipboard by
+        // asking, which is the opposite of what the comment here used to claim
+        // and of what the README promises.
+        //
+        // The limit of the guarantee, which is worth being honest about: all
+        // of Xwayland is a single Wayland client, so this cannot distinguish
+        // the X11 window that asked from any other. While an X11 window holds
+        // the keyboard, every X11 client can still read the selection. What it
+        // does stop is reading it while a Wayland window is focused, which is
+        // the same line wlroots and Hyprland draw and as fine a one as this
+        // layer can express.
         self.seat
             .get_keyboard()
-            .is_some_and(|keyboard| keyboard.current_focus().is_some())
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| match focus {
+                crate::focus::KeyboardFocus::Window(window) => window.x11_surface().cloned(),
+                _ => None,
+            })
+            .is_some_and(|surface| surface.xwm_id() == Some(xwm))
     }
 
     fn send_selection(

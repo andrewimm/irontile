@@ -94,6 +94,41 @@ fn a_second_lock_is_refused() {
 }
 
 #[test]
+fn a_client_whose_lock_was_refused_cannot_unlock_the_session() {
+    // The bypass this exists for, which was a complete one: any client at all
+    // could clear a healthy lock without authenticating against anything.
+    //
+    // Being refused only sends `finished`; it does not destroy the client's
+    // lock object. Smithay's `unlock_and_destroy` arm then posts
+    // `invalid_unlock` for a lock that was never confirmed and calls
+    // `state.unlock()` anyway, because posting an error marks the client for
+    // disconnection rather than returning. So the refused object stayed a
+    // working key to the session, and the desktop came back -- windows,
+    // panels, keyboard and bindings -- with the real lock screen still running
+    // behind it, holding a password prompt nobody could see.
+    let compositor = Compositor::start("1920x1080");
+    let mut locker = compositor.connect_client();
+    locker.lock_session();
+
+    let mut attacker = compositor.connect_client();
+    assert!(
+        !attacker.try_lock_session(),
+        "the session was locked twice over"
+    );
+    // The object it was refused, used for the request that used to work.
+    attacker.try_unlock_session();
+
+    // Asked of the protocol rather than of the compositor's insides: a lock is
+    // refused only while one is held, so a refusal here is the session still
+    // being locked. Had the unlock landed, this would be allowed.
+    let mut after = compositor.connect_client();
+    assert!(
+        !after.try_lock_session(),
+        "a client that was refused a lock unlocked the session"
+    );
+}
+
+#[test]
 fn a_lock_screen_gets_its_frame_callbacks_back() {
     // The bug this exists for: a locker that animates -- a fade, a clock, a
     // caps-lock indicator -- asks for a frame callback and waits for it before

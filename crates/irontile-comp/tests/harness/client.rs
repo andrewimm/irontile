@@ -567,6 +567,20 @@ impl TestClient {
         self.roundtrip();
     }
 
+    /// Asks to unlock without requiring the connection to survive it.
+    ///
+    /// A client that does not hold the lock is answered with a protocol error
+    /// and disconnected, so the roundtrip afterwards is expected to fail. The
+    /// request still reached the compositor, which is the whole point of
+    /// sending it: what is being tested is what the compositor did with it.
+    pub fn try_unlock_session(&mut self) {
+        if let Some(lock) = self.state.lock.take() {
+            lock.unlock_and_destroy();
+        }
+        self.state.locked = false;
+        let _ = self.queue.roundtrip(&mut self.state);
+    }
+
     /// Asks for a frame callback on a panel, the way a toolkit does before
     /// drawing its next frame.
     pub fn request_frame(&mut self, id: LayerId) {

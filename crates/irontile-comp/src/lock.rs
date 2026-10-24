@@ -21,12 +21,15 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::{
+    Error, ExtSessionLockV1, Request,
+};
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle};
 use smithay::wayland::session_lock::{
-    LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+    LockSurface, SessionLockHandler, SessionLockManagerState, SessionLockState, SessionLocker,
 };
 
 use crate::state::Irontile;
@@ -339,7 +342,83 @@ impl SessionLockHandler for Irontile {
     }
 }
 
-smithay::delegate_session_lock!(Irontile);
+impl Irontile {
+    /// Whether this is the object the session is actually locked by.
+    ///
+    /// Confirmed, not merely held. A client that asked for a lock and was
+    /// never sent `locked` is required by the protocol to destroy its object
+    /// rather than unlock with it, and `pending` still being `Some` is what
+    /// never having been confirmed looks like from here.
+    fn holds_the_lock(&self, lock: &ExtSessionLockV1) -> bool {
+        self.session_lock
+            .as_ref()
+            .is_some_and(|held| held.pending.is_none() && held.object.as_ref() == Some(lock))
+    }
+}
+
+/// Every request on a lock object, with the one that needs authorising checked
+/// before smithay sees it.
+///
+/// [`SessionLockHandler::unlock`] is told nothing about who asked -- it takes
+/// `&mut self` and nothing else -- so the check cannot live there. And
+/// smithay's own guard does not hold: its `UnlockAndDestroy` arm posts
+/// `invalid_unlock` for a lock that was never confirmed and then calls
+/// `state.unlock()` regardless, because the `post_error` has no `return` after
+/// it and posting an error only marks a client for disconnection rather than
+/// unwinding. The same function returns early after `post_error` three times
+/// in its `GetLockSurface` arm, so the omission is specific to this one.
+///
+/// The consequence was a complete bypass. Any client could bind the manager
+/// (anything must be able to, or nothing could ever lock), ask for a lock and
+/// be refused -- refusal only sends `finished`, it does not destroy the object
+/// -- and then unlock the session with the object it was refused, having
+/// authenticated nothing. The desktop came back: every gate on windows,
+/// panels, keyboard focus, pointer hit-testing and bindings asks whether
+/// `session_lock` is `Some`, and this set it to `None`. The real lock screen
+/// went on running, holding a password prompt nobody could see.
+///
+/// So the request is matched here, where the object making it is still in
+/// hand, and an unlock from anything but the confirmed holder is refused
+/// without reaching the handler. Everything else is smithay's business and is
+/// forwarded untouched, which is what `delegate_session_lock!` would have done
+/// for this interface.
+impl Dispatch<ExtSessionLockV1, SessionLockState> for Irontile {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        lock: &ExtSessionLockV1,
+        request: Request,
+        data: &SessionLockState,
+        display: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        if matches!(request, Request::UnlockAndDestroy) && !state.holds_the_lock(lock) {
+            tracing::warn!("refused an unlock from a client that does not hold the lock");
+            lock.post_error(
+                Error::InvalidUnlock,
+                "only the client holding a confirmed lock may unlock the session",
+            );
+            return;
+        }
+        <SessionLockManagerState as Dispatch<ExtSessionLockV1, SessionLockState, Self>>::request(
+            state, client, lock, request, data, display, data_init,
+        );
+    }
+}
+
+// The rest of the protocol, delegated as before. Only the lock object itself is
+// handled above, so these are the other three the macro would have written.
+smithay::reexports::wayland_server::delegate_global_dispatch!(Irontile: [
+    smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_manager_v1::ExtSessionLockManagerV1: smithay::wayland::session_lock::SessionLockManagerGlobalData
+] => SessionLockManagerState);
+
+smithay::reexports::wayland_server::delegate_dispatch!(Irontile: [
+    smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_manager_v1::ExtSessionLockManagerV1: ()
+] => SessionLockManagerState);
+
+smithay::reexports::wayland_server::delegate_dispatch!(Irontile: [
+    smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_surface_v1::ExtSessionLockSurfaceV1: smithay::wayland::session_lock::ExtLockSurfaceUserData
+] => SessionLockManagerState);
 
 #[cfg(test)]
 mod tests {
