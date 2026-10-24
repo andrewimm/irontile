@@ -644,14 +644,15 @@ impl State {
         // The title the bar is about to draw, taken from the window itself
         // rather than from the module's format: a format with a prefix in it
         // would otherwise make every title look like a change from the last.
-        let title = self
-            .snapshot
-            .windows
-            .iter()
-            .find(|window| window.focused)
+        // The id travels with it, because which window this is decides whether
+        // a different title is worth animating: moving to another window is,
+        // and a window renaming itself is not.
+        let focused = self.snapshot.windows.iter().find(|window| window.focused);
+        let subject = focused.map(|window| window.id.0);
+        let title = focused
             .and_then(|window| window.title.as_deref())
             .unwrap_or_default();
-        self.reveal.to(title);
+        self.reveal.to(subject, title);
         if !self.config.animation.enabled {
             self.reveal.finish();
         }

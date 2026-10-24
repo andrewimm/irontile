@@ -22,6 +22,13 @@ pub struct Reveal {
     going: String,
     /// What has arrived and will stay.
     here: String,
+    /// Whose text this is.
+    ///
+    /// The difference between moving to another window and a window renaming
+    /// itself, which look identical if all you compare is the string. A
+    /// terminal running something chatty rewrites its own title several times
+    /// a second, and animating each one turns the bar into a slot machine.
+    subject: Option<u64>,
     /// Zero while `going` is fully in place, one once `here` is.
     at: Animated,
 }
@@ -31,6 +38,7 @@ impl Default for Reveal {
         Reveal {
             going: String::new(),
             here: String::new(),
+            subject: None,
             // Already arrived: the first text to be shown is not a change.
             at: Animated::unit(1.0),
         }
@@ -38,13 +46,31 @@ impl Default for Reveal {
 }
 
 impl Reveal {
-    /// Replaces the text, starting a change if it is actually different.
+    /// Replaces the text, starting a change if it is actually a change.
     ///
+    /// `subject` is whose text this is -- the focused window, for the bar.
     /// Being handed the same string again does nothing, which matters because
     /// the bar re-reads the whole world on every event: a window title arrives
     /// unchanged many times for every time it changes.
-    pub fn to(&mut self, text: &str) {
-        if text == self.here {
+    ///
+    /// A new subject animates. The same subject with different text does not:
+    /// it is one window saying something new about itself, not the bar coming
+    /// to rest on a different window, and only the second is worth a movement.
+    /// Without that distinction a terminal whose title tracks what it is doing
+    /// -- a build, a long-running tool, anything that reports progress in the
+    /// title -- makes the bar slide continuously for as long as it runs.
+    ///
+    /// Updating the same subject mid-animation leaves the animation alone, so
+    /// a window change that is still travelling arrives at whatever the title
+    /// has become rather than being cut short by it.
+    pub fn to(&mut self, subject: Option<u64>, text: &str) {
+        if text == self.here && subject == self.subject {
+            return;
+        }
+        let same_subject = subject == self.subject && !self.here.is_empty();
+        self.subject = subject;
+        if same_subject {
+            self.here = text.to_string();
             return;
         }
         // Whatever was part way through leaving is abandoned rather than queued.
@@ -114,7 +140,7 @@ mod tests {
     fn the_first_text_arrives_without_a_flourish() {
         // Starting the bar should not look like the title just changed.
         let mut reveal = Reveal::default();
-        reveal.to("nvim anim.rs");
+        reveal.to(Some(1), "nvim anim.rs");
         assert!(!reveal.moving());
         assert_eq!(reveal.here(), "nvim anim.rs");
         assert_eq!(reveal.going(), None);
@@ -124,8 +150,8 @@ mod tests {
     #[test]
     fn a_change_shows_the_old_text_leaving() {
         let mut reveal = Reveal::default();
-        reveal.to("htop");
-        reveal.to("fish ~");
+        reveal.to(Some(1), "htop");
+        reveal.to(Some(2), "fish ~");
         assert!(reveal.moving());
         let (going, at) = reveal.going().expect("something should be leaving");
         assert_eq!(going, "htop");
@@ -144,25 +170,25 @@ mod tests {
         // The bar re-reads everything on every compositor event, so this is the
         // common case by a wide margin.
         let mut reveal = Reveal::default();
-        reveal.to("htop");
-        reveal.to("fish ~");
+        reveal.to(Some(1), "htop");
+        reveal.to(Some(2), "fish ~");
         for _ in 0..3 {
             reveal.step(&spring(), Duration::from_millis(16));
         }
         let midway = reveal.progress();
-        reveal.to("fish ~");
+        reveal.to(Some(2), "fish ~");
         assert_eq!(reveal.progress(), midway, "it restarted");
     }
 
     #[test]
     fn a_second_change_abandons_the_first_rather_than_queueing_it() {
         let mut reveal = Reveal::default();
-        reveal.to("one");
-        reveal.to("two");
+        reveal.to(Some(1), "one");
+        reveal.to(Some(2), "two");
         for _ in 0..3 {
             reveal.step(&spring(), Duration::from_millis(16));
         }
-        reveal.to("three");
+        reveal.to(Some(3), "three");
         // "two" never finished arriving, and it is what "three" is replacing:
         // showing "one" leave again would be showing a change that is two
         // titles out of date.
@@ -175,8 +201,8 @@ mod tests {
     #[test]
     fn finishing_leaves_the_new_text_in_place() {
         let mut reveal = Reveal::default();
-        reveal.to("before");
-        reveal.to("after");
+        reveal.to(Some(1), "before");
+        reveal.to(Some(2), "after");
         reveal.finish();
         assert!(!reveal.moving());
         assert_eq!(reveal.here(), "after");
@@ -184,12 +210,85 @@ mod tests {
     }
 
     #[test]
+    fn a_window_renaming_itself_does_not_animate() {
+        // The bug this exists for. A terminal running something that reports
+        // progress in its title rewrites it several times a second, and every
+        // one of those used to be a full slide: the bar never stood still for
+        // as long as the job ran.
+        let mut reveal = Reveal::default();
+        reveal.to(Some(7), "claude");
+        for text in ["claude - thinking", "claude - editing", "claude - done"] {
+            reveal.to(Some(7), text);
+            assert!(!reveal.moving(), "{text:?} should have arrived quietly");
+            assert_eq!(reveal.going(), None, "nothing should be leaving");
+            assert_eq!(reveal.here(), text, "but it should still be shown");
+        }
+    }
+
+    #[test]
+    fn moving_to_another_window_still_animates() {
+        // The half worth keeping: the whole point of the movement is to say
+        // that the bar is talking about something else now.
+        let mut reveal = Reveal::default();
+        reveal.to(Some(7), "claude");
+        reveal.to(Some(8), "htop");
+        assert!(reveal.moving());
+        assert_eq!(reveal.going().map(|(text, _)| text), Some("claude"));
+    }
+
+    #[test]
+    fn two_windows_with_the_same_title_still_animate() {
+        // Comparing the text alone would miss this: two terminals both called
+        // `fish ~` are still two windows, and moving between them is still
+        // worth saying.
+        let mut reveal = Reveal::default();
+        reveal.to(Some(1), "fish ~");
+        reveal.to(Some(2), "fish ~");
+        assert!(
+            reveal.moving(),
+            "the bar is talking about another window now"
+        );
+        assert_eq!(reveal.going().map(|(text, _)| text), Some("fish ~"));
+    }
+
+    #[test]
+    fn a_rename_mid_slide_lets_the_slide_finish() {
+        // A window change that is still travelling when the new window renames
+        // itself should arrive at the new name rather than being cut short by
+        // it -- the movement has already been started and stopping it halfway
+        // looks like a glitch.
+        let mut reveal = Reveal::default();
+        reveal.to(Some(1), "htop");
+        reveal.to(Some(2), "claude");
+        for _ in 0..3 {
+            reveal.step(&spring(), Duration::from_millis(16));
+        }
+        let midway = reveal.progress();
+        assert!(
+            midway > 0.0 && midway < 1.0,
+            "it should be part way through"
+        );
+
+        reveal.to(Some(2), "claude - thinking");
+        assert!(reveal.moving(), "the slide should still be running");
+        assert_eq!(reveal.progress(), midway, "and not have restarted");
+        assert_eq!(reveal.going().map(|(text, _)| text), Some("htop"));
+        assert_eq!(
+            reveal.here(),
+            "claude - thinking",
+            "landing on the new name"
+        );
+    }
+
+    #[test]
     fn going_back_to_an_empty_title_is_still_a_change() {
         // Closing the last window: the title empties, and that is worth seeing
         // just as much as any other change.
         let mut reveal = Reveal::default();
-        reveal.to("the last window");
-        reveal.to("");
+        reveal.to(Some(1), "the last window");
+        // No window focused at all, which is a different subject rather than
+        // the same one having fallen silent.
+        reveal.to(None, "");
         assert!(reveal.moving());
         assert_eq!(
             reveal.going().map(|(text, _)| text),
