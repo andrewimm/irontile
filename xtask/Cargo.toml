@@ -6,6 +6,10 @@ publish = false
 
 [dependencies]
 irontile-ipc.workspace = true
+# Rendering the site icon from its SVG. Already in the workspace for the bar,
+# which draws the same kind of thing at the same kind of size.
+resvg.workspace = true
+usvg.workspace = true
 
 [lints]
 workspace = true

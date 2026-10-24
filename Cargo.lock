@@ -3716,6 +3716,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "irontile-ipc",
+ "resvg",
+ "usvg",
 ]
 
 [[package]]

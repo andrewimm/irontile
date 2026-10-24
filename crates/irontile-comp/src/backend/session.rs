@@ -80,6 +80,22 @@ struct Surface {
     cursor_plane: Option<bool>,
 }
 
+/// A display that has been powered down, and what it takes to light it again.
+///
+/// Everything here was read off the `Surface` before it was dropped. The
+/// `Output` in particular is the same object clients and the layout hold, so
+/// bringing a display back reuses it rather than making a new one: a fresh
+/// `Output` would be a new `wl_output`, and every client would see the display
+/// unplugged and plugged back in every time the screen blanked.
+struct Parked {
+    node: DrmNode,
+    crtc: crtc::Handle,
+    connectors: Vec<connector::Handle>,
+    mode: smithay::reexports::drm::control::Mode,
+    id: OutputId,
+    output: Output,
+}
+
 /// One GPU.
 struct Device {
     drm: DrmDevice,
@@ -122,6 +138,13 @@ pub struct Session {
     /// quietly break the thing that makes unplugging a monitor safe.
     identities: HashMap<String, OutputId>,
     next_output: u64,
+    /// Displays switched off to save power, waiting to be lit again.
+    ///
+    /// Held here rather than in `devices` so that nothing else has to know
+    /// about it: `specs()` reads `devices`, and a display that is merely dark
+    /// must not look to the layout like one that has been unplugged, or
+    /// blanking the screen would shuffle every desktop onto another display.
+    parked: Vec<Parked>,
 }
 
 impl std::fmt::Debug for Session {
@@ -230,6 +253,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         render_node: None,
         identities: HashMap::new(),
         next_output: 1,
+        parked: Vec::new(),
     }));
 
     let handle = event_loop.handle();
@@ -345,6 +369,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         if state.dirty {
             state.reflow();
         }
+        // Before anything is drawn: a pass that has decided the displays
+        // should be off should not spend a frame rendering to them first.
+        state.tick_displays();
         // Starts a transition promptly -- within the loop's sixteen
         // milliseconds -- after which each display's vblank carries it on at
         // whatever that display's refresh rate actually is. Skipped while the
@@ -735,6 +762,140 @@ fn is_active(state: &Irontile) -> bool {
         Backend::Session(session) => session.active,
         _ => true,
     }
+}
+
+/// Stops driving every display, so the panels power down.
+///
+/// Not a black frame. Dropping the `DrmCompositor` drops the `DrmSurface`
+/// under it, whose `Drop` clears the connector's state -- `ACTIVE` false on an
+/// atomic driver, `DPMS` off on a legacy one -- which is the thing that
+/// actually puts a monitor to sleep rather than merely painting it the colour
+/// of one that is.
+///
+/// Returns whether anything was turned off, so a caller does not record a
+/// blanking that did not happen.
+pub(crate) fn blank(state: &mut Irontile) -> bool {
+    let Backend::Session(session) = &mut state.backend else {
+        return false;
+    };
+    // Paused means the displays belong to another virtual terminal. They are
+    // already not ours to turn off, and taking them down here would fight with
+    // whoever has them.
+    if !session.active || !session.parked.is_empty() {
+        return false;
+    }
+
+    let mut parked = Vec::new();
+    for (node, device) in session.devices.iter_mut() {
+        for (crtc, surface) in device.surfaces.drain() {
+            parked.push(Parked {
+                node: *node,
+                crtc,
+                connectors: surface
+                    .compositor
+                    .current_connectors()
+                    .into_iter()
+                    .collect(),
+                mode: surface.compositor.current_mode(),
+                id: surface.id,
+                output: surface.output.clone(),
+            });
+            // Explicit, because the whole effect is in the drop.
+            drop(surface.compositor);
+        }
+    }
+    if parked.is_empty() {
+        return false;
+    }
+    tracing::info!(displays = parked.len(), "displays off");
+    session.parked = parked;
+    true
+}
+
+/// Drives every display again, at the mode it had.
+///
+/// A modeset, so it is not instant -- a tenth of a second or so before there
+/// is a picture, which is what waking a monitor looks like anyway. A display
+/// that cannot be brought back is left out rather than retried forever: the
+/// usual reason is that it was unplugged while the screen was dark, and the
+/// hotplug that follows will build it properly.
+pub(crate) fn wake(state: &mut Irontile) {
+    let Backend::Session(session) = &mut state.backend else {
+        return;
+    };
+    if session.parked.is_empty() {
+        return;
+    }
+    let parked = std::mem::take(&mut session.parked);
+    let count = parked.len();
+    for dark in parked {
+        if let Err(err) = relight(session, &dark) {
+            tracing::warn!(
+                output = %dark.output.name(),
+                %err,
+                "could not light a display again; waiting for it to be noticed as plugged in",
+            );
+        }
+    }
+    tracing::info!(displays = count, "displays on");
+    state.queue_redraw();
+}
+
+/// Rebuilds the one thing blanking threw away: the compositor for a connector.
+fn relight(session: &mut Session, display: &Parked) -> anyhow::Result<()> {
+    let renderer_formats = session
+        .renderer
+        .as_mut()
+        .map(|renderer| {
+            use smithay::backend::renderer::ImportDma;
+            renderer.dmabuf_formats()
+        })
+        .unwrap_or_default();
+    let device = session
+        .devices
+        .get_mut(&display.node)
+        .context("its gpu has gone")?;
+    let surface = device
+        .drm
+        .create_surface(display.crtc, display.mode, &display.connectors)
+        .context("could not set the mode again")?;
+    let allocator = GbmAllocator::new(
+        device.gbm.clone(),
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+    );
+    let compositor = DrmCompositor::new(
+        &display.output,
+        surface,
+        None,
+        allocator,
+        GbmFramebufferExporter::new(
+            device.gbm.clone(),
+            display
+                .node
+                .node_with_type(NodeType::Render)
+                .and_then(Result::ok),
+        ),
+        COLOR_FORMATS.iter().copied(),
+        renderer_formats,
+        device.drm.cursor_size(),
+        Some(device.gbm.clone()),
+    )
+    .context("could not build a drm compositor")?;
+    device.surfaces.insert(
+        display.crtc,
+        Surface {
+            id: display.id,
+            output: display.output.clone(),
+            compositor,
+            queued: false,
+            // Nothing on this display has been drawn since it went dark, and
+            // the damage tracker went with the compositor, so the first frame
+            // has to be a whole one.
+            pending: true,
+            cursor_plane: None,
+        },
+    );
+    Ok(())
 }
 
 /// Draws every display that has something to show.

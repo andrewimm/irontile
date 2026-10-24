@@ -305,6 +305,14 @@ pub struct Irontile {
     /// daemon waits on before dimming, locking or suspending.
     pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Irontile>,
     pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Whether anything on screen is currently asking to stay awake.
+    ///
+    /// Kept rather than recomputed because the display timeout asks every
+    /// pass of the event loop, and the answer involves walking every inhibitor
+    /// against every placement.
+    pub idle_inhibited: bool,
+    /// When to stop driving the displays, and whether they are stopped.
+    pub blanking: crate::power::Blanking,
     /// Surfaces asking the session to stay awake.
     ///
     /// Held rather than acted on directly: an inhibitor only counts while its
@@ -480,6 +488,11 @@ impl Irontile {
                 dh,
             ),
             idle_inhibitors: std::collections::HashSet::new(),
+            idle_inhibited: false,
+            blanking: crate::power::Blanking::new(
+                config.power.display_off_after,
+                std::time::Instant::now(),
+            ),
             cursor_shape_state: CursorShapeManagerState::new::<Self>(dh),
             fractional_scale_state: FractionalScaleManagerState::new::<Self>(dh),
             session_lock_state: smithay::wayland::session_lock::SessionLockManagerState::new::<
@@ -627,6 +640,10 @@ impl Irontile {
                         crate::cursor::CursorSource::new(&config.cursor.theme, config.cursor.size);
                 }
                 self.layout.set_config(config.layout);
+                // Restarts the countdown, so shortening the timeout cannot
+                // blank the screen the file is being edited on.
+                self.blanking
+                    .set_timeout(config.power.display_off_after, std::time::Instant::now());
                 self.config = config;
                 self.dirty = true;
                 tracing::info!("configuration reloaded");
@@ -1732,6 +1749,38 @@ impl Irontile {
         true
     }
 
+    /// Somebody is there.
+    ///
+    /// Holds the displays on, and brings them back if they had gone. Called
+    /// for input rather than for anything the compositor does to itself: a
+    /// script driving the control socket, or a client redrawing in a loop, is
+    /// not a reason to light the room.
+    pub fn stir_displays(&mut self) {
+        if self.blanking.stir(std::time::Instant::now()) {
+            crate::backend::session::wake(self);
+        }
+    }
+
+    /// Asks the clock whether the displays should be off by now.
+    ///
+    /// Polled from the event loop rather than scheduled on a timer. The loop
+    /// already wakes every sixteen milliseconds, so the timeout costs one
+    /// subtraction a frame, and a timer would be a second thing to keep in
+    /// step with reloads, inhibitors and virtual terminal switches.
+    pub fn tick_displays(&mut self) {
+        // Something copying the screen counts as somebody being there, and for
+        // a better reason than an inhibitor does: a display that is off is not
+        // composited at all, so a recording of one would be a recording of
+        // nothing. A screen share does not stop because nobody typed.
+        let wanted = self.idle_inhibited || self.screencopy.capturing();
+        if self.blanking.poll(std::time::Instant::now(), wanted) != crate::power::Next::Off {
+            return;
+        }
+        if crate::backend::session::blank(self) {
+            self.blanking.went_off();
+        }
+    }
+
     /// Asks for the screen to be drawn again.
     pub fn queue_redraw(&mut self) {
         self.redraw = true;
@@ -1983,6 +2032,7 @@ impl Irontile {
                 .find(surface)
                 .is_some_and(|(id, _)| self.placements.placements.iter().any(|p| p.window == id))
         });
+        self.idle_inhibited = awake;
         self.idle_notifier.set_is_inhibited(awake);
     }
 

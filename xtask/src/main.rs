@@ -4,6 +4,7 @@
 //! Deliberately dependency-free: argument parsing is hand-rolled so the build
 //! graph for `cargo xtask` stays as small as the workspace itself.
 
+mod icons;
 mod multihead;
 
 use std::env;
@@ -24,6 +25,7 @@ SUBCOMMANDS:
             Exercise multi-display behaviour against a running compositor over
             its control socket, writing a log. Started by try-multihead.sh as a
             startup command, so it runs inside the session under test.
+    icons   Render the site favicon and its variants from site/app/icon.svg.
     release-check <TAG>
             Check that TAG names the version the workspace would actually
             build, before a release is cut from it.
@@ -65,6 +67,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "run" => cmd_run(rest),
         "test" => cmd_test(rest),
         "multihead" => multihead::run(rest),
+        "icons" => icons::run(rest),
         "release-check" => cmd_release_check(rest),
         "aur" => cmd_aur(rest),
         "help" | "-h" | "--help" => {

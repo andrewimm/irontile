@@ -39,6 +39,8 @@ pub struct Config {
     pub startup: Vec<Vec<String>>,
     /// What to tell the wider session about this compositor.
     pub session: SessionConfig,
+    /// When to stop driving the displays.
+    pub power: PowerConfig,
 }
 
 impl Default for Config {
@@ -57,6 +59,7 @@ impl Default for Config {
             outputs: Vec::new(),
             startup: Vec::new(),
             session: SessionConfig::default(),
+            power: PowerConfig::default(),
         }
     }
 }
@@ -167,6 +170,11 @@ impl Config {
             .map(OutputFile::into_output)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let power = PowerConfig::try_from(file.power).map_err(|message| ParseFailure::Binding {
+            key: "power".into(),
+            message,
+        })?;
+
         Ok(Config {
             layout: file.layout.into_layout(theme.layout_params()),
             theme,
@@ -177,6 +185,7 @@ impl Config {
             outputs,
             startup,
             session: file.session,
+            power,
         })
     }
 }
@@ -555,6 +564,7 @@ struct ConfigFile {
     binds: BTreeMap<String, toml::Value>,
     startup: StartupConfig,
     session: SessionConfig,
+    power: PowerFile,
     cursor: CursorConfig,
     input: InputConfig,
     animation: AnimationConfig,
@@ -572,6 +582,7 @@ impl Default for ConfigFile {
             binds: BTreeMap::new(),
             startup: StartupConfig::default(),
             session: SessionConfig::default(),
+            power: PowerFile::default(),
             cursor: CursorConfig::default(),
             input: InputConfig::default(),
             animation: AnimationConfig::default(),
@@ -643,6 +654,38 @@ impl OutputFile {
             transform,
             enabled: self.enabled,
         })
+    }
+}
+
+/// When to stop driving the displays.
+///
+/// Not sleeping. The machine stays up and everything on it keeps running; only
+/// the panel stops being driven, which is exactly what somebody wants when
+/// they have deliberately inhibited suspend so that a long job can finish.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PowerConfig {
+    /// How long the seat may be idle before the displays go off. `None` is
+    /// never, which is what a file saying nothing about it means.
+    pub display_off_after: Option<std::time::Duration>,
+}
+
+/// The same, as it is written: `display_off_after = "10m"`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct PowerFile {
+    display_off_after: Option<String>,
+}
+
+impl TryFrom<PowerFile> for PowerConfig {
+    type Error = String;
+
+    fn try_from(file: PowerFile) -> Result<Self, Self::Error> {
+        let display_off_after = match file.display_off_after {
+            None => None,
+            Some(text) => crate::power::parse_timeout(&text)
+                .map_err(|err| format!("power.display_off_after: {err}"))?,
+        };
+        Ok(PowerConfig { display_off_after })
     }
 }
 
@@ -960,6 +1003,48 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.theme.border_width, Theme::default().border_width);
         assert!(config.keymap.binds().count() > 0);
+    }
+
+    #[test]
+    fn the_displays_stay_on_unless_a_file_says_otherwise() {
+        // The default has to be "never". A compositor that blanked the screen
+        // after some built-in interval would be doing it to people who never
+        // asked, on machines where it is wrong.
+        assert_eq!(Config::parse("").unwrap().power.display_off_after, None);
+    }
+
+    #[test]
+    fn a_display_timeout_is_read_as_a_length_of_time() {
+        let config = Config::parse(
+            r#"
+            [power]
+            display_off_after = "10m"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.power.display_off_after,
+            Some(std::time::Duration::from_secs(600))
+        );
+    }
+
+    #[test]
+    fn a_display_timeout_that_makes_no_sense_names_itself_in_the_error() {
+        // The file keeps loading on a bad value elsewhere, so the message is
+        // the only way to find which setting was wrong.
+        let err = Config::parse(
+            r#"
+            [power]
+            display_off_after = "10"
+            "#,
+        )
+        .unwrap_err();
+        let ParseFailure::Binding { key, message } = err else {
+            panic!("it should name the setting rather than fail to parse at all");
+        };
+        assert_eq!(key, "power");
+        assert!(message.contains("display_off_after"), "{message}");
+        assert!(message.contains("10m"), "{message}");
     }
 
     #[test]

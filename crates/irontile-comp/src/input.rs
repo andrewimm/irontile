@@ -48,6 +48,10 @@ pub fn handle<B: InputBackend>(
     ) {
         let seat = state.seat.clone();
         state.idle_notifier.notify_activity(&seat);
+        // The same event that tells an idle daemon somebody is there brings
+        // the displays back, before the key or the click is acted on: the
+        // keypress that wakes a dark screen should also do what it says.
+        state.stir_displays();
     }
 
     match event {

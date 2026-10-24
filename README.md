@@ -315,6 +315,13 @@ kind = "spring"
 response = 0.38          # roughly one oscillation in seconds; smaller is snappier
 damping_ratio = 0.8      # 1 arrives without overshooting, below it bounces
 
+# A display changing which desktop it shows. One number for the whole display,
+# so the band is rigid: nothing on it can drift relative to anything else.
+[animation.workspace]
+kind = "spring"
+response = 0.50
+damping_ratio = 0.90
+
 # A window arriving. The shape of the arrival is `open_style`.
 [animation.open]
 kind = "spring"
@@ -568,6 +575,42 @@ this user has open: setting it while another session is running points that
 session's launches here too, and from the outside the two are
 indistinguishable. Turn it on when irontile is the only session, which is when
 it is the true thing to say.
+
+**Turning the displays off.** After a stretch with nobody at the keyboard, the
+compositor can stop driving the displays. Written as a length of time, with a
+unit, because ten minutes and ten seconds are the difference between a setting
+that works and one that blanks the screen while you are reading it:
+
+```toml
+[power]
+display_off_after = "10m"    # "30s", "1h", or "never"
+```
+
+Nothing is set by default: a compositor that blanked the screen after some
+interval of its own would be doing it to people who never asked for it.
+
+This is not sleeping, and it is deliberately not tied to sleeping. The machine
+stays up and everything on it keeps running -- which is the whole point for
+anyone who has inhibited suspend so that a long job can finish, and still does
+not want a lit panel for the next six hours.
+
+It is a real power-down rather than a black frame. The connector is switched
+off, so a monitor sleeps and a laptop panel stops being scanned out; waking it
+is a modeset, so there is a tenth of a second before there is a picture, the
+same as waking any monitor. Any input brings it back, and the key that wakes
+the screen also does what it says -- it is not swallowed.
+
+Three things hold the displays on: a window with an idle inhibitor that is
+actually on screen, anything copying the screen (a display that is off is not
+composited at all, so a recording of one would be a recording of nothing), and
+the session belonging to another virtual terminal. A reload restarts the
+countdown rather than carrying it over, so shortening the timeout cannot blank
+the screen you are editing the file on.
+
+Nothing here replaces an idle daemon. `ext-idle-notify` is still served, so
+swayidle and anything like it still work for dimming, locking and suspending --
+this is the one of those four that needs the compositor, because only the
+compositor owns the connector.
 
 **A panel gets its frame callbacks back.** A toolkit asks for one and waits for
 it before drawing its next frame, so a panel that never receives one draws

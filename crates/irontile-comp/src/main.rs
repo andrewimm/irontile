@@ -18,6 +18,7 @@ mod keymap;
 mod layer;
 mod lock;
 mod motion;
+mod power;
 mod registry;
 mod render;
 mod screencopy;
