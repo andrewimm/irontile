@@ -267,29 +267,7 @@ impl XwmHandler for Irontile {
     /// copying in an X11 program and pasting in a Wayland one silently does
     /// nothing, which is the kind of breakage people blame on the application.
     fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
-        // Only while an X11 window is the one with the keyboard.
-        //
-        // This asked whether *anything* had focus, which is true essentially
-        // always -- including while a Wayland password manager had it. Any
-        // background X11 process could then read the Wayland clipboard by
-        // asking, which is the opposite of what the comment here used to claim
-        // and of what the README promises.
-        //
-        // The limit of the guarantee, which is worth being honest about: all
-        // of Xwayland is a single Wayland client, so this cannot distinguish
-        // the X11 window that asked from any other. While an X11 window holds
-        // the keyboard, every X11 client can still read the selection. What it
-        // does stop is reading it while a Wayland window is focused, which is
-        // the same line wlroots and Hyprland draw and as fine a one as this
-        // layer can express.
-        self.seat
-            .get_keyboard()
-            .and_then(|keyboard| keyboard.current_focus())
-            .and_then(|focus| match focus {
-                crate::focus::KeyboardFocus::Window(window) => window.x11_surface().cloned(),
-                _ => None,
-            })
-            .is_some_and(|surface| surface.xwm_id() == Some(xwm))
+        self.focused_x11_xwm() == Some(xwm)
     }
 
     fn send_selection(
@@ -324,6 +302,10 @@ impl XwmHandler for Irontile {
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        // An X11 client owns it now, so there is nothing of ours left to offer
+        // the X server. Forgetting it here is what stops a later focus change
+        // announcing a stale Wayland selection over the top of this one.
+        self.wayland_selection.set(selection, None);
         match selection {
             SelectionTarget::Clipboard => {
                 smithay::wayland::selection::data_device::set_data_device_selection(
@@ -373,6 +355,31 @@ impl smithay::wayland::xwayland_shell::XWaylandShellHandler for Irontile {
 smithay::delegate_xwayland_shell!(Irontile);
 
 impl Irontile {
+    /// Which X server's window has the keyboard, if one does.
+    ///
+    /// The question the clipboard is gated on, and the one the re-announce
+    /// waits for. It used to be asked as "does *anything* have focus", which
+    /// is true essentially always -- including while a Wayland password
+    /// manager had it -- so any background X11 process could read the Wayland
+    /// clipboard by asking.
+    ///
+    /// The limit of the guarantee is worth being honest about: all of Xwayland
+    /// is a single Wayland client, so this cannot tell the X11 window that
+    /// asked from any other. While an X11 window holds the keyboard, every X11
+    /// client can still read the selection. What it stops is reading it while
+    /// a Wayland window is focused, which is the same line wlroots and
+    /// Hyprland draw and as fine a one as this layer can express.
+    pub(crate) fn focused_x11_xwm(&self) -> Option<XwmId> {
+        self.seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| match focus {
+                crate::focus::KeyboardFocus::Window(window) => window.x11_surface().cloned(),
+                _ => None,
+            })
+            .and_then(|surface| surface.xwm_id())
+    }
+
     /// The layout's id for an X11 window, if the tree has one.
     pub fn window_id_of_x11(&self, surface: &X11Surface) -> Option<irontile_layout::WindowId> {
         let wl = surface.wl_surface()?;

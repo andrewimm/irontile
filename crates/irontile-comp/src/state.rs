@@ -219,6 +219,32 @@ pub enum DragKind {
     Carry,
 }
 
+/// The mime types a Wayland client has offered, per selection.
+///
+/// Two of them because the clipboard and the primary selection are separate
+/// and a client may own one without the other.
+#[derive(Debug, Default)]
+pub struct SelectionMimes {
+    clipboard: Option<Vec<String>>,
+    primary: Option<Vec<String>>,
+}
+
+impl SelectionMimes {
+    pub fn set(&mut self, target: SelectionTarget, mimes: Option<Vec<String>>) {
+        match target {
+            SelectionTarget::Clipboard => self.clipboard = mimes,
+            SelectionTarget::Primary => self.primary = mimes,
+        }
+    }
+
+    fn get(&self, target: SelectionTarget) -> Option<Vec<String>> {
+        match target {
+            SelectionTarget::Clipboard => self.clipboard.clone(),
+            SelectionTarget::Primary => self.primary.clone(),
+        }
+    }
+}
+
 /// A connected display and the protocol object advertising it.
 #[derive(Debug)]
 pub struct OutputEntry {
@@ -305,6 +331,15 @@ pub struct Irontile {
     /// daemon waits on before dimming, locking or suspending.
     pub idle_notifier: smithay::wayland::idle_notify::IdleNotifierState<Irontile>,
     pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// What a Wayland client has put on the clipboard, by target.
+    ///
+    /// Kept so it can be offered to the X server again when an X11 window
+    /// takes the keyboard. `None` is either nothing there or an X11 client
+    /// owning it, which are the same thing from here: in both cases there is
+    /// nothing of ours to announce.
+    pub wayland_selection: crate::state::SelectionMimes,
+    /// Whether an X11 window had the keyboard last time focus was settled.
+    x11_had_focus: bool,
     /// Whether anything on screen is currently asking to stay awake.
     ///
     /// Kept rather than recomputed because the display timeout asks every
@@ -489,6 +524,8 @@ impl Irontile {
             ),
             idle_inhibitors: std::collections::HashSet::new(),
             idle_inhibited: false,
+            wayland_selection: crate::state::SelectionMimes::default(),
+            x11_had_focus: false,
             blanking: crate::power::Blanking::new(
                 config.power.display_off_after,
                 std::time::Instant::now(),
@@ -1322,6 +1359,13 @@ impl Irontile {
     }
 
     fn refresh_keyboard_focus(&mut self) {
+        self.settle_keyboard_focus();
+        // After focus has settled, whatever it settled on: an X11 window that
+        // has just taken the keyboard is owed the clipboard again.
+        self.offer_selection_to_new_x11_focus();
+    }
+
+    fn settle_keyboard_focus(&mut self) {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
@@ -1778,6 +1822,49 @@ impl Irontile {
         }
         if crate::backend::session::blank(self) {
             self.blanking.went_off();
+        }
+    }
+
+    /// Tells the X server what is on a Wayland client's clipboard.
+    ///
+    /// `None` gives the ownership up rather than leaving it pointing at a
+    /// source that no longer exists.
+    fn announce_to_x11(&mut self, ty: SelectionTarget, mimes: Option<Vec<String>>) {
+        let Some(wm) = self.xwayland.as_mut().and_then(|x| x.wm.as_mut()) else {
+            return;
+        };
+        if let Err(err) = wm.new_selection(ty, mimes) {
+            tracing::warn!(%err, ?ty, "could not hand a Wayland selection to the X server");
+        }
+    }
+
+    /// Offers the Wayland clipboard to the X server again when an X11 window
+    /// takes the keyboard.
+    ///
+    /// Some X11 clients read the clipboard when they are *told* it changed
+    /// rather than when somebody pastes -- Wine above all. The telling happens
+    /// when a Wayland client copies, which is necessarily while that Wayland
+    /// client has focus, and at that moment `allow_selection_access` refuses
+    /// them: so they read nothing and cache an empty clipboard, and pasting
+    /// later produces nothing with no indication why. Announcing it again once
+    /// an X11 window is focused gives them a second notification at a moment
+    /// they are allowed to act on. Hyprland does the same thing for the same
+    /// reason.
+    ///
+    /// Only on the way in. Re-announcing on every pass would reset the X
+    /// selection owner continuously, and a client that watches ownership would
+    /// see a storm of changes that mean nothing.
+    fn offer_selection_to_new_x11_focus(&mut self) {
+        let has_focus = self.focused_x11_xwm().is_some();
+        let took_focus = has_focus && !self.x11_had_focus;
+        self.x11_had_focus = has_focus;
+        if !took_focus {
+            return;
+        }
+        for ty in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
+            if let Some(mimes) = self.wayland_selection.get(ty) {
+                self.announce_to_x11(ty, Some(mimes));
+            }
         }
     }
 
@@ -2599,6 +2686,40 @@ impl smithay::wayland::idle_inhibit::IdleInhibitHandler for Irontile {
 
 impl SelectionHandler for Irontile {
     type SelectionUserData = ();
+
+    /// A Wayland client has taken the selection; tell the X server.
+    ///
+    /// The other half of the clipboard, and the half that was missing. An X11
+    /// client does not ask the compositor for the clipboard, it asks the X
+    /// server who owns `CLIPBOARD` -- so unless something claims that
+    /// ownership on the Wayland client's behalf, there is nothing on the X
+    /// side to convert and a paste into an X11 program finds an empty
+    /// selection. The thing that can claim it is the window manager, and this
+    /// is the only place that knows a Wayland client just copied something.
+    ///
+    /// `None` means the selection was given up rather than replaced, which is
+    /// passed along as such: the ownership is dropped instead of being left
+    /// pointing at a source that no longer exists.
+    ///
+    /// Clients that read the clipboard when they are *told* it changed rather
+    /// than when somebody pastes -- Wine, mostly -- are a known gap. They are
+    /// notified here, while focus is still on the Wayland window that copied,
+    /// so `allow_selection_access` refuses them and they cache an empty
+    /// clipboard. The fix is to announce again when focus moves into an X11
+    /// window, which is what Hyprland does; it is not done yet.
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        let mimes = source.map(|source| source.mime_types());
+        // Kept so the same offer can be made again when an X11 window takes
+        // the keyboard, which is when a client that reads on notification is
+        // finally allowed to read it.
+        self.wayland_selection.set(ty, mimes.clone());
+        self.announce_to_x11(ty, mimes);
+    }
 
     /// A Wayland client is pasting something an X11 client owns.
     ///
